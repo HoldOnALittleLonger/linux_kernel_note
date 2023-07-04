@@ -1,0 +1,63 @@
+Linux Kernel note >
+
+  Multiple ways to hook syscall :
+    syscall table hijacking -- The good old way >
+      hooking syscall via syscall table hijacking,this require write access syscall table.
+      the syscall table is a mapping between syscall number and the kernel address of its implementation.
+      but syscall table is write protecting,that is its address in kernel space is read only.
+      
+      CR0 register controls write protecting,if its 16th bit(WP bit) is opened,that is write protecting is enable,
+      so close the bit to disable write protecting.
+
+      the general ways to get sys_call_table :
+        1>  grep /proc/kallsyms | grep -E sys_call_table \| ia32_sys_call_table
+	    the file /proc/kallsyms contains all kernel symbols in kernel space.
+        
+	2>  call function "unsigned long kallsyms_lookup_name(@name)" which is defined in kallsyms.h,
+	    it is used to get address of functions.
+	    but in the newer kernel,this function becomes did not exported,that means can not call it
+	    in kernel code.
+
+	    e.g.
+	      void *sys_call_open = (void *)kallsyms_lookup_name("sys_open");
+	      void *sys_call_table_address = (void *)kallsyms_lookup_name("sys_call_table");
+
+	      set_WP();  /*  disable WP  */
+	      
+	      sys_call_table_address[__NR_open] = (void *)my_sys_open;  /*  change address of sys_open  */
+
+	      set_WP();  /*  enable WP  */
+
+	    value __NR_<syscall_name> is the index of this syscall_name in sys_call_table.
+	    value NR_syscalls is the total number of all syscalls is installed in sys_call_table.
+
+        3>  read /boot/System.map-`uname -r` file to find address of sys_call_table.
+	    this file is produced while compiling kernel,many kernel process read its text to find function's
+	    address.
+	    each line text has format : <address> <flag> <symbol name>
+
+	    but kernel is not recommend read file from kernel space,if have to do,there is some interfaces
+	    to help reading from kernel space :
+	      filp_open
+	      filp_close
+	      vfs_read
+	      vfs_write
+
+	      /*  in newer version  */
+	      kernel_read
+	      kernel_write
+
+	      some symbols is exported with GPL.
+	      !!  vfs_read and vfs_write will test buffer address if it is from user space,that is they are
+	      	  refuse kernel space address.
+		  set_fs() and get_fs() to change behavior of address examining.
+		  e.g.
+		    mm_segment_t old_fs = get_fs();
+		    set_fs(KERNEL_DS);
+		    ...
+		    set_fs(old_fs);
+
+		  #  set_fs() will be abandoned in future.
+		  #  possible value is KERNEL_DS and USER_DS
+  
+
