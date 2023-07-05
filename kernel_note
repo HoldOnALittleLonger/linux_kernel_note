@@ -45,7 +45,7 @@ Linux Kernel note >
 
 	      /*  in newer version  */
 	      kernel_read
-	      kernel_write
+	      kernel_write  /*  kernel_read and kernel_write dont updates loff_t object  */
 
 	      some symbols is exported with GPL.
 	      !!  vfs_read and vfs_write will test buffer address if it is from user space,that is they are
@@ -59,5 +59,53 @@ Linux Kernel note >
 
 		  #  set_fs() will be abandoned in future.
 		  #  possible value is KERNEL_DS and USER_DS
+
+        4>  sys_close -- the brute force method
+	    the sys_close() syscall is exported in older kernels,so there is a method to get sys_call_table,
+	    that is traverse address from sys_close(),if encountered an address that is a void ** pointer and
+	    at the unit index is __NR_close where saved sys_close()'s address,then this void ** pointer is the 
+	    sys_call_table's address.
+	    e.g.
+	      unsigned long addr_sys_close = (unsigned long)sys_close;
+	      unsigned long offset_addr = addr_sys_close;
+	      while (offset_addr < ULLONG_MAX) {
+	              if (((void **)offset_addr)[__NR_close] == addr_sys_close)
+		              return offset_addr;
+		      offset_addr += sizeof(void *);
+	      }
+
+	    dont recommend use this way to find sys_call_table.
+
+    VFS hooking >
+      the newer method to hooking file operation is the VFS hooking.
+      VFS is virtual file-system,it is an abstract layer of file-system.
+      process can accesses files with regardless of underlying file-system via VFS.
+      the primary abstract objects in VFS is :
+        super block object
+	i_node object
+	dentry object
+	file object
+
+	file.f_path(object).dentry(pointer).d_inode(pointer).i_sb(pointer)
+
+	in inode structure,pointer i_op points to a structure which contains some methods to operates file-system.
+	the inode object represents all the information needed by the kernel to manipulate a file or a directory.
+
+	VFS hooking is use customized hook function to replaces the method in i_op object.
+	be careful,must save the original method and hook function must use it to operates target file.
+
+	e.g.
+	  hooks lookup method >
+	    struct file *fp = filp_open(...);
+	    struct inode_operations *orig_inode_op = (struct inode_operations *)fp->f_path.dentry->d_inode->i_op;
+
+	    ...  /*  disable WP  */
+	    orig_inode_op->lookup = lookup_hook;
+	    ...  /*  enable WP  */
+
+        because this way would operates inode information,so all the operations calls to the look_up method to look
+	up file under the directoy which inode associated will call the lookup_hook function.
+	    
+
   
 
