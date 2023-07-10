@@ -106,6 +106,58 @@ Linux Kernel note >
         because this way would operates inode information,so all the operations calls to the look_up method to look
 	up file under the directoy which inode associated will call the lookup_hook function.
 	    
+    The ftrace helper method >
+      ftrace helper library uses kallsyms_lookup_name via kprobe to resolve symbol addresses.
+      e.g.
+	/*  resolving kallsyms_lookup_name address via kprobe  */
+        #include <linux/kprobes.h>
+	static struct kprobe kp = {
+	       .symbol_name = "kallsyms_lookup_name"
+	};
+
+	kallsyms_lookup_name_t kallsyms_lookup_name;
+	register_kprobe(&kp);
+	kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
+	unregister_kprobe(&kp);
+
+	/*  kprobe is kernel probe as debug mechanism  */
+
+      struct ftrace_hook {
+      	     const char *name;  /*  name  */
+	     void *function;    /*  hook  */
+	     void *original;	/*  original  */
+
+	     unsigned long address;  /*  address of original  */
+	     struct ftrace_ops ops;
+      };  /*  ftrace helper in ftrace library  */
+
+      ftrace_ops.func is the callback function and will be called whenever the target syscall gets called.
+      ftrace_ops.flags is flag field used to control behaviors.
+
+      callback function has prototype :
+        void notrace (*callback) (unsigned long ip, unsigned long parent_ip, struct ftrace_ops *ops,
+	     	     		  struct pt_regs *regs);
+
+	@ip : instruction pointer of the function that is being traced.
+	@parent_ip : instruction pointer of the function that called the function being traced.
+	@ops : a pointer to ftrace_ops that was used to register the callback.
+	       this can be used to pass data to the callback via the private pointer.
+	@regs : if the FTRACE_OPS_FL_SAVE_REGS or FTRACE_OPS_FL_SAVE_REGS_IF_SUPPORTED flags are set in the
+	        ftrace_ops structure,then this will be pointing to the pt_regs structure like it would be if
+		an breakpoint was placed at the start of the function where ftrace was tracing.
+		otherwise it either contains garbage,or NULL.
+
+      ftrace_ops.flags is set with FTRACE_OPS_FL_SAVE_REGS | FTRACE_OPS_FL_RECURSION_SAFE | FTRACE_OPS_FL_IPMODIFY,
+      then the original regs values would be saved(*regs) and passed inside callback,turn off ftrace's built-in
+      recursion protection and to notify ftrace for rip modification respectively.
+
+      register ftrace :
+        int register_ftrace_function(struct ftrace_ops *);
+	/*  enable tracing  */
+
+      callback invocated when target syscall is called ->
+      callback set rip to hook function ->
+      hook function start execute
 
   
 
