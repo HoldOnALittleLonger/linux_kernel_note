@@ -1,0 +1,43 @@
+                                                Understanding the Linux Kernel (Third Edition)
+Linux kernel version : 2.6
+
+Chapter 1 : Introducation
+    Linux joins System V Release 4 (SVR4),developed by AT&T.
+    other UNIX OS or UNIX-like OS :
+      4.4 BSD
+      Digital UNIX
+      AIX
+      HP-UX
+      Solaris
+      Mac OS X
+      ...
+
+      (opensource)
+      FreeBSD
+      NetBSD
+      OpenBSD
+      Linux
+      ...
+
+    The common attributes between Linux and well-known commercial Unix kernels :
+      monolithic kernel
+      compiled and statically linked traditional Unix kernels
+      (of course support module for dynamically load and unload)
+      kernel threading
+      multithreaded application support(lightweight process LWP supporting)
+      preemptive kernel
+      multiprocessor support(SMP)
+      filesystem
+
+      streams(but Linux has no analogue to the STREAMS I/O subsystem introduced in SVR4)  
+
+    The advantages of Linux :
+      Linux is cost-free
+      Linux is fully customizable in all its components
+      Linux runs on low-end,inexpensive hardware platforms
+      Linux is powerful
+      Linux developers are excellent programmers
+      The linux kernel can be very small and compact
+      Linux is highly compatible with many common operating systems
+      Linux is well supported
+      
