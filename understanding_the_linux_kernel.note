@@ -40,4 +40,42 @@ Chapter 1 : Introducation
       The linux kernel can be very small and compact
       Linux is highly compatible with many common operating systems
       Linux is well supported
+
+    Basic Operating System Concepts :
+      the operating system must fulfill two main objectives :
+        >  interact with the hardware components,servicing all low-level programmable elements
+	   included in the hardware platform.
+	>  provide an execution environment to the applications that run on the computer system.
+	
+      modern OS does not allow user program interact with hardware directly and forbid them to
+      access arbitrary memory locations.
+      in particular,the hardware introduces at least two different execution modes for the CPU :
+        a nonprivileged mode for user programs
+	a privileged mode for the kernel
+	/*  UNIX calls these
+	 *    User Mode and Kernel Mode
+	 */
+
+    Multiuser Systems :
+      A multiuser system is a computer that is able to concurrently and independently execute several
+      applications belonging to two or more users.
+
+      Concurrently :
+        applications can be active at the same time and contend for various resources such as CPU,memory,
+	hard disks,and so on.
+      Independently :
+        each application can perform its task with no concern for what the applications of the other uses are
+	doing.
+
+      Multiuser operating systems must include several features :
+        >  An authentication mechanism for verifying the user's identify
+	>  A protection mechanism against buggy user programs that could block other applications running 
+	   in the system
+	>  A protection mechanism against malicious user programs that could interfere with or spy on the 
+	   activity of other users
+	>  An accounting mechanism that limits the amount of resource units assigned to each user
+
+      To ensure safe protection mechanisms,operating systems must use the hardware protection associated 
+      with the CPU privileged mode.
+      Unix is a multiuser system that enforces the hardware protection of system resources.
       
