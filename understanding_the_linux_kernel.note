@@ -78,4 +78,69 @@ Chapter 1 : Introducation
       To ensure safe protection mechanisms,operating systems must use the hardware protection associated 
       with the CPU privileged mode.
       Unix is a multiuser system that enforces the hardware protection of system resources.
-      
+
+    Users and Groups :
+      in a multiuser system,each user has a private space on the machine,the operating system must ensure that
+      the private portion of a user space is visible only to its owner.Unix-like system use UserID or UID as
+      user identifier,it is a unique number.
+      to selectively share material with other users,each user is a member of one or more user groups,which 
+      are identified by a unique number called a user group ID.each file is associated with exactly one group.
+      any Unix-like operating system has a special user called root or superuser,the root user can do almost
+      everything,because the operating system does not apply the usual protection mechanism to it.
+
+    Processes :
+      A process can be defined either as "an instance of a program in execution" or  as the "execution context"
+      of a running program.
+      in traditional operating systems,a process executes a single sequence of instructions in an address space;
+      the address space is the set of memory addresses that the process is allowed to reference.
+
+      multiple processes environment :
+        in modern operating system allow processes with multiple execution flows,that is,multiple sequences
+	of instructions executed in the same address space.
+	system that allow concurent active processes are said to be multiprogramming or multiprocessing.
+
+	multiuser systems must enforce an multiple processes environment,but some multiprocessing operating
+	systems are not multiuser.
+
+	it is important to distinguish programs from processes;several processes can execute the same program
+	concurently,while the same process can execute several programs sequentially.
+
+	scheduler is an important system compoent in multiprocessing system,which process should be hold the 
+	CPU to execute is determined by scheduler.
+	
+	preemptable :
+	  some operating systems allow only nonpreemptable processes,which means that the scheduler is invoked
+	  only when a process voluntarily relinquishes the CPU.but process of a multiuser system must be
+	  preemptable.
+
+	  UNIX is a multiuer and multiprocessing operating system with  preemptable processes.
+
+	UNIX-like operating systems adopt a process/kernel model.each process has the illusion that it is the
+	only process on the machine,and it has exclusive access to the operating system services.
+
+    Kernel Architecture :
+      monolithic kernel,each kernel layer is integrated into the whole kernel program and runs in Kernel Mode
+      on behalf of the current process.
+
+      microkernel operating systems demand a very small set of functions from the kernel,generally including a 
+      few synchronization primitives,a simple scheduler,and an interprocess communication mechanism.
+      several system processes that run on top of the microkernel implement other operating system layer functions,
+      like memory allocators,device drivers,and system call handlers.
+
+      comparison between monolithic kernel and microkernel :
+        1>  microkernel is slower than monolithic kernel,because kernel layer communication has a cost.
+	2>  microkernel force the system programmers to adopt a modularized approach,that means microkernel
+	    is very modularized.every relativly kernel layer is independent program that must interact with
+	    the other layers through well-defined and clean software interfaces.
+	3>  microkernel can be easily ported to other architectures fairly easily.all hardware-dependent components
+	    are generally encapsulated in the microkernel code.
+        4>  microkernel tend to make better use of random access memory than monolithic kernel,system processes
+	    that are not implementing needed functionalities might be swapped out or destroyed.
+
+      UNIX and UNIX-like operating system almost satisfy all advantages of microkernel.
+
+      the main advantages of using modules include :
+        >  a modularized approach.
+	>  platform independence
+	>  frugal main memory usage
+	>  no performance penalty
