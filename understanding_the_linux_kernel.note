@@ -144,3 +144,57 @@ Chapter 1 : Introducation
 	>  platform independence
 	>  frugal main memory usage
 	>  no performance penalty
+
+    An Overview of Unix Filesystem :
+      the UNIX operating system design is centered on its filesystem,which has several interesting characteristics.
+
+        Files - A Unix file is an information container structured as a sequence of bytes;the kernel does not
+	      	interpret the contents of a file.
+
+        Hard and Soft Links - A filename included in a directory is called a file hard link,or more simply,a link.
+	     	      	      Soft links also called symbolic links,symbolic links are short files that contain an
+			      arbitrary pathname of another file.
+
+			      Hard links limitations :
+			        it is not possible to create hard links for directories.
+				links can be created only among files included in the same filesystem.
+
+	File Types - File type represent what the file is.
+	     	     Unix files may have one of the following types :
+		       Regular file
+		       Directory
+		       Symbolic link
+		       Block-oriented device file
+		       Character-oriented device file
+		       Pipe and named pipe
+		       Socket
+
+	File Descriptor and Inode - A file descriptor is a number greater than or equal to zero,the number
+	     		    	    associared with a file data structure which represent the file opened by
+				    process.
+				    All information needed by the filesystem to handle a file is included in a 
+				    data structure called an inode.each file has its own inode,which the filesystem
+				    uses to identify the file.
+
+        Access Rights and File Mode - there are three types of access rights :
+	       	      	       	      read
+				      write
+				      execute
+				      /*  access rights occupied nine bits  */
+				      
+				      Three additonal flags :
+				      suid(Set User ID)
+				      sgid(Set Group ID)
+				      sticky - an executable file with the sticky flag set corresponds to request to
+				      	       the kernel to keep the program in memory after its execution terminates.
+
+				      File Mode is a mode mixed Access Rights and Additonal flags.
+
+         File-Handling System Calls -  kernel provide some primitives to user mode to help user interact with actual
+	 	       	      	       file stored in block device.
+				       opening a file - open
+				       accessing an opened file - read write lseek ...
+				       closing a file - close
+				       renaming and deleting a file - rename unlink link ...
+				       
+
