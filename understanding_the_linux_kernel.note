@@ -197,4 +197,73 @@ Chapter 1 : Introducation
 				       closing a file - close
 				       renaming and deleting a file - rename unlink link ...
 				       
+    An Overview of Unix Kernels :
+      Unix kernels provide an execution environment in which applications may run.
+      
+      The Process/Kernel Model - Actually,some CPUs can have more than two execution states,but all standard Unix
+      	  		       	 kernels use only Kernel Mode and User Mode.
+				 A program usually executes in User Mode and switches to Kernel Mode only when requesting
+				 a service provided by the kernel.when the kernel has satisfied the program's request,it
+				 puts the program back in User Mode.the way is system calls.
+				 after sets up parameters of syscall,then executes the hardware-dependent CPU instruction to
+				 switch from User Mode to Kernel Mode.
+				 Unix systems include a few privileged processes called kernel threads with the following
+				 characteristics :
+				   >  they run in Kernel Mode in the kernel address space
+				   >  they do not interact with users,and thus do not require terminal devices
+				   >  they are usually created during system startup and remain alive until the system
+				      is shut down.
+				 Unix kernels do much more than handle system calls;in fact,kernel routines can be actived
+				 in several ways :
+				   >  A process invokes a system call
+				   >  the CPU executing the process signals an exception,which is an unusual condition such as
+				      an invalid instruction.the kernel handles the exception on behalf of the process that 
+				      caused it.
+				   >  A peripheral device issues an interrupt signal to the CPU to notify it of an event such
+				      as a request for attention,a status change,of the completion of an I/O operation.
+				      each interrupt signal is dealt by a kernel program called an interrupt handler.
+				   >  A kernel thread is executed.because it runs in Kernel Mode,the corresponding program
+				      must be considered part of the kernel.
 
+      Process Implementation - To let the kernel manage processes,each process is represented by a process descriptor that
+      	      		       includes information about the current state of the process.
+			       that include :
+			         >  the program counter(PC) and stack pointer(SP) registers
+				 >  the general purpose registers
+				 >  the floating point registers
+				 >  the processor control registers(Processor Status Word) containing information about
+				    the CPU state
+				 >  the memory management registers used to keep track of the RAM accessed by the process
+
+			       When a process is scheduled,then kernel use the former stored information to recover process status,
+			       and set IP to the next instruction.(it also known as PC,process counter,but IP is a instruction
+			       register)
+
+      Reentrant Kernels - All Unix kernels are reentrant.this means that several processes may be executing in Kernel Mode at
+      			  the same time.of course,on uniprocessor systems,only one process can progress,but many can be blocked
+			  in Kernel Mode when waiting for the CPU or the completion of some I/O operation.
+			  reentrant functions : the functions they modify only local variables and do not alter global data 
+			  	    	      	structures.
+			  (reentrant functions,that is how some real-time kernels are implemented)
+			  but kernel can include nonreentrant functions and use locking mechanisms to ensure that only one process
+			  can execute a nonreentrant function at a time.
+
+			  generial kernel control path :
+			    Run process -> Timer interrupt -> Deal with interrupt -> Schedule tasks -> Run process -> ...
+
+			  when one of the following events occurs,the CPU will enter a new path to do something :
+			    >  a process executing in User Mode invokdes a system call.if the service would not be satisfied,
+			       then scheduler pick next process to run,the former process enter sleeping until condition is
+			       satisifed or wake up by a signal.
+			       (system calls is triggered via soft interrupt,on x86,it is "int 0x80")
+			    >  the CPU detects an exception.CPU must starts the execution of a suitable procedure.
+			       after the procedure terminates,CPU return to the path before the exception is detected.
+			    >  a hardware interrupt occurs,and the interrupts enabled.
+			       CPU must starts processing another kernel control path to handle the interrupt.
+			    >  an interrupt occurs while the CPU is running with kernel preemption enabled,and a higher priority
+			       process is runnable.(lower intterupt could be preempted by higher interrupt)
+
+			  three states of CPU current be :
+			    >  running a process in User Mode			(process context)
+			    >  running an exception or a system call handler	(process context)
+			    >  running an interrupt handler	     		(interrupt context)
