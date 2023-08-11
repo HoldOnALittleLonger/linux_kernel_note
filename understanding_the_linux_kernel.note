@@ -267,3 +267,50 @@ Chapter 1 : Introducation
 			    >  running a process in User Mode			(process context)
 			    >  running an exception or a system call handler	(process context)
 			    >  running an interrupt handler	     		(interrupt context)
+
+      Process Address Space - Each process runs in its private address space.A process running in User Mode refers to private stack,
+      	      	      	      data,and code areas.when running in Kernel Mode,the process addresses the kernel data and code areas
+			      and uses another private stack.
+			      reentrant kernel,each kernel control path refers to its own private kernel stack.
+			      sometimes,kernel shares process address space to another same program,certainly that is code area.
+			      but process also can initiativly shares its address space to another different program.(IPC)
+
+      Synchronization and Critical Regions - reentrant kernel requires the use of synchronization.
+      		      	  	   	     if a kernel control path is suspended while acting on a kernel data structure,no other
+					     kernel control path should be allowed to act on the same data structure unless it has
+					     been reset to a consistent state.
+					     critical region :
+					       any section of code that should be finished by each process that begins it before
+					       another process can enter it.
+
+      Kernel preemption disabling - A synchronization mechanism applicable to preemptive kernel consists of disabling kernel 
+      	     			    preemption before entering a critical region and reenabling it right after levaing the region.
+				    nonpreemptability is not enough for multiprocessor systems,because two kernel control paths running
+				    on different CPUs can concurrently access the same data structure.
+
+      Interrupt disabling - Another synchronization mechanism for uniprocessor systems consists of disabling all hardware interrupts
+      			    before entering a critical region and reenabling them right after leaving it.
+			    if critical region is too large,this will down system efficiency;moreover,on a multiprocessor system,
+			    disabling interrupts on the local CPU is not sufficient.
+
+      Semaphores - A semaphore is simply a counter associated with a data structure;it is checked by all kernel threads before they
+      		   try to access the data structure.
+		   each semaphore may be viewed as an object composed of :
+		     an integer variable
+		     a list of waiting processes
+		     two atomic method : down() and up()
+
+		   down() decrease semaphore value,up() increase semaphore value.if its value is less than 0,process have to wait on
+		   it until semaphore is available.
+
+      Spin locks - some kernel data structures should be protected from being concurrently accessed by kernel control paths that run
+      	   	   on different CPUs.in this case,if the time required to update the data structure is short,a semaphore could be very
+		   inefficient.
+		   a spink lock is very similar to semaphore,but it has no process list;when a process finds the lock closed by another
+		   process,it "spins" around repeatedly,executing a tight instruction loop until the lock becomes open.
+		   of course,spin locks are useless in a uniprocessor environment.
+
+      Avoiding deadlocks - the simplest case of deadlock occurs when process p1 gains access to data structure a and process p2 gains
+      	       		   access to b,but p1 then waits for b and p2 waits for a.
+			   Several operating systems,including Linux,avoid this problem by requesting locks in a predefined order.
+
