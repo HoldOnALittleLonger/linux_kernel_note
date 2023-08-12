@@ -314,3 +314,58 @@ Chapter 1 : Introducation
       	       		   access to b,but p1 then waits for b and p2 waits for a.
 			   Several operating systems,including Linux,avoid this problem by requesting locks in a predefined order.
 
+    Signals and Interprocess Communication :
+      Unix signals provide a mechanism for notifying processes of system events.
+      there are two kinds of system events :
+        Asynchronous notifications
+	Synchronous notifications
+
+      POSIX standard defines about 20 different signals,2 of which are user-definable and may be used as a primitive mechanism for
+      communication and synchronization among processes in UserMode.
+
+      process may ignore the signal or asynchronously execute a specified procedure(signal handler),kernel provides the default
+      signal handler for every signal.
+      the default actions are :
+        terminate the process
+	write the execution context and the contents of the address space in a file(coredump) and terminate the process
+	ignore the signal
+	suspend the process
+	resume the process's execution,if it was stopped
+
+      SystemV IPC(AT&T's Unix System V) - semaphores, message queues, shared memory
+      POSIX standard also defined some IPCs - posix semaphores, posix message queues, posix shared memory
+
+    Process Management : 
+      Unix makes a neat distinction between the process and the program it is executing.
+      process is the program which is loadded into memory,it contains the resources all the program needs.
+      the program it is executing,that means it had been loadded and the process is TASK_RUNNING.
+      a parent process is such process it has been called fork() syscall,fork() would create a new process and its resources
+      is duplicated to parent process,the process is child process.
+
+      Copy-On-Write - this approach defers page duplication until the last moment(i.e., until the parent or the child is
+      		      required to write into a page).
+		      the naive implementation of fork() was quite time consuming.
+
+      Zombie process - a process would exited if it called _exit(),and kernel send SIGCHLD to its parent.
+      	     	       the zombie process is such process it had been exited but its status had not been checked,generally,
+		       this work should be completed by its parent.
+		       when the process exited,some resources are still effect and saved in its process address space,until
+		       parent calls wait() systemcall to wait the process,that would destroy all resources.
+		       if parent exited before wait its child,then kernel process init will adopts childs,that procedure calls
+		       wait() periodically on its child processes.
+
+      Process groups and login sessions - modern Unix operating systems introduce the notion of process groups to represent a 
+      	      	     	       		  "job" abstraction.
+					  a job,it might be combined by several processes,and they are in the same process group,
+					  the group leader is the process whose PID is equal to the group ID.
+					  a new process would be inserted into its parent's group initially.
+					  normally,a job is treated as a single entity.
+					  moder Unix kernels also introduce login sessions.
+					  informally,a login session contains all processes that are descendants of the process that
+					  has started a working session on a specific terminal--usually,the first command shell process
+					  created for the user.
+					  all processes in a process group must be in the same login session,a login session may have
+					  several process groups active simultaneously;one of these process groups is always in the
+					  foreground,which means that it has access to the terminal.others are in the background.
+
+      
