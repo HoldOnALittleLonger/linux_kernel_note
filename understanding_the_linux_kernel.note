@@ -368,4 +368,44 @@ Chapter 1 : Introducation
 					  several process groups active simultaneously;one of these process groups is always in the
 					  foreground,which means that it has access to the terminal.others are in the background.
 
-      
+    Memory Management :
+      Virtual memory -  all recent Unix systems provide a useful abstraction called virtual memory.
+      	      	     	virtual memory acts as a logical layer between the application memory requests and the hardware
+			Memory Management Unit.(MMU)
+			its puposes and advantages :
+			  several processes can be executed concurrently.
+			  it is possible to run applications whose memory needs are larget than the available physical memory.
+			  processes can execute a program whose code is only partially loaded in memory.
+			  each process is allowed to access a subset of the available physical memory.
+			  processes can share a single memory image of a library or program.
+			  programs can be relocatable--that is,they can be placed anywhere in physical memory.
+			  programmers can write machine-independent code,because they do not need to be concerned about physical
+			  memory organization.
+			the main ingredient of a virtual memory subsystem is the notion of virtual address space.
+
+      Random access memory usage - all Unix operating systems clearly distinguish between two portions of the
+      	     	    	   	   random access memory(RAM).a few megabytes are dedicated to storing the kernel
+				   image.the remaining portion of RAM is usually handled by the virtual memory
+				   system and is used in three possible ways :
+				     to satisfy kernel requests for buffers,descriptors,and other dynamic kernel data structures.
+				     to satisfy process requests for generic memory areas and for memory mapping of files.
+				     to get better performance from disks and other buffered devices by means of caches.
+
+      Kernel Memory Allocator - the kernel Memory Allocator(KMA) is a subsystem that tries to satisfy the requests fof memory areas
+      	     	    	      	from all parts of the system.
+				a good KMA should have the following features :
+				  it must be fast.actually,this is the most crucial attribute,because it is invoked by all kernel
+				  subsystems.
+				  it should minimize the amount of wasted memory.
+				  it should try to reduce the memory fragmentation problem.
+				  it should be able to cooperate with the other memory management subsystems to borrow and release
+				  page frames from them.
+				all recent Unix operating systems adopt a memory allocation strategy called demand pagine.
+				with demand paging,a process can start program execution with none of its pages in physical memory.
+
+      Caching - a good part of the available physical memory is used as cache for hard disks and other block devices.this is because
+      	      	hard drives are very slow.
+		data read previously from disk and no longer used by any process continue to stay in RAM,and defer writing to disk as
+		long as possible.
+		the sync() system call forces disk synchronization by writing all of the "dirty" buffers into disk.to avoid data loss,
+		all operating systems take care to periodically write dirty buffers back to disk.
