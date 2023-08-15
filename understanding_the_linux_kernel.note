@@ -409,3 +409,15 @@ Chapter 1 : Introducation
 		long as possible.
 		the sync() system call forces disk synchronization by writing all of the "dirty" buffers into disk.to avoid data loss,
 		all operating systems take care to periodically write dirty buffers back to disk.
+
+    Device Drivers :
+      the kernel interacts with I/O devices by means of device drivers.device drivers are included in the kernel and consist of
+      data structures and functions that control one or more devices.
+      each driver interacts with the remaining part of the kernel through a specific interface,this approach has the following
+      advantages :
+        >  device-specific code can be encapsulated in a specific module.
+	>  vendors can add new devices without knowing ther kernel source code,only the interface specifications must be known.
+	>  the kernel deals with all devices in a uniform way and accesses them through the same interface.
+	>  it is possible to write a device driver as a module that can be dynamically loaded in the kernel without requiring
+	   the system to be rebooted.it is also possible to dynamically unload a module that is no longer needed,therefore
+	   minimizing the size of the kernel image strored in RAM.
