@@ -421,3 +421,36 @@ Chapter 1 : Introducation
 	>  it is possible to write a device driver as a module that can be dynamically loaded in the kernel without requiring
 	   the system to be rebooted.it is also possible to dynamically unload a module that is no longer needed,therefore
 	   minimizing the size of the kernel image strored in RAM.
+
+
+Chapter 2 : Memory Addressing
+    Memory Address :
+      the three kinds of addresses on 80x86 microprocessors >
+        1>  logical address
+	    included in the machine language instructions to specify the address of an operand or of an instruction.
+	    this type of address embodies the well-known 80x86 segmented architecture.
+	    each logical address consists of a segment and an offset that denotes the distance from the start of
+	    the segment to the actual address.
+
+	2>  linear address(also known as virtual address)
+	    a signle 32-bit unsigned integer that can be used to address up to 4GB.
+	    linear addresses are usually represented in hexadecimal notation,their values range from
+	    0x00000000 -- 0xffffffff
+
+	3>  physical address
+	    used to address memory cells in memory chips.
+	    they correspond to the electrical signals sent along the address pins of the microprocessor to the memory bus.
+	    they are represented as 32-bit or 36-bit unsigned integers.
+
+      MMU Memory Management Unit,it transforms a logical address into a linear address by means of a hardware circuit called
+      a segmentation unit.
+      Page Unit,it transforms the linear address into a physical address.
+
+      In multiprocessor systems,RAM chips may be accessed concurrently(CPUs share same memory).
+      Memory Arbiter is inserted between the bus and every RAM chip,it is used to ensure serially operations perform.
+      (if the RAM chip is free or it is busy servicing a request by another CPU(in this case,it delay the CPU's request))
+      even uniprocessor systems use memory arbiters,because they include specialized processors called DMA(Direct Memory Access)
+      controllers that operate concurrently with the CPU.
+      (GPU might use DMA zone)
+
+      /*  Memory Arbiter is unvisible to program  */
