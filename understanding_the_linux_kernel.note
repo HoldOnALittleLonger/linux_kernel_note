@@ -454,3 +454,88 @@ Chapter 2 : Memory Addressing
       (GPU might use DMA zone)
 
       /*  Memory Arbiter is unvisible to program  */
+
+    Segmentation in Hardware :
+      (80286 model)
+      Intel microprocessors perform address translation in two different ways called "real mode" and "protected mode".
+
+      Segment selectors and Segmentation registers :
+        a logical address consists of two parts : a segment identifier and an offset that specifies the relative address
+	within the segment.
+
+	segment identifier : a 16-bit field called the segment selector.
+	offset : a 32-bit field associated the segment identifier.
+
+	processor provides six segmentation registers for retrive segment selector quickly :
+	  cs, ss, ds, es, fs, gs
+	program could reuse some segmentation registers,but have to store its contents in memory,and then
+	restore it later.
+
+	cs : code segment register,which points to a segment containing program instructions.
+	ss : stack segment register,which points to a segment containing the current program stack.
+	ds : data segment register,which points to a segment containing global and static data.
+        
+	the remaining three segmentation registers are general purpose and may refer to arbitrary data segments.
+
+	cs register has another important function :
+	  it includes a 2-bit field that specifies the Current Privilege Level(CPL) of the CPU.
+	  value 0 denotes the highest privilege level,value 3 denotes the lowest one.
+	  (Linux only use 0(kernel mode) and 3(user mode))
+
+      Segment Descriptors : 
+        Global Descriptor Table(GDT)
+	Local Descriptor Table(LDT)
+
+	each segment is represented by an 8-byte segment descriptor,they are stored either in GDT or LDT.
+	program is allowed to have its own LDT,if it have to stores some segments besides those stored in GDT.
+
+	gdtr : gdtr control register,it contains the address and size of the GDT in main memory.
+	ldtr : ldtr control register,it contains the address and size of the current LDT in main memory.
+
+	Format of Segment Descriptor : (every 8-byte 64-bit)
+	  Field :
+	    Base - contains the linear address of the first byte of the segment.
+	    G - granularity flags,if it is cleared(0),the segment size is expressed in bytes;otherwise,it is
+	      	expressed in multiples of 4096 bytes.
+	    Limit - holds the offset of the last memory cell in the segment,thus binding the segment length.
+	    S - system flag,if it is cleared(0),the segment is a system segment that stores critical data 
+	      	structures such as the Local Descriptor Table;otherwise it is a normal code or data segment.
+            Type - Characterizes the segment type and its access rights.
+	    DPL - Descriptor Privilege Level,used to restrict accesses to the segment.it represents the minimal
+	    	  CPU privilege level requested for accessing the segment.
+            P - Segment-Present flag,it is equal to 0 if the segment is not stored currently in main memory.
+	      	Linux always sets this flag (bit 47) to 1,because it never swaps out whole segments to disk.
+            D or B - called D or B depending on whether the segment contains code or data.
+	      	     its meaning is slightly different in the two cases,but it is basically set(equal to 1) if the
+		     addresses used as segment offsets are 32 bits long,and it is cleared if they are 16 bits long.
+	    AVL - may be used by the operating system,but it is ignored by Linux.
+
+	  Composing :
+	    0-15 : LIMIT (0-15)
+	    16-31 : BASE (0-15)
+	    32-39 : BASE (16-23)
+	    40-43 : TYPE
+	    44 : S
+	    45-46 : DPL
+	    47 : P
+	    48-51 : LIMIT (16-19)
+	    52 : AVL
+	    53 : none
+	    54 : D or B
+	    55 : G
+	    56-63 : BASE (24-31)
+
+	The Segment Descriptors widely used in Linux :
+	  Code Segment Descriptor -
+	    it may be included either GDT or LDT,the descriptor has the S flag set.
+	  Data Segment Descriptor - 
+	    data segment.included either GDT or LDT,has S flag set.
+	    stack segments are implemented by means of generic data segments.
+	  Task State Segment Descriptor(TSSD) -
+	    task state segment,it is a segment used to save the contents of the processor registers;it can appear
+	    only in the GDT.The corresponding Type field has the value 11 or 9,depending on whether the corresponding
+	    process is currently executing on a CPU.has no S flag.
+	  Local Descriptor Table Descriptor(LDTD) -
+	    a segment containing an LDT;it can appear only in the GDT.
+	    the corresponding Type field has the value 2.has no S flag.
+	    
