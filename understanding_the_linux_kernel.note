@@ -538,4 +538,50 @@ Chapter 2 : Memory Addressing
 	  Local Descriptor Table Descriptor(LDTD) -
 	    a segment containing an LDT;it can appear only in the GDT.
 	    the corresponding Type field has the value 2.has no S flag.
+
+	Fast Access to Segment Descriptors :
+	  80x86 processor provides an additional nonprogrammable register for each of the six programmable segmentation registers.
+	  each nonprogrammable register contains the 8-byte segment descriptor specified by the segment selector contained in the
+	  corresponding segmentation register.
+	  every time a segment selector is loaded in a segmentation register,the corresponding segment descriptor is loaded from
+	  memory into the matching nonprogrammable CPU register.
+
+	    segs1 --> cs  &&  segd1 --> unprogrammable(cs)
+
+	  CPU only need to access GDT or LDT is the time to change the contents of the segmentation registers!
+
+	  segment selector fields :
+	    index - identifies the segment descriptor entry contained in the GDT or in the LDT.
+	    TI    - table indicator,specifies whether the segment descriptor is inclued in the GDT(TI = 0) or
+	    	    in the LDT(TI = 1).
+	    RPL   - requestor privilege level,specifies the current privilege level of the CPU when the corresponding
+	    	    segment selector is loaded in to the cs register;it also may be used to selectively weaken the
+		    processor privilege level when accessing data segments.
+
+          segment descriptor index = GDT + segment selector index field * 8 (every segment descriptor occupy 8-byte)
+
+	  ! the first entry in GDT always set to 0,this ensures that logical address with a null segment selector will be considered
+	    invalid,thus causing a processor exception.
+	  ! maximum of number of segment descriptors in GDT is 8191(2^13 - 1).
+
+	Segmentation Unit :
+	  segmentation unit handle address translation.
+	  translate logical address to linear address : (in : read, out : write)
+	    if register changed,then in segment register
+	    else in nonprogrammable register
+	    ->
+	    if TI == 1,  in LDT(ldtr)
+	    else TI == 0,  in GDT(gdtr)
+	    ->
+	    in index
+	    ->
+	    segment descriptor = index * 8 + GDT
+	    ->
+	    in segment descriptor
+	    ->
+	    in BASE field
+	    ->
+	    linear address = BASE + offset (LIMIT determine the length of the segment)
+
+
 	    
