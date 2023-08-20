@@ -463,6 +463,7 @@ Chapter 2 : Memory Addressing
         a logical address consists of two parts : a segment identifier and an offset that specifies the relative address
 	within the segment.
 
+	Logical Address : (Segment Identifier , Offset)
 	segment identifier : a 16-bit field called the segment selector.
 	offset : a 32-bit field associated the segment identifier.
 
@@ -567,6 +568,8 @@ Chapter 2 : Memory Addressing
 	Segmentation Unit :
 	  segmentation unit handle address translation.
 	  translate logical address to linear address : (in : read, out : write)
+	  /*  logical addres : (composed by) segment identifer, offset  */
+
 	    if register changed,then in segment register
 	    else in nonprogrammable register
 	    ->
@@ -582,6 +585,44 @@ Chapter 2 : Memory Addressing
 	    in BASE field
 	    ->
 	    linear address = BASE + offset (LIMIT determine the length of the segment)
+
+	Segmentation in Linux :
+	  in fact,segmentation and paging do same work,linear address to physical space.
+	  linux prefers paging to segmentation for these reasons :
+	    >  memory management is simpler when all process use the same segment register values,
+	       that is,when they share the same set of linear addresses.
+	    >  one of the design objectives of Linux is portability to a wide range of architectures;
+	       RISC architectures in particular have limited support for segmentation.
+	    /*  linux 2.6 use segmentation only when required by the 80x86 architecture.  */
+
+	  Linux processes running in User Mode use the same pair of segments to address instructions and data.
+	    user code segment AND user data segment (Segment Selector : __USER_CS, __USER_DS /* macros */)
+	  Linux processes running in Kernel Mode use the same pair of segments to address instructions and data.
+	    kernel code segment AND kernel data segment (Segment Selector : __KERNEL_CS, __KERNEL_DS /* macros */)
+
+	  CS means cs register, DS means ds register.
+
+	  all processes either in User Mode or in Kernel Mode,may use the same logical address.
+	  (linear address associated such segment start at 0,and reach the addressing limit of (2^32 - 1))
+
+	  Linux,logical address coincide with linear address.(so all segments start at 0x00000000)
+
+	  about RPL :
+	    when CPL of cs is changed,ds and ss have to correspondingly updated.
+	    e.g.
+	      CPL = 3, ds -> user data segment, ss -> user stack inside user data segment
+	      CPL = 0, ds -> kernel data segment, ss -> kernel stack inside kernel data segment
+
+	    ! When switching from User Mode to Kernel Mode,Linux always makes sure that the 
+	      ss register contains the Segment Selector of the kernel data segment.
+          
+	  when saving a pointer to an instruction or to a data structure,the kernel does not need to store the
+	  Segment Selector component of the logical address,because the ss register contains the current 
+	  Segment Selector.
+	  /*  a function,it has a stack frame.and ss contains the Segment Selector used to get Segment Descriptor
+	   *  of the stack.so a pointer just contains the offset for the Segment Descriptor(in unprogrammable register).
+	   *  in the case for instruction is same,but use the cs register.
+	   */
 
 
 	    
