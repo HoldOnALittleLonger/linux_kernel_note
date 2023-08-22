@@ -624,5 +624,57 @@ Chapter 2 : Memory Addressing
 	   *  in the case for instruction is same,but use the cs register.
 	   */
 
+	The Linux GDT :
+	  uniprocessor : one GDT
+	  multiprocessor : every processor one GDT
 
+	  all GDTs are stored in the "cpu_gdt_table" array,while the addresses and sizes of the GDTs are stored in the 
+	  "cpu_gdt_descr" array.(2.6.34.1,use struct "desc_struct" to represent segment descriptor)
+
+	  each GDT includes 18 segment descriptors and 14 null,unused,or reserved entries.unused entries are inserted
+	  on purpose so that Segment Descriptors usually accessed together are kept in the same 32-byte line of hardware
+	  cache.
+	  the 18 segment descriptors included in each GDT point to the following segments :
+	    >  four user and kernel code and data segments
+	    >  a task state segment(TSS),different for each processor in the system.
+	       the linear address space corresponding to a TSS is a small subset of the linear address space corresponding
+	       to the kernel data segment.
+	       TSS stored in the "init_tss" array.
+	       in particualr :
+	         BASE -> index in init_tss
+		 G = 0 ; if LIMIT = 0xeb (because TSS is 236 byte)
+		 TYPE = 9 || 11
+		 DPL = 0
+	    >  a segment including the default Local Descriptor Table(LDT),usually shared by all processes.
+	    >  three Thread-Local Storage(TLS) segments :
+	         multithreaded applications could make used of up to TLSs containing data local to each thread.
+		 syscall set_thread_area() and get_thread_area() create and release a TLS segment for the
+		 executing process.
+            >  three segments related to Advanced Power Management(APM) :
+	         the BIOS code makes use of segments,so when the Linux APM driver invokes BIOS functions to get
+		 or set the status of APM devices,it may use custom code and data segments.
+            >  five segments related to Plug and Play(PnP) BIOS services.
+	         Linux PnP driver invokes BIOS functions to detect the resources used by PnP devices.
+		 (custom data and data segments).
+	    >  a special TSS used by the kernel to handle "Double fault" exceptions.
+
+	  each processor has its own TSS.
+	  a few entries in the GDT may depend on the process that the CPU is executing(i.e. TLS).
+	  in some cases a processor may temporarily modify an entry in its copy of the GDT(i.e. invoke APM's BIOS procedure).
+
+	The Linux LDTs :
+	  most Linux User Mode applications do not make use of a Local Descriptor Table.
+	  thus,kernel defines a default LDT to be shared by most processes,it is stored in the "default_ldt" array.
+	  default_ldt includes five entries,and two of them are used by kernel effectively :
+	    a call gate for iBCS executables;
+	    a call gate for Solaris/x86 executables;
+
+	  /*  Call gate is a mechanism provided by 80x86 to change CPU privilege while invoking a predefined function */
+
+	  process may require to set up their own LDT,via syscall modify_ldt().(i.e. Wine)
+	  any custom LDT created by modify_ldt() also requires its own segment.
+	  if the CPU is executing a process which has a custom LDT,then the LDT entry in CPU GDT also be changed accordingly.
+
+	  /*  User Mode applications also may allocate new segments by means of modify_ldt()  */
+	  /*  kernel never use these segments and do not keep track of the corresponding Segment Descriptor  */
 	    
