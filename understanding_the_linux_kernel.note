@@ -677,4 +677,94 @@ Chapter 2 : Memory Addressing
 
 	  /*  User Mode applications also may allocate new segments by means of modify_ldt()  */
 	  /*  kernel never use these segments and do not keep track of the corresponding Segment Descriptor  */
+
+    Paging in Hardware :
+      the paging unit translates linear address into physical ones,it must to check the requested access type against the
+      access rights of the linear address.if the memory access is not valid,it generates a Page Fault Exception.
+
+      linear addresses are grouped in fixed-length intervals called page :
+        contiguous linear addresses within a page are mapped into contiguous physical addresses.
+	in this way,kernel can specify the physical address and the access rights of a page instead
+	of those of all the linear addresses included in it.
+
+      page unit thinks of all RAM as partitioned into fixed-length page frames(or physical pages),each page frame contains a page.
+      a page frame is a constituent of main memory,and hence it is a storage area.
+      
+      ! the data structures that map linear to physical addresses are called page tables,they are stored in memory and kernel will
+      	initializes them before enabling page unit.	    
+
+      ! start with 80386,80x86 processors :
+      	  if cr0.PG = 1,enable page;
+	  if cr0.PG = 0,linear addresses are interpreted as physical addresses;
+
+      regular paging :
+        start with 80386,a page handles 4kB memory.
+	32bit linear address : Directory(10bit), Table(10bit), Offset(12bit)
+	      	     	       (most significant) (middle)     (least significant)
+	translation of linear address(based on type of translation table) :
+	  the physical address of the Page Directory in use is stored in a control register named cr3.
+	  get Page Directory from cr3 ->
+	  use Directory field to determine the Page Table associated with the linear address in Page Directory ->
+	  use Table field to determine the Page Frame in the Directory ->
+	  use Offset field to determine the relative position within the Page Frame
+
+	  cr3 { Page Directory address }
+	  Page Directory {
+	    ...
+	    Page Table
+	    Page Table {
+	      ...
+	      Page Frame
+	      Page Frame {
+	        address
+		address
+		...
+	      }
+	    }
+	  }
+
+	  physical address = retrivePageFrame(retrivePageTable(cr3, linear.Directory), linear.Table) + Offset
+
+	  /*  12bit Offset,each page consists of 4kB of data.  */
+	  /*  10bit Directory,so Page Directory include 1024 entries;10bit Table,so Page Table include 1024 entries,
+	   *  so a Page Directory can address up to 1024x1024x4096 = 2^32 memory cells.
+	   */
+
+	the entries of Page Directories and Page Tables have the same structure,each entry includes the following fields :
+	  Present flag :
+	    it = 1,the referred-to page(or Page Table) is contained in main memory;
+	    it = 0,the referred-to page(or Page Table) is not contained in main memory,the remainder bits may be used by OS for
+	    its own purpose;
+	    it = 0 and access physical address via page unit,page unit will stores the linear address in cr2,and generates 
+	    exception 14 : Page Fault
+
+          Field containing the 20 most significant bits of a page frame physical address :
+  	    a page frame has a 4-kB capacity,so its physical address must be multiple of 4096,so the 12 least significant
+	    bits are always equal to 0.
+	    it -> Page Directory,the page frame contains a Page Table;
+	    it -> Page Table,the page frame contains a page of data;
+
+	  Accessed flag :
+	    page unit set each time accesses the corresponding page frame.(page unit never reset it,OS have to do this)
+	    OS may be use it when selecting pages to be swapped out.
+	    
+	  Dirty flag :
+	    Page Table entry only,it is set each time a write operation is performed on the page frame.
+	    page unit never reset it,OS have to do this.
+
+	  Read/Write flag :
+	    contains the access right of the page or of the Page Table.
+	    
+	  User/Supervisor flag :
+	    contains the privilege level required to access the page or Page Table.
+
+	  PCD and PWT flags :
+	    controls the way the page or Page Table is handled by the hardware cache.
+
+	  Page Size flag :
+	    Page Directory entry only,if it = 1,then entry refers to a 2MB- or 4MB-long page frame.
+
+	  Global flag :
+	    Page Table entry only,this flag was introduced in the Pentium Pro to prevent frequently used pages from being
+	    flushed from the TLB cache.it works only if the Page Global Enable(PGE) flag of register cr4 is set.
 	    
