@@ -712,12 +712,12 @@ Chapter 2 : Memory Addressing
 	  Page Directory {
 	    ...
 	    Page Table
-	    Page Table {
+	    Page Table {	/*  10bit Directory as index  */
 	      ...
 	      Page Frame
-	      Page Frame {
+	      Page Frame {      /*  10bit Table as index  */
 	        address
-		address
+		address		/*  12bit Offset as index for addresses in a page frame  */
 		...
 	      }
 	    }
@@ -768,3 +768,24 @@ Chapter 2 : Memory Addressing
 	    Page Table entry only,this flag was introduced in the Pentium Pro to prevent frequently used pages from being
 	    flushed from the TLB cache.it works only if the Page Global Enable(PGE) flag of register cr4 is set.
 	    
+      extended paging :
+        starting with the pentium model,80x86 microprocessors introduce extended paging.
+	extended paging allows page frames to be 4MB.in this case,Page Table is no longer need,thus save memory and 
+	preserve TLB entries.
+
+	extended paging : Directory(10bit), Offset(22bit)
+
+	Page Directory entries for extended paging are the same as for normal paging,except that :
+	  >  the Page Size flag must be set.
+	  >  Only the 10 most significant bits of the 20-bit physical address field are significant.
+
+	extended paging coexists with regular paging;it is enabled by setting the PSE flag of the cr4 processor register.
+
+      Hardware Protection Scheme :
+        only two privilege levels are associated with pages and Page Tables,it is indicated by User/Supervisor field.
+	when User/Supervisor == 0,the page can be addressed only when the CPL is less than 3.
+	when User/Supervisor == 1,the page can always be addressed.
+
+	segmentation has three types of access rights,but only two types of access rights are associated with pages.
+	if Read/Write == 0,the corresponding Page Table or page can only be read;otherwise it can be read and written.
+	(Read Page Directory to get Page Table,read Page Table to get page frame)
