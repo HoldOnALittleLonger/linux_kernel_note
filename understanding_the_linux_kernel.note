@@ -456,7 +456,7 @@ Chapter 2 : Memory Addressing
       /*  Memory Arbiter is unvisible to program  */
 
     Segmentation in Hardware :
-      (80286 model)
+      (80386 model)
       Intel microprocessors perform address translation in two different ways called "real mode" and "protected mode".
 
       Segment selectors and Segmentation registers :
@@ -789,3 +789,27 @@ Chapter 2 : Memory Addressing
 	segmentation has three types of access rights,but only two types of access rights are associated with pages.
 	if Read/Write == 0,the corresponding Page Table or page can only be read;otherwise it can be read and written.
 	(Read Page Directory to get Page Table,read Page Table to get page frame)
+
+      An Example of Regular Paging :
+        a process is allowed to access linear addresses from 0x20000000 - 0x2003ffff.
+	Directory field is 0010000000 for all addresses,
+	Table field contain values in 0000000000 - 0000111111 (0 - 63)
+	Offset field contain values in 000000000000 - 111111111111
+
+	Directory is 0x80 or 128 decimal,so the 129th entry in Page Directory will be selected,
+	the 129th entry contains the physical address of the Page Table of current process.
+	Table is 0 - 63,so all the remaining 1024 - 64(960) entries are filled with zeros,so
+	only the first Page to 63th Page in Page Table is valid.
+	Finally,use Offset to access Page Frame.
+
+	Suppose that the process needs to read the byte at linear address 0x20021406,this address is handled by the paging
+	unit as follows :
+	  1>  use 0x80 to select the 129th entry in Page Directory.
+	  2>  the Table field 0x21 is used to select entry 0x21 of the Page Table.
+	  3>  Finally,the Offset field 0x406 is used to select the byte at offset 0x406 in the desired page frame.
+
+	if process accessed a linear address which is outside to its linear address space,because the address is not in its
+	address space,thus the address's Present flag is 0,cleared,Page Unit will issues an exception.
+	all addresses are not valid for process in its linear address space,Present flag of each address will be cleared.
+	
+	
