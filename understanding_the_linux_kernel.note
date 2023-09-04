@@ -811,5 +811,85 @@ Chapter 2 : Memory Addressing
 	if process accessed a linear address which is outside to its linear address space,because the address is not in its
 	address space,thus the address's Present flag is 0,cleared,Page Unit will issues an exception.
 	all addresses are not valid for process in its linear address space,Present flag of each address will be cleared.
-	
-	
+
+      The Physical Address Externsion (PAE) Paging Mechanism :
+        normal CPU only supports 4GB RAM (from 80386 to the Pentium),which is used 32-bit physical addresses.
+	in pratice,due to the linear address space requirements of User Mode processes,the kernel cannot directly address
+	more than 1GB of RAM.
+	and server needs more than 4GB RAM.
+	Intel introduced a mechanism called Physical Address Extension(PAE)<36-bit physical address> on Pentium Pro processor.
+
+	PAE is actived by setting the Physical Address Externsion flag in the cr4 control register.
+	if PAE is open,then the Page Size flag in page directory entry will set to 1.
+
+	PAE paging mechanism :
+	  >:
+	  the 64 GB of RAM are split into 2^24 distinct page frames,and the physical address field of Page Table entries has
+	  been expanded from 20 to 24 bits.
+	  the Page Table entry size has been doubled from 32bits to 64 bits,as a result,a 4-kB PAE Page Table includes 512
+	  entries instead of 1024.
+
+	  >:
+	  a new level of Page Table called the Page Directory Pointer Table(PDPT) consisting of four 64-bit entries has
+	  been introduced.
+
+	  >:
+	  the cr3 control register contains a 27-bit Page Directory Pointer Table base address field.because PDPTs are stored
+	  in the first 4GB of RAM and aligned to a multiple of 32 bytes,27 bits are sufficient to represent the base address
+	  of such tables.
+
+	  >:
+	  when mapping linear addresses to 4kB pages,the 32 bits of a linear address are interpreted in the following way :
+	    cr3 Points to a PDPT
+	    
+	    bits 31-30
+	      point to 1 of 4 possible entries in PDPT
+
+	    bits 29-21
+	      point to 1 of 512 possible entries in Page Directory
+
+	    bits 20-12
+	      point to 1 of 512 possible entries in Page Table
+
+	    bits 11-0
+	      Offset of 4-kB page
+
+	    linear-address : { PDPT Index(31-30), Page Directory Index(29-21), Page Table Index(20-12), Offset(11-0) }
+
+	  >:
+	  when mapping linear addresses to 2-MB pages(PS flag open),the 32 bits of a linear address are interpreted in
+	  the following way :
+	    cr3 Points to a PDPT
+
+	    bits 31-30
+	      point to 1 of 4 possible entries in PDPT
+
+	    bits 29-21
+	      point to 1 of 512 possible entries in Page Directory
+
+	    bits 20-0
+	      Offset of 2-MB page
+
+	    linear-address : { PDPT Index(31-30), Page Directory Index(29-21), Offset(20-0) }
+
+        once cr3 is set,it is possible to address up to 4 GB of RAM,if we want to address more RAM,we will have to put 
+	a new value in cr3 or change the content of the PDPT.
+	PAE only extend physical address,User Mode processes are still address 4 GB linear address space(still 32 bits).
+	    
+      Paging for 64-bit Architectures : 
+        Paging levels in some 64-bit architectures >
+	  Platform name	      Page size		   address bits		paging levels		linear address splitting
+	  alpha	   	      8kB  		   43	   		3      			10 + 10 + 10 + 13
+	  ia64		      4kB		   39			3			9 + 9 + 9 + 12
+	  ppc64		      4kB		   41			3			10 + 10 + 9 + 12
+	  sh64		      4kB		   41			3			10 + 10 + 9 + 12
+	  x86_64	      4kB		   48			4			9 + 9 + 9 + 9 + 12
+
+	two levels paging :
+	  Page Directory  <level 1>
+	  Page Table	  <level 2>
+
+	  cr3 get Page Directory address.
+	  PD[Directory] -> Page Table
+	  PT[Table] -> Page Frame
+	  PF[Offset] -> page of data
