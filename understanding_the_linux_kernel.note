@@ -893,3 +893,31 @@ Chapter 2 : Memory Addressing
 	  PD[Directory] -> Page Table
 	  PT[Table] -> Page Frame
 	  PF[Offset] -> page of data
+
+      Hardware Cache : 
+        Hardware cache memories were introduced to reduce the speed mismatch between CPU and RAM.
+	they are based on the well-known locality principle,which holds both for programs and data structures.
+	it makes sense to introduce a smaller and faster memory that contains the most recently used code and data.
+	for this purpose,a new unit called the "line" was introduced into the 80x86 architecture.
+
+	DRAM : dynamic RAM
+	SRAM : static RAM,it is more faster than DRAM and it is on-chip
+
+	the cache is subdivided into subsets of lines.
+	there are some different strategy to determine how to store cache :
+	  1>  the cache can be direct mapped,in which case a line in main memory is always stored at the exact
+	      same location in the cache.
+	  2>  the cache is fully associative,meaning that any line in memory can be stored at any location in the cache.
+	  3>  degree N-way set associative,where any line of main memory can be stored in any one of N lines of the cache.
+
+	      	     	   DRAM Main Memory
+	      	     	       |
+	      	     	       v
+	CPU { SRAM cache -> Cache controller <- Paging unit }
+
+	SRAM stores the actual lines of memory.(it is the cache memory)
+	Cache controller stores an array of entries,every entry is the line of the cache memory.
+	Each entry includes a tag and a few flags that describe the status of the cache line,the tag consists of some
+	bits that allow the cache controller to recognize the memory location currently mapped by the line.
+
+	Memory location(Cache memory) physical address : { TAG, SUBSET INDEX, OFFSET }
