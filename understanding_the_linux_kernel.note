@@ -921,3 +921,55 @@ Chapter 2 : Memory Addressing
 	bits that allow the cache controller to recognize the memory location currently mapped by the line.
 
 	Memory location(Cache memory) physical address : { TAG, SUBSET INDEX, OFFSET }
+
+	when accessing a RAM memory cell,the CPU extracts the subset index from the physical address and compares the tags
+	of all lines in the subset with the high-order bits of the physical address.
+	if a line with the same tag as the high-order bits of the address is found,the CPU has a cache hit;otherwise,it
+	has a cache miss.
+
+	when a cache hit occurs,the cache controller behaves differently,depending on the access type :
+	  READ >
+	    controller selects the data from the cache line and transfers it into a CPU register.
+
+	  WRITE >
+	    write-through :
+	      write data into both cache line and mapped RAM.
+
+	    write-back :
+	      just write data into cache line,the controller updates RAM only when the CPU executes an instruction
+	      requiring a flush of cache entries or then a FLUSH hardware signal occurs.
+
+	when a cache miss occurs,the cache line is written to memory,if necessary,and the correct line is fetched from
+	RAM into the cache entry.
+
+	Multiprocessor system :
+	  there must have an additional hardware circuitry to synchronize the cache contents.
+	  whenever a CPU modifies its hardware cache,it must check whether the same data is contained in the other
+	  hardware cache;if so,it must notify the other CPU to update it with the proper value.(cache snooping)
+
+	new model have more cache,L1-cache,L2-cache,L3-cache,etc.
+	linux ignore hardware details,and assumes there is a single cache.
+
+	the CD flag of the cr0 control register is used to enable or diable the cache circuitry.
+	the NW flag,in the same register,specifies whether the write-through or the write-back strategy is used for
+	the caches.
+
+	some processors allow OS associate a different cache management policy with each page frame,that is PCD flag
+	in Page Directory and Page Table;and PWT(Page Write-Through),which specifies whether the write-back or the 
+	write-through strategy must be applied while writing data into the page frame.
+	(Linux default clear these flags)
+
+      Translation Lookaside Buffers(TLB) :
+        80x86 processors include another cache called Translation Lookaside Buffers(TLB) to speed up linear address
+	translation.
+	when a linear address is used for the first time,the corresponding physical address is computed through slow
+	accesses to the Page Tables in RAM.the physical address is then stored in a TLB entry for further accessing.
+	
+	in a multiprocessor system,each CPU has its own TLB,called the local TLB of the CPU.contrary to the hardware
+	cache,these local TLB need not to be synchronized,because processes running on the existing CPUs may associate
+	the same linear address with different physical ones.
+
+	when the cr3 control register of a CPU is modified,the hardware automatically invalidates all entries of the 
+	local TLB,because a new set of page tables is in use and the TLBs are pointing to old data.
+	
+	  
