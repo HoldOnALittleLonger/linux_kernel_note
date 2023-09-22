@@ -971,5 +971,44 @@ Chapter 2 : Memory Addressing
 
 	when the cr3 control register of a CPU is modified,the hardware automatically invalidates all entries of the 
 	local TLB,because a new set of page tables is in use and the TLBs are pointing to old data.
+
+    Paging in Linux :
+      before 2.6.11,linux paging model has three level,
+      starting with 2.6.11,linux paging model has four level.
+      (linux adopts a common paging model that fits both 32-bit and 64-bit architectures.)
+
+      paging level :
+        Page Global Directory
+	Page Upper Directory
+	Page Middle Directory
+	Page Table
+
+	PGD { PUDs }
+	PUD { PMDs }
+	PMD { PTs }
+	PT -> Page Frame (a page frame)
+	
+	cr3 -> Address of PGD
+
+      on 32-bit architecture(no PAE),PUD and PMD fields will be zero.(code still same,so it is work on 64-bit)
+      but kernel keeps a position for the PUD and PMD by setting the number of entries in them to 1 and mapping
+      these two entries into the proper entry of the PGD.
+
+      on 32-bit architecture(PAE),PUD is eliminated.
+      PGD -> 80x86's Page Directory Pointer Table
+      PMD -> 80x86's Page Directory
+      PT  -> 80x86's Page Table
+
+      on 64-bit architecture,three or four levels of paging are used depending on the linear address bit splitting
+      performed by the hardware.
+
+      Linux's handling of processes relies heavily on paging :
+        linear address to physical address,design >
+	  < assign a different physical address space to each process,ensuring an efficient protection against
+	    addressing errors.
+	  < distinguish pages(groups of data) from page frames(physical ddress in main memory),this allows the same
+	    page to be stored in a page frame,then saved to disk and later reloaded in a different page frame,
+	    this is "the basic ingredient" of the virtual memory mechanism.
+      
 	
 	  
