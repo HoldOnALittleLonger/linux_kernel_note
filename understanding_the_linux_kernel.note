@@ -1009,6 +1009,47 @@ Chapter 2 : Memory Addressing
 	  < distinguish pages(groups of data) from page frames(physical ddress in main memory),this allows the same
 	    page to be stored in a page frame,then saved to disk and later reloaded in a different page frame,
 	    this is "the basic ingredient" of the virtual memory mechanism.
-      
+
+      The Linear Address Fields :
+        the macros simplify Page Table handling >
+	  PAGE_SHIFT
+	    specifies the length in bits of the Offset field;
+	    this macro is used by PAGE_SIZE to return the size of the page,finally,
+	    the PAGE_MASK macro yields the value 0xfffff000 and is used to mask all the bits of the Offset field.
+
+	  PMD_SHIFT
+	    the total length in bits of the Offset and Table fields of a linear address;
+	    the logarithm of the size of the area a Page Middle Directory entry can map.
+	    the PMD_MASK macro is used to mask all the bits of the Offset and Table fields.
+	    PAE -> on
+	      PMD_SHIFT = 22 (Table + Offset)
+	      PMD_SIZE = 2^22 (4MB)
+	      PMD_MASK = 0xffc00000
+
+	    PAE -> off
+	      PMD_SHIFT = 21
+	      PMD_SIZE = 2^21 (2MB)
+	      PMD_MASK = 0xffe00000
+
+	    !  large pages do not make use of the last level of page tables,thus LARGE_PAGE_SIZE which yields
+	       the size of a large page,is equal to PMD_SIZE(2PMD_SHIFT)
+	       LARGE_PAGE_MASK is used to mask all the bits of the Offset and Table fields in a large page address,
+	       is equal to PMD_MASK.
+
+	  PUD_SHIFT
+	    determines the logarithm of the size of the area a Page Upper Directory entry can map.
+	    PUD_SIZE macro computes the size of the area mapped by a single entry of the Page Global Directory,
+	    PUD_MASK macro is used to mask all the bits of the Offset,Table,Middle Air,and Upper Air fields.
+
+	  PGDIR_SHIFT
+	    determines the logarithm of the size of the area that a Page Global Directory entry can map.
+      	    PGDIR_SIZE macro computes the size of the area mapped by a single entry of the Page Global Directory,
+	    the PGDIR_MASK macro is used to mask all the bits of the Offset,Table,Middle Air,and Upper Air fields.
+
+	  PTRS_PER_PTE PTRS_PER_PMD PTRS_PER_PUD PTRS_PER_PGD
+	    compute the number of entries in the Page Table,Page Middle Directory,Page Upper Directory,Page Global Directory.
+	    they yield the values 1024, 1, 1, 1024, respectively; (PAE disabled)
+	    they yield the values 512, 512, 1, 4, respectively; (PAE enabled)
+
 	
 	  
