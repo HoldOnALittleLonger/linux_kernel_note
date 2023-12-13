@@ -920,7 +920,7 @@ Chapter 2 : Memory Addressing
 	Each entry includes a tag and a few flags that describe the status of the cache line,the tag consists of some
 	bits that allow the cache controller to recognize the memory location currently mapped by the line.
 
-	Memory location(Cache memory) physical address : { TAG, SUBSET INDEX, OFFSET }
+	The bits of the memory's physical address : { TAG, SUBSET INDEX, OFFSET }
 
 	when accessing a RAM memory cell,the CPU extracts the subset index from the physical address and compares the tags
 	of all lines in the subset with the high-order bits of the physical address.
@@ -1021,13 +1021,13 @@ Chapter 2 : Memory Addressing
 	    the total length in bits of the Offset and Table fields of a linear address;
 	    the logarithm of the size of the area a Page Middle Directory entry can map.
 	    the PMD_MASK macro is used to mask all the bits of the Offset and Table fields.
-	    PAE -> on
-	      PMD_SHIFT = 22 (Table + Offset)
+	    PAE -> off
+	      PMD_SHIFT = 22 (12 Offset + 10 Table)
 	      PMD_SIZE = 2^22 (4MB)
 	      PMD_MASK = 0xffc00000
 
-	    PAE -> off
-	      PMD_SHIFT = 21
+	    PAE -> on
+	      PMD_SHIFT = 21 (12 Offset + 9 Table)
 	      PMD_SIZE = 2^21 (2MB)
 	      PMD_MASK = 0xffe00000
 
@@ -1045,11 +1045,279 @@ Chapter 2 : Memory Addressing
 	    determines the logarithm of the size of the area that a Page Global Directory entry can map.
       	    PGDIR_SIZE macro computes the size of the area mapped by a single entry of the Page Global Directory,
 	    the PGDIR_MASK macro is used to mask all the bits of the Offset,Table,Middle Air,and Upper Air fields.
+	    PAE -> off
+	      PGDIR_SHIFT = 22 (the same value yielded by PMD_SHIFT and by PUD_SHIFT)
+	      PGDIR_SIZE = 2^22 (4MB)
+	      PGDIR_MASK = 0xffc00000
+
+	    PAE -> on
+	      PGDIR_SHIFT = 30 (12 Offset + 9 Table + 9 Middle Air)
+	      PGDIR_SIZE = 2^30 (1GB)
+	      PGDIR_MASK = 0xc0000000
 
 	  PTRS_PER_PTE PTRS_PER_PMD PTRS_PER_PUD PTRS_PER_PGD
 	    compute the number of entries in the Page Table,Page Middle Directory,Page Upper Directory,Page Global Directory.
 	    they yield the values 1024, 1, 1, 1024, respectively; (PAE disabled)
 	    they yield the values 512, 512, 1, 4, respectively; (PAE enabled)
 
+      Page Table Handling :
+        pte_t -> Page Table entry
+	pmd_t -> Page Middle Directory entry
+	pud_t -> Page Upper Directory entry
+	pgd_t -> Page Global Directory entry
+	pgprot_t -> the protection flags associated with a single entry        
+	(64-bit PAE on,32-bit PAE off)
+
+	conversion macros :
+	  pte_t __pte(unsigned int)
+	  pmd_t __pmd(unsigned int)
+	  pud_t __pud(unsigned int)
+	  pgd_t __pgd(unsigned int)
+	  pgprot_t __pgprot(unsigned int)
+
+	  unsigned int pte_val(pte_t)
+	  unsigned int pmd_val(pmd_t)
+	  unsigned int pud_val(pud_t)
+	  unsigned int pgd_val(pgd_t)
+	  /*  reverse casting  */
+
+	macros for RW a page table entry operations :
+	  unsigned pte_none(pte_t)
+	  unsigned pmd_none(pmd_t)
+	  unsigned pud_none(pud_t)
+	  unsigned pgd_none(pgd_t)
+	  /*  return 0 if @arg == 1,return 1 if @arg == 0  */
+
+	  pte_clear(mm, addr, ptep)
+	  pmd_clear(pmd)
+	  pud_clear(pud)
+	  pgd_clear(pgd)
+	  /*  clear an entry of the corresponding page table  */
+	  /*  forbidding a process to use the linear addresses mapped by the page table entry  */
+
+	  static inline pte_t ptep_get_and_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep);
+	  /*  clears a Page Table entry and returns the previous value  */
+
+	  set_pte(ptep, pte)
+	  set_pmd(pmdp, pmd)
+	  set_pud(pudp, pud)
+	  set_pgd(pgdp, pgd)
+	  /*  write a given value into a page table entry  */
+
+	  set_pte_atomic(ptep, pte)
+	  /*  atomic operation  */
+	  /*  if PAE on,it also ensures that the 64-bit value is written atomically  */
+
+	  static inline int pte_same(pte_t, pte_t);
+	  /*  returns 1 if @arg1 == @arg2,specify @arg1.privileges == @arg2.privileges,otherwise retuns 0  */
+
+	  static inline int pmd_large(pmd_t pte);
+	  /*  returns 1 if the Page Middle Directory entry refers to a large page(2MB or 4MB),0 otherwise  */
+
+	  static inline int pmd_bad(pmd_t pmd);
+	  /*  it is used by functions to check Page Middle Directory entries passed as input parameters.
+	   *  returns 1 if the entry points to a bad Page Table :
+	   *    Present flag cleared
+	   *    Read/Write flag cleared
+	   *    Accessed or Dirty cleared
+	   *  0 otherwise.
+	   */
+
+	  static inline int pud_bad(pud_t pud);
+	  static inline int pgd_bad(pgd_t pgd);
+	  /*  these macros always yield 0.  */
+
+	  no pte_bad() macro is defined,because no Present,no Read/Write,no Accessed or no Dirty is legal for
+	  Page Table entry.
+
+	  pte_present(pte_t)
+	  /*  returns 1 if Present == 1 or Page Size == 1,0 otherwise  */
+
+	  Page Size flag in Page Table entries has no meaning for the paging unit of the microprocessor,
+	  but kernel marks Present = 0 and Page Size = 1 for the pages present in main memory but without read,
+	  write,or execute privileges.
+	  any access to such pages will triggers a Page Fault exception because Present is cleared,but kernel
+	  is able to detect that the Page Fault exception is not due to a missing page by checking the value of
+	  Page Size!
+
+	  pmd_present(pmd_t pmd)
+	  /*  returns 1 if the Present == 1,0 otherwise  */
+
+	  pud_present(pud_t pud)
+	  pgd_present(pgd_t pgd)
+	  /*  same as above  */
+
+        query or setting functions for Page Table entry's value of any of the flags :
+	  Page flag reading :
+	    pte_user()	    /*  User/Supervisor  */
+	    pte_read()	    /*  User/Supervisor,pages on the 80x86 processor cannot be protected against reading  */
+	    pte_write()	    /*  Read/Write  */
+	    pte_exec()	    /*  User/Supervisor,pages on the 80x86 processor cannot be protected against code execution  */
+	    pte_dirty()     /*  Dirty  */
+	    pte_young()	    /*  Accessed  */
+	    pte_file()	    /*  Dirty,when the Present is cleared and the Dirty flag is set,the page belongs to a
+	    		     *  non-linear disk file mapping.
+			     */
+
+	  Page flag setting :
+	    mk_pte_huge()   /*  Page Size and Present  */
+	    pte_wrprotect() /*  Read/Write */
+	    pte_rdprotect() /*  User/Supervisor  */
+	    pte_exprotect() /*  User/Supervisor  */
+	    pte_mkwrite()   /*  Read/Write  */
+	    pte_mkread()    /*  User/Supervisor  */
+	    pte_mkexec()    /*  User/Supervisor  */
+	    pte_mkclean()   /*  Dirty  */
+	    pte_mkdirty()   /*  Dirty  */
+	    pte_mkold()	    /*  Accessed  */
+	    pte_mkyoung()   /*  Accessed  */
+	    pte_modify(p, v)	        /*  Sets all access rights in a Page Table entry @p to a specified value @v  */
+	    ptep_set_wrprotect()    	/*  pointer version  */
+	    ptep_set_access_flags() 	/*  if the Dirty == 1,sets the page's access rights to a specified value and
+	    			     	 *  invokes flush_tlb_page()
+				     	 */
+	   ptep_mkdirty()	    	/*  pointer version  */
+	   ptep_test_and_clear_dirty()	/*  like pte_mkclen() but acts on a pointer to a Page Table entry and returns
+	   				 *  the old value of the flag
+					 */
+	   ptep_test_and_clear_young()	/*  like pte_mkold() but acts on a pointer to a Page Table entry and returns 
+	   				 *  the old value of the flag
+					 */
+
+        macros acting on Page Table entries :
+	  pgd_index(addr)     
+	  /*  yields the index of the entry in Page Global Directory that maps the linear address @addr  */
+
+	  pgd_offset(mm, addr)
+	  /*  yields the linear address of the entry in a Page Global Directory that corresponds to the 
+	   *  address @addr,the Page Global Directory is found through a pointer within the memory descriptor
+	   */
+
+	  pgd_offset_k(addr)
+	  /*  yields the linear address of the entry in the master Kernel Page Global Directory that corresponds
+	   *  to the address @addr
+	   */
+
+	  pgd_page(pgd)
+	  /*  yields the page descriptor address of the page frame containing the Page Upper Directory referred to
+	   *  by the Page Global Directory entry @pgd,in a two or three-level paging system,this macro is
+	   *  equivalent to pud_page() applied to the folded Page Upper Directory entry
+	   */
+
+	  pud_offset(pgd, addr)
+	  /*  yields the linear address of the entry in a Page Upper Directory that corresponds to @addr,in a 
+	   *  two- or three-level paging system,this macro yields @pgd,the address of a Page Global Directory entry
+	   */
+
+	  pud_page(pud)
+	  /*  yields the linear address of the Page Middle Directory referred to by the Page Upper Directory entry @pud,
+	   *  in a two- or three-level paging system,this macro is equivalent to pmd_page() applied to the foled
+	   *  Page Middle Directory entry
+	   */
+
+	  pmd_index(addr)
+	  /*  yields the index of the entry in the Page Middle Directory that maps the linear address @addr  */
+	  
+	  pmd_offset(pud, addr)
+	  /*  yields the address of the entry in a Page Middle Directory that corresponds to @addr,
+	   *  in a two- or three-level paging system,it yields @pud,the address of a Page Global Directory entry
+	   */
+
+	  pmd_page(pmd)
+	  /*  yields the page descriptor address of the Page Table referred to by the Page Middle Directory entry @pmd,
+	   *  in a two- or three-level paging system,@pmd is actually an entry of a Page Global Directory
+	   */
+
+	  mk_pte(p, prot)
+	  /*  use a page descriptor @p and a group of access rights @prot to builds the corresponding Page Table entry  */
+
+	  pte_index(@addr)
+	  /*  yields the index of the entry in the Page Table that maps the linear address @addr  */
+
+	  pte_offset_kernel(dir, addr)
+	  /*  yields the linear address of the Page Table that corresponds to the linear address @addr mapped by the 
+	   *  Page Middle Directory @dir,used only on the master kernel page tables
+	   */
+
+	  pte_offset_map(dir, addr)
+	  /*  yields the linear address of the entry in the Page Table that corresponds to the linear address @addr,
+	   *  if the Page Table is kept in high memory,the kernel establishes a temporary kernel mapping,to be released
+	   *  by means of pte_unmap.
+	   *  the macros pte_offset_map_nested() and pte_unmap_nested() are identical,but they use a different temporary
+	   *  kernel mapping.
+           */
+
+	  pte_page(x)
+	  /*  returns the page descriptor address of the page referenced by the Page Table entry @x  */
+
+	  pte_to_pgoff(pte)
+	  /*  extracts from the content @pte of a Page Table entry the file offset corresponding to a page belonging to
+	   *  a non-linear file memory mapping
+	   */
+
+	  pgoff_to_pte(offset)
+	  /*  sets up the content of a Page Table entry for a page belonging to a non-linear file memory mapping  */
+
+        page allocation functions :
+	  pgd_alloc(mm)
+	  /*  allocates a new Page Global Directory;if PAE is on,it also allocates the three children Page Middle Directories
+	   *  that map the User Mode linear addresses.the argument @mm is ignored on the 80x86 architecture.
+	   */
+
+	  pgd_free(pgd)
+	  /*  releases the Page Global Directory at address @pgd;if PAE is on,it also releases the three Page Middle
+           *  Directories that map the User Mode linear addresses
+	   */
+
+	  pud_alloc(mm, pgd, addr)
+	  /*  in a two- or three-level paging system,this function does nothing;it simply returns the linear address of
+	   *  the Page Global Directory entry pgd
+	   */
+
+	  pud_free(x)
+	  /*  in a two- or three-level paging system,this macro does nothing  */
+
+	  pmd_alloc(mm, pud, addr)
+	  /*  defined so generic three-level paging systems can allocate a new Page Middle Directory for the linear address
+	   *  @addr;if PAE is off,the function simply returns the @pud -- that is,the address of the entry in the
+	   *  Page Global Directory;if PAE is on,the function returns the linear address of the Page Middle Directory entry
+	   *  that maps the linear address @addr,the argument cw is ignored
+	   */
+
+	  pmd_free(x)
+	  /*  does nothing,because Page Middle Directories are allocated and deallocated together with their parent
+	   *  Page Global Directory.
+	   */
+
+	  pte_alloc_map(mm, pmd, addr)
+	  /*  returns the address of the Page Table entry corresponding to @addr,if the Page Middle Directory entry is null,
+	   *  the function allocates a new Page Table by invoking pte_alloc_one().
+	   *  if a new Page Table is allocated,the entry corresponding to @addr is initialized and the User/Supervisor is set,
+	   *  if the Page Table is kept in high memory,the kernel establishes a temporary kernel mapping,to be released by
+	   *  pte_unmap().
+	   */
+
+	  pte_alloc_kernel(mm, pmd, addr)
+	  /*  if @pmd associated with the address @addr is null,the function allocates a new Page Table,it then returns the 
+	   *  linear address of the Page Table entry associated with @addr,used only for master kernel page tables
+	   */
+
+	  pte_free(pte)
+	  /*  releases the Page Table associated with the @pte page descriptor pointer  */
+	  
+	  pte_free_kernel(pte)
+	  /*  equivalent to pte_free(),but used for master kernel page tables  */
+
+	  clear_page_range(mmu, start, end)
+	  /*  clears the contents of the page tables of a process from linear address @start to @end by iteratively
+	   *  releasing its Page Tables and clearing the Page Middle Directory entries
+	   */
+
+	  because the Page Table that is supposed to contain it might not exist,in such cases,it is necessary to allocate
+	  a new page frame,fill it with zeros,and add the entry.
+	  if PAE on,the kernel uses three-level paging,when the kernel creates a new Page Global Directory,it also allocates
+	  the four corresponding Page Middle Directories;these are freed only when the parent Page Global Directory is released.
+	  when two or three-level paging is used,the Page Upper Directory entry is always mapped as a single entry within the
+	  Page Global Directory.
 	
 	  
