@@ -1370,6 +1370,11 @@ Chapter 2 : Memory Addressing
 	     totalhigh_pages	--  total number of page frames not directly mapped by the kernel(high memory)
 	     highstart_pfn	--  page frame number of the first page frame not directly mapped by the kernel
 	     highend_pfn	--  page frame number of the last page frame not directly mapped by the kernel
+
+	 /*  under x86,function setup_arch()<kernel/setup.c> invokes setup_memory_map()<kernel/e820.c>,this function
+	  *  will copies the e820 data structure object from &e820 to &e820_saved,and setup_arch() will updates 
+	  *  some of the variables,another will be updated by the functions in the files under mm/ .
+	  */
 	     
 	 /*  linux kernel prefers to skip the first megabyte of RAM to ensure it can never be loaded into groups of
 	  *  noncontiguous page frames.
