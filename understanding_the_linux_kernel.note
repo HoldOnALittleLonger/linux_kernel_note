@@ -1321,3 +1321,58 @@ Chapter 2 : Memory Addressing
 	  Page Global Directory.
 	
 	  
+      Physical Memory Layout : 
+        kernel must build a physical addresses map that specifies which physical address ranges are usable by the kernel and 
+	which are unavailable(hardware device I/O shared memory or BIOS data).
+
+	reserved page frames :
+	  those falling in the unavailable physical address ranges
+	  those containing the kernel's code and initialized data structures
+	(such page frames can never be dynamically assigned or swapped to disk)
+
+	/*  general rule,linux kernel is installed in RAM starting from the physical address 0x00100000,
+	 *  from the second megabyte.
+	 *  the total number of page frames required depends on how the kernel is configured.
+	 */	
+
+        why kernel loaded starting with the second megabyte?
+	:  the PC architecture has several peculiarities that must be taken into account.
+	     PF0 (BIOS data,system hardware configuration detected during POST(Power-On Self Test)).
+	     0x000a0000 -- 0x000fffff are usually reserved to BIOS rountines and to map the internal memory of ISA graphics
+	     cards.
+	     additional page frames within the first megabyte may be reserved by specific computer models.
+
+	in the early stage of the boot sequence,the kernel queries the BIOS and learns the size of the physical memory,
+	later,kernel executes the machine_specific_memory_setup() rountine,which builds the physical address map.
+	(such functions is named default_machine_specific_memory_setup() in arch/x86/kernel/e820.c)
+
+	/*  kernel builds this table on the basis of the BIOS list,if this is available,otherwise the kernel builds the table
+	 *  following the conservative default setup:
+	 *    all page frames with numbers from 0x9f(LOWMEMSIZE()) to 0x100(HIGH_MEMORY) are marked as reserved.
+	 */
+
+	/*  POST stage,BIOS writes information about the system hardware devices into the proper page frames,
+	 *  and initialization stage,kernel will copies such data into the suitable kernel data structures,
+	 *  then consider these page frames usable.
+	 *  BIOS may not provide information for some physical address ranges,in such case,linux kernel assumes
+	 *  such ranges are not usable.
+	 */
+
+	 after machine_specific_memory_setup(),the function setup_memory() will be invoked,it analyzes the table
+	 of physical memory regions and initializes a few variables that describe the kernel's physical memory
+	 layout.
+	   the vairables :  (thest variables are declared in *.c files under the directory mm/)
+	     num_physpages      --  page frame number of the highest usable page frame
+	     totalram_pages 	--  total number of usable page frames
+	     min_low_pfn    	--  page frame number of the first usable page frame after the kernel image in RAM
+	     max_pfn	    	--  page frame number of the last usable page frame
+	     max_low_pfn    	--  page frame number of the last page frame directly mapped by the kernel(low memory)
+	     totalhigh_pages	--  total number of page frames not directly mapped by the kernel(high memory)
+	     highstart_pfn	--  page frame number of the first page frame not directly mapped by the kernel
+	     highend_pfn	--  page frame number of the last page frame not directly mapped by the kernel
+	     
+	 /*  linux kernel prefers to skip the first megabyte of RAM to ensure it can never be loaded into groups of
+	  *  noncontiguous page frames.
+	  *  generally,kernel keeps initialized data structures right after kernel code,and the uninitialized data
+	  *  structures follows it.
+	  */
