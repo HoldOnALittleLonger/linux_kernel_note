@@ -1381,3 +1381,32 @@ Chapter 2 : Memory Addressing
 	  *  generally,kernel keeps initialized data structures right after kernel code,and the uninitialized data
 	  *  structures follows it.
 	  */
+
+      Process Page Tables :
+        two parts of the linear address space of a process :
+	  1>  linear address 0x00000000 -- 0xbfffffff can be addressed either User or Kernel Mode.
+	  2>  linear address 0xc0000000 -- 0xffffffff can only be addressed in Kernel Mode.
+
+	macro PAGE_OFFSET yields value 0xc0000000,this is the offset in the linear address space of a process
+	where the kernel lives.
+	(in some cases,the process is running in Kernel Mode maybe need to access the linear address space of 
+	 User Mode for retrieve or store data.)
+
+	!  the content of the first entries of the Page Global Directory that map linear address lower than
+	   0xc0000000(768 entries with PAE disabled,3 entries with PAE enabled),depends on the specific process.
+
+      Kernel Page Tables :
+        the kernel maintains a set of page tables for its own use,rooted at a so-called master kernel Page Global
+	Directory.
+	after these page tables were initialized,they will never be directly accessed by any process or kernel thread.
+	(the highest entries of the master kernel Page Global Directory are the reference model for the corresponding
+	 entries of the Page Global Directories of every regular process in the system.)
+
+	kernel initializes these page tables with two-phase activity :
+	  1>  the kernel creates a limited address space including the kernel's code and data segments,the initial
+	      Page Tables,and 128KB for some dynamic data structures.
+	      the minimal address space is just large enough to install the kernel in RAM and to initialize its core
+	      data structures.
+	  2>  the kernel takes advantage of all of the existing RAM and sets up the page tables properly.
+
+	(right after kernel image loaded,CPU is stil running in real mode,thus,paging is not enabled)
