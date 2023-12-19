@@ -1410,3 +1410,185 @@ Chapter 2 : Memory Addressing
 	  2>  the kernel takes advantage of all of the existing RAM and sets up the page tables properly.
 
 	(right after kernel image loaded,CPU is stil running in real mode,thus,paging is not enabled)
+
+	Provisional kernel Page Tables :
+	  A provisional Page Global Directory is initialized statically during kernel compilation,while the provisonal
+	  Page Tables are initialized by startup_32() assembly function defined in <arch/x86/kernel/head_32.S>.
+
+	  the Provisional Page Global Directory is contained in swapper_pg_dir variable,the Provisional Page Tables
+	  are stored starting from pg0.pg0 is the Page Frame which number is 0,it is the first Page Frame,right after
+	  the end of the kernel's uninitialized data segments(symbol _end).
+
+	  suppose all the limited address space fit in the first 8MB of RAM.there,kernel just required two Page Tables,
+	  but each Page Table is points to a Page Frame,and Page Frame holds one Page,each Page Frame consisting with
+	  a Page size is 4KB(1024(entries) * 2(Page Tables) * 4KB(Page Size) = 8MB).(at this time,PAE is off)
+
+	  for easily addressed both in real mode and protected mode to the 8MB,kernel must create a mapping from
+	  both the linera addresses [0x00000000 -- 0x007fffff] and the linera addresses [0xc0000000 -- 0xc07fffff]
+	  into the physical address [0x00000000 -- 0x007fffff].
+	    linear [0x00000000 -- 0x007fffff] -> [0x00000000 -- 0x007fffff] physical
+	    linear [0xc0000000 -- 0xc07fffff] -> [0x00000000 -- 0x007fffff] physical
+
+	  kernel create the desired mapping by filling all the swapper_pag_dir entries(1024) with zeroes,except for
+	  entries 0, 1, 0x300(768), 0x301(769) . 
+	  entries 0x300 and 0x301 will span all linear addresses between [0xc000000 -- 0xc07fffff].
+	  /*  head_32.S defined swapper_pg_dir :
+	   *    ENTRY(swapper_pg_dir)
+	   *		.fill 1024,4,0	#  .fill repear,size(byte),value
+	   */
+
+	  initialization :
+	    > the address field of entries 0 and 0x300 is set to the physical address of pg0,while the address field
+	      of entries 1 and 0x301 is set to the physical address of the page frame following pg0(it is pg1).
+	    > the Present, Read/Write, User/Supervisor flags are set in all four entries(on -> 1).
+	    > the Accessed, Dirty, PCD, PWD, and Page Size flags are cleared in all four entries(off -> 0).
+
+	  start_32() copies the address of swapper_pg_dir to cr3,and enables paging unit(PG flag of the cr0).
+	  /*  A part of code  */
+	    movl     $swapper_pg_dir-0xc0000000,%eax
+	    movl     $eax,%cr3			#  set he page table pointer
+	    movl     %cr0,%eax			#  get value of cr0
+	    orl	     $0x80000000,%eax		#  open PG
+	    movl     %eax,%cr0			#  write back
+
+	    #  0xc0000000 is the __PAGE_OFFSET
+	    #  addresses in [0x00000000, 0xc00000000) is used for User Mode.
+
+        Final Kernel Page Table :
+	  Final Kernel Page Table when RAM size is less than 896MB >
+	    the final mapping provided by the kernel page tables must transform linear addresses starting
+	    from 0xc0000000 into physical addresses starting from 0.
+
+	    <arch/x86/include/asm/page.h>
+	    #define __pa(x)	__phys_addr((unsigned long)(x))
+	    /*  convert a linear address starting from PAGE_OFFSET to the corresponding physical address  */
+
+	    #define __va(x)    ((void *)((unsigned long)(x) + PAGE_OFFSET))
+	    /*  convert a physical address to the corresponding linear address starting from PAGE_OFFSET  */
+
+	    the master kernel Page Global Directory is still stored in swapper_pg_dir,it is initialized by
+	    the paging_init() which is declared in <arch/x86/include/asm/pgtable_32.h>,and defined in
+	    <arch/x86/mm/init_32.c> with the prototype "void __init paging_init(void);" .
+	    it executes these works :
+	      invoke pagetable_init() to set up the Page Table entries properly;
+	      writes the physical address of swapper_pg_dir in the cr3;
+	      if the CPU supports PAE and if the kernel is compiled with PAE support,sets the PAE flag in
+	      the cr4;
+	      invokes __flush_tlb_all() to invalidate all TLB entries;
+
+	    /*  body of it  */
+	    void __init paging_init(void)
+	    {
+	            pagetable_init();
+		    __flush_tlb_all();
+		    kmap_init();
+		    sparse_init();
+		    zone_sizes_init();
+	    }
+
+	    /*  this routines also unmaps the page at virtual kernel address 0,so
+	     *  that we can trap those pesky NULL-reference erros in the kernel.
+	     */
+
+	    the actions performed by pagetable_init() depend on both the amount of RAM  present and on the CPU
+	    model.(suppose less than 896MB)
+	    /*  the highest 128MB of linear address are left available for several kinds of mapping,the kernel
+	     *  address space left for mapping the RAM is thus 1GB - 128MB = 896MB
+	     */
+
+	    the identity mapping of the first megabytes of physical memory(8MB,the supposed size) built by startup_32()
+	    is required to complete the initialization phase of the kernel,when this mapping is no longer necessary,
+	    the kernel clears the corresponding page table entries by invoking the zap_low_mappings() .
+
+          Final Kernel Page Table when RAM size is between 896MB and 4096MB >
+	    in this case,the RAM can not be mapped entirely into the kernel linear address space.
+	    Linux does a mapping to map a RAM window of 896MB into the kernel linear address space,if a program
+	    need to address other parts of the existing RAM,some other linear address interval must be mapped to
+	    the required RAM,this implies changing the value of some page table entries.
+	    (that is the remaining RAM(4096-896) is left unmapped status and handled by dynamic remapping)
+
+	  Final Kernel Page Table when RAM size is more than 4096MB >
+	    in this case,CPU supports PAE,and kernel is compiled with PAE support.
+	    even PAE is on,linear address is till 32-bit,but physical address is 36-bit.
+	    the main difference with the previous case is that,at this time,three-level paging model is used.
+	    (pgd -> pmd -> pte)
+	    /*  but kernel still directly maps 896MB RAM window  */
+
+	    the setups :
+	      > kernel initializes the first three entries(pgd_index(PAGE_OFFSET) = 3) in the Page Global Directory
+	        corresponding to the user linear address space with the address of an empty page(empty_zero_page).
+	      > kernel sets the fourth entry with the address of a Page Middle Directory(pmd) allocated by
+	        invoking alloc_bootmem_low_pages().
+	      > kernel sets the first 448 entries(896MB / 2MB(PAGE_SIZE)) in the Page Middle Directory(PAE on,512 entries)
+	        are filled with the physical address of the first 896MB of RAM.
+		/*  phys_addr = 0x00000000;
+		 *  for(j = 0; j < PTRS_PER_PMD && phys_addr < max_low_pfn * PAGE_SIZE; ++j) {
+		 *          ...
+		 *	    phys_addr += PTRS_PER_PTE * PAGE_SIZE;  /*  PAE on,512  */
+		 *  }
+		 */
+	      > kernel copies the fourth Page Global Directory entry into the first entry,so as to mirror the mapping
+	      	of the low physical memory in the first 896MB of the linear address space.
+
+		/*  this mapping is required in order to complete the initialization of SMP  */
+		(if these page table entries is no longer neccesary,kernel will call zap_low_mappings() to clears them.)
+
+      
+      Fix-Mapped Linear Address :
+        the initial part of the fourth gigabyte of kernel linear address maps the physical memory of the system,
+	however,at least 128MB of linear addresses are always left available because the kernel uses them to implement
+	noncontiguous memory allocation and fix-mapped linear addresses.
+	(noncontiguous memory allocation is just a special way to dynamically allocate and release pages of memory)
+
+	basically,a fix-mapped linear address is a constant linear address like 0xffffc000 whose corresponding physical
+	address does not have to be the linear address minus 0xc0000000,but rather a physical address set in an arbitrary
+	way.thus,each fix-mapped linear address maps one page frame of the physical memory.
+	fix-mapped linear address is similiar to the linear address that map the first 896MB conceptually,but it can map
+	any physical address,while the mapping established by the linear address in the initial portion of the fourth
+	gigabyte is linear.
+
+	each fix-mapped linear address is represented by a small integer index defined in the enum fixed_addresses 
+	data structure :
+	  <arch/x86/include/asm/fixmap.h>
+	  enum fixed_addresses {
+	          FIX_HOLE,
+		  FIX_VSYSCALL,
+		  FIX_APIC_BASE,
+		  FIX_IO_APIC_BASE_0,
+		  [...]
+		  __end_of_fixed_addresses
+          };
+
+	  fix-mapped linear addresses are placed at the end of the fourth gigabyte of linear addresses,
+	  fix_to_virt() function computes the constant linear address starting from the index.
+	  <arch/x86/include/asm/fixmap.h>
+	    /*  fix_to_virt - computes the constant linear address starting from the index in fixed_addresses.
+	     *  @idx : the index.
+	     *  return - the constant linear address.
+	     *  #  if idx is not in fixed_addresses,then an error "undefined symbol __this_fixmap_does_not_exist"
+	     *	   will be reported by compiler.
+	     */
+	    static __always_inline unsigned long fix_to_virt(const unsigned int idx);
+
+	    /*  set_fixmap - associates a fix-mapped address with a physical address.
+	     *  @idx : the index in fixed_address.
+	     *  @phys : the physical address have to be associated.
+	     */
+	    #define set_fixmap(idx, phys)  __set_fixmap(idx, phys, PAGE_KERNEL)
+
+	    /*  set_fixmap_nocache - nocache version.
+	     *    this function will sets PCD flag of the Page Table entry,thus disabling the hardware cache when
+	     *    accessing the data in the page frame.
+	     */
+	    #define set_fixmap_nocache(idx, phys)  __set_fixmap(idx, phys, PAGE_KERNEL_NOCACHE)
+
+	    /*  clear_fixmap - clear fix-mapped,removes the linking between a fix-mapped linear address
+	     *		       and the physical address.
+	     *  @idx : the index of member in fixed_addresses.
+	     */
+	    #define clear_fixmap(idx)  __set_fixmap(idx, 0, __pgprot(0))
+
+	
+
+	  
+
