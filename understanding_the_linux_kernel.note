@@ -1589,6 +1589,132 @@ Chapter 2 : Memory Addressing
 	    #define clear_fixmap(idx)  __set_fixmap(idx, 0, __pgprot(0))
 
 	
+      Handling the Hardware Cache and the TLB :
+        Handling the hardware cache >
+	  macro L1_CACHE_BYTES yields the size of a cache line in bytes.
+	  <arch/x86/include/asm/cache.h>
+	    #define L1_CACHE_BYTES  (1 << L1_CACHE_SHIFT)
+
+	  to optimize the cahce hit rate,the kernel considers the architecture in making the following decisions :
+	    1>  the most frequently used fields of a data structure are placed at the low offset within the 
+	    	data structure,so they can be cached in the same line.
+            2>  when allocating a large set of data structures,the kernel tries to store each of them in memory
+	    	in such a way that all cache lines are used uniformly.
+
+          #  80x86 microprocessors does cache synchronization automatically,linux need not to care about anymore.
+	     the kernel does provide,however,cache flushing interfaces for processors that does not synchronize caches.
+
+	Handling the TLB >
+	  TLB is used keep records about mapping between linear addresses and physical addresses,
+	  so processors can not synchronize their own TLB cache automatically.(kernel determines if the mapping is invalid)
+
+	  the methods linux provides for TLB synchronization :
+	    <arch/x86/include/asm/tlbflush.h>
+              /*  flush_tlb_all - flushes all TLB entries even refer to global pages.
+	       *  #  typically used when changing the kernel page table entries.
+	       */
+	      #define flush_tlb_all()  __flush_tlb_all()
+
+	      /*  flush_tlb_kernel_range - flushes all TLB entries in a given range of linear addresses,
+	       *  			   even refer to global pages.
+	       *  @start : range start.
+	       *  @end   : range end.
+	       */
+	      static inline void flush_tlb_kernel_range(unsigned long start, unsigned long end);
+
+	      /*  flush_tlb - flushes all TLB entries of the non-global pages owned by the current process.
+	       *  	      (current mm struct TLBs)
+	       */
+	      #define flush_tlb()  __flush_tlb()
+
+	      /*  flush_tlb_mm - flushes all TLB entries of the non-global pages owned by a given process.
+	       *  @mm : a pointer points to a mm_struct object.
+	       *  #  typically used when forking a new process.
+	       */
+	      static inline void flush_tlb_mm(struct mm_struct *mm);
+
+	      /*  flush_tlb_range - flushes the TLB entries corresponding to a linear address interval of a given process.
+	       *  @vma : the virtual memory area of current process.
+	       *  @start : range start.
+	       *  @end : range end.
+	       *  #  typically releasing a linear address interval of a process.
+	       */
+	      static inline void flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
+
+	      /*  flush_tlb_pgtables - flushes the TLBs of a given contiguous subset of page tables of a given process.  */
+	      flush_tlb_pgtables
+	      !  some architecure does not offer such function,i.e. x86.
+	      #  80x86 architecure nothing has to be done when a page table is unlinked from its parent table.
+
+	      /*  flush_tlb_page - flushes the TLB of a single Page Table entry of a given process.
+	       *  @vma : the virtual memory area of the process.
+	       *  @addr : specified address.
+	       *  #  typically used processing a Page Fault.
+	       */
+	      static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr);
+
+          every microprocessor usually offers a far more restricted set of TLB-invalidating assembly language instructions,
+	  Intel microprocessors offers only two TLB-invalidating techniques :
+	    >  all Pentium models automatically flush the TLBs relative to non-global pages when a value is loaded into cr3.
+	    >  in Pentium Pro and later models,the "invlpg" assembly language instruction invalidates a single TLB mapping a
+	       given linear address.
+
+	  Linux macros that exploit such hardware technique :
+	    <arch/x86/include/asm/tlbflush.h>
+	      /*  __flush_tlb - rewrites cr3 register back into itself.  */
+	      #define __flush_tlb()  __native_flush_tlb()
+
+	      /*  __flush_tlb_global - disables global pages by clearing the PGE flag of cr4,
+	       *                       rewrites cr3 register back into itself,and sets again the PGE flag.
+	       */
+	      #define __flush_tlb_global()  __native_flush_tlb_global()
+
+	      /*  __flush_tlb_single - executes "invlpg" assembly language instruction with parameter @addr.  */
+	      #define __flush_tlb_single(addr)  __native_flush_tlb_single(addr)
+
+	    #  for SMP : a processor sends a interprocessor interrupt to other to forces synchronizing.
+
+	  kernel avoids TLB flushes :
+	    >  when performing a process switch between two regular processes that use the same set of page tables.
+	    >  when performing a process switch between a regular process and a kernel thread.
+
+	    #  when the kernel assigns a page frame to a User Mode process and stores its physical address into Page Table
+	       entry,it must flush any local TLB entry that refers to the corresponding linear address,on SMP,synchronization
+	       have to be done between CPUs.
+
+	  Lazy TLB mode : (kernel use this strategy to avoid useless TLB flushing in SMP)
+	    the basica idea is :
+	      if several CPUs are using same page tables and a TLB entry must be flushed on all of them,then TLB flushing
+	      may,in some cases,be delayed on CPUs running kernel threads.
+
+	    when some CPUs start running a kernel thread,the kernel sets it into lazy TLB mode.
+	    each CPU in lazy TLB mode does not flush the corresponding entries;however,the CPU remembers that its current
+	    process is running on a set of page tables whose TLBs for the User Mode addresses are invalid.
+	    as soon as the CPU in lazy TLB mode switches to a regular process with a different set of page tables,the
+	    hardware automatically flushes the TLBs,and the kernel sets the CPU back in non-lazy TLB mode.
+	    but,if a CPU in lazy TLB mode switches to a regular process that owns the same set of page tables used by the
+	    previously running kernel thread,then any deferred TLB invalidation must be effectively applied by the kernel.
+
+	    data structures associated to lazy TLB mode :
+	      @cpu_tlbstate variable is a static array of @NR_CPUS structures consisting of an @active_mm filed pointing to the
+	      memory descriptor of the current process,and a @state flag that can assume only two values : TLBSTATE_OK | TLBSTATE_LAZY
+	      each memory descriptor includes a @cpu_vm_mask field that stores the indices of the CPUs that should receive
+	      Interprocessor Interrupts related to TLB flushing.(it is meaningful just for current process is executing)
+	      (the CPU has relative to the active memory,in default,indices of all CPUs of the system will be stored into
+	       @cpu_vm_mask,including the CPU is lazy TLB mode)
+
+	    if a CPU recevied a Interprocess interrupt related to TLB flushing,kernel have to checks @state field of its
+	    @cpu_tlbstate element is equal to TLBSTATE_LAZY,in this case,the kernel refuses to invalidate the TLBs and
+	    removes the CPU index from the @cpu_vm_mask filed of the memory descriptor.
+	    two consequences :
+	      >  as long as the CPU remains in lazy TLB mode,it will note receive other Interprocessor Interrupts related to
+	         TLB flushing.
+
+	      >  if the CPU switches to another process that is using the same set of page tables as the kernel thread that
+	         is being replaced,the kernel invokes __flush_tlb() to invalidate all non-global TLBs of the CPU.
+
+
+
 
 	  
 
