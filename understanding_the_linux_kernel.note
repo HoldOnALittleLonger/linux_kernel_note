@@ -1714,6 +1714,81 @@ Chapter 2 : Memory Addressing
 	         is being replaced,the kernel invokes __flush_tlb() to invalidate all non-global TLBs of the CPU.
 
 
+Chapter 3 : Processes
+    processes are often called "tasks" or "threads" in the Linux source code.
+
+    Processes,Lightweight Processes,and Threads :
+      a process is an intance of a program in execution!
+      kernel's point of view :
+        the purpose of a process is to act as an entity to which system resources are allocated.
+
+      multithreaded applications :
+        user programs having many relatively independent execution flows sharing a large portion of the application data
+	structures.
+      kernel's point of view :
+        a multithreaded application was just a normal process.
+
+      "Linux uses lightweight processes to offer better support for multithreaded applications."
+      Basically,two lightweight processes may share some resources,if they were associated.
+
+      NPTL - Native POSIX Thread Library
+      NGPT - Next Generation POSIX Threading Package
+
+      thread groups :
+        in Linux,a thread group is basically a set of lightweight processes that implement a multithreaded application
+	and act as a whole with regards to some system calls such as getpid(),kill(),and _exit().
+
+    Process Descriptor :
+      To manage processes,the kernel must have a clear picture of what each process is doing.
+      <linux/sched.h>
+        struct task_struct;
+	/*  task_struct - linux process descriptor whose fields contain all the information related to a single process.  */
+	/*  some important members :
+	 *    volatile long state;
+	 *    struct thread_info *thread_info;
+	 *    struct mm_struct *mm, *active_mm;
+	 *    struct tty_struct *tty;
+	 *    struct fs_struct *fs;
+	 *    struct files_struct *files;
+	 *    struct signal_struct *signal;
+	 */
+
+    Process State :
+      the @state field of the process descriptor describes what is currently happening to the process.
+      it consists of an array of flags,each of which describes a possible process state.
+      process states :
+        TASK_RUNNING
+	  -  running on CPU or wating to be executed.
+	TASK_INTERRUPTIBLE
+	  -  suspended(sleeping) until some condition becomes true.
+	TASK_UNINTERRUPTIBLE
+	  -  like TASK_INTERRUPTIBLE,except that delivering a signal to the sleeping process leaves its state unchanged.
+	TASK_STOPPED
+	  -  execution has been stopped.
+	TASK_TRACED
+	  -  execution has been stopped by a debugger.
+	EXIT_ZOMBIE (@state, @exit_state)
+	  -  execution has been terminated,but the parent process has not yet issued a wait4() or waitpid() system call to
+	     return information about the dead process.(status have to be reported)
+	EXIT_DEAD   (@state, @exit_state)
+	  -  the final state : the process is being removed by the system because the parent process has just issued a wait4()
+	     or waitpid() system call for it.(status had been reported)
+
+      <linux/sched.h>
+        /*  set_task_state - set the task's state.
+	 *  @tsk : a pointer points to the task_struct.
+	 *  @state_value : state value.
+	 */
+        #define set_task_state(tsk, state_value)  set_mb((tsk)->state, (state_value))
+
+	/*  set_current_state - set currently executing task's state.
+	 *  @state_value : state value.
+	 */
+	#define set_current_state(state_value)    set_mb(current->state, (state_value))
+
+	/*  set_mb - enable memory barrier before set value,disable it later.  */
+
+      
 
 
 	  
