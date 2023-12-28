@@ -1788,6 +1788,72 @@ Chapter 3 : Processes
 
 	/*  set_mb - enable memory barrier before set value,disable it later.  */
 
+
+    Identifying a Process :
+      general rule : each execution context that can be independently scheduled must have its own process descriptor,
+      	      	     even lightweight processes.
+      Process ID : Unix-like operating systems allow users to identify processes by means of a number called PID.
+      (task_struct.pid)
+		
+		   /*  by default,the maximum PID number is 32767(PID_MAX_DEFAULT - 1)[32-bit].
+		    *  	  	      	      	  	    4194303[64-bit]
+		    *  for change the maximum PID number dynamically,can write a new value into
+		    *  /proc/sys/kernel/pid_max
+		    */
+      the kernel uses the pidmap_array bitmap to manages PID numbers,which denotes which are the PIDs currently assigned
+      and which are the free ones.
+      /*  32-bit,a page frame contains 32768 bits,so such structure is stored in a single page.
+       *  64-bit,kernel can adds the additional pages to the bitmap,if the PID number is too large.
+       */
+
+      one process one Process ID !
+
+      POSIX 1003.1c : all threads of a multithreaded application must have the same PID.
+      thread groups : the identifier shared by the threads is the PID of the thread group leader,that is,the PID of the
+      	     	      first lightweight process in the group.
+		      (task_struct.tgid)[getpid() retrives the value of this field]
+
+      Process descriptors handling :
+        Processes are dynamic entities,Linux packs two different data structures in a single per-process memory area :
+	  >  thread_info
+	  >  the Kernel Mode process stack
+	the length of this memory area is usually 8kB(2 pages),kernel stores the 8kB memory area in two consecutive page
+	frames with the first page frame aligned to a multiple of 2^13.(turn out to be a problem when littel dynamic memory
+	is available,but kernel could to be configured that use 4kB memory area to stores the stack and thread_info)
+
+	the thread_info structure resides at the begining of the memory area,and the stack grows downward from the end(the end
+	of the memory area) !
+	[  thread_info.task -> task_struct ; task_struct.thread_info -> thread_info  ]
+	/*  Linux task_struct is defined in <linux/sched.h>,it contains a field named "stack" which type is void* ,
+	 *  kernel use this field to assocaited task_struct with thread_info object.
+	 *  macro "#define task_thread_info(task) ((struct thread_info *)(task)->stack)" is used to retrive the
+	 *  thread_info object which associated with current process.
+	 */
+
+	/*  <linux/sched.h>
+	 *    union thread_union {
+	 *            struct thread_info thread_info;
+	 *            unsigned long stack[THREAD_SIZE/sizeof(long)];
+	 *    };  /*  task_struct.stack will points to a thread_union object.  */
+	 *        /*  <arch/x86/include/asm/page_32_types.h>:  #define THREAD_SIZE (PAGE_SIZE << THREAD_ORDER)  */
+	 */
+
+	/*  because the thread_info structure is 52B long,the kernel stack can expand up to 8140B  */
+
+	the kernel uses the alloc_thread_info and free_thread_info macros to allocate and release the memory area storing a
+	thread_info structure and a kernel stack :
+	<kernel/fork.c>
+	  /*  alloc_thread_info - sets thread_info field in struct task_struct.
+	   *  @tsk : the process descriptor.
+	   *  return - NULL or the address of the thread_info object former allocated.
+	   */
+	  static inline thread_info *alloc_thread_info(struct task_struct *tsk);
+
+	  /*  free_thread_info - release the thread_info object.
+	   *  @ti : the pointer points to a thread_info structure object.
+	   */
+	  static inline void free_thread_info(struct thread_info *ti);
+
       
 
 
