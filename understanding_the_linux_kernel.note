@@ -1854,7 +1854,104 @@ Chapter 3 : Processes
 	   */
 	  static inline void free_thread_info(struct thread_info *ti);
 
-      
+      Identifying the current process :
+        the kernel can easily obtain the address of the thread_info structure of the process currently running on a 
+	CPU from the value of the esp register.
+	  8kB thread_union :
+	    the kernel masks out the 13 least significant bits of esp to obtain the base address of the thread_info structure.
+	  4kB thread_union :
+	    the kernel masks out the 12 least significant bits of esp to obtain the base address of the thread_info structure.
+
+	<arch/x86/include/asm/thread_info.h>
+	  /*  current_thread_info - retrive the address of the thread_info object which is owns to the running process.  */
+	  static inline struct thread_info *current_thread_info(void)
+	  {
+	          return (struct thread_info *)(current_stack_pointer & ~(THREAD_SIZE - 1));
+	  }
+
+	the kernel can easily obtain the address of the task_struct structure of the process currently running on a CPU from
+	the macro "current".
+	  /*  this is can be simply achieved by thread_info.task  */
+	  <arch/x86/include/asm/current.h>
+	    /*  get_current - retrive the address of a task_struct object which is owns to the current running process.  */
+	    static __always_inline struct task_struct *get_current(void);	
+	    #define curren get_current()
+
+        advantage of storing the process descriptor with the stack emerges on multiprocessor systems :
+	  the correct current process for each hardware processor can be derived just by checking the stack.
+
+	  /*  earlier versions of Linux did not store the kernel stack and the process descriptor together,instead,they
+	   *  were forced to introduce a global static variable called current to identify the process descriptor of the
+	   *  running process.On multiprocessor systems,it was necessary to define current as an array -- one element for
+	   *  each available CPU.
+	   *  #  Linux 2.6 introduced percpu data,macro "current" will retrives the percpu data for running task.
+	   */
+
+      Doubly linked lists :
+        kernel data structure.
+	<linux/list.h>
+	  struct list_head {
+	          struct list_head *next, *prev;
+	  };	
+	some methods :
+	<linux/list.h>
+	  list_add(n, p)	inserts @n to @p's next.
+	  list_add_tail(n, p)	inserts @n to the tail of the list represented by @p.
+	  list_del(p)	   	deletes an element pointed to by @p.
+	  list_empty(p)		checks if the list specified by the address @p of its head is empty.
+	  list_entry(p, t, m)	returns the address of the data structure of type @t in which the list_head field
+	  		   	that has the name @m and the address @p is included.
+	  list_for_each(p, h)	scans the elements of the list specified by the address @h of the head;in each
+	  		   	iteration,a pointer to the list_head structure of the list element is returned in @p.
+	  list_for_each_entry(p, h, m)
+	  			similar to list_for_each,but returns the address of the data structure embedding the list_head
+				structure rather than the address of the list_head structure itself.
+
+	usage :
+	  struct kobject {
+	  	  ...
+	          struct list_head list;
+		  ...
+	  };
+
+	  struct kobject kobj;
+	  INIT_LIST_HEAD(&kobj.list);
+
+	  struct kobject *new = kmalloc(sizeof(struct kobject), GFP_KERNEL);
+	  if (new) {
+	          list_add(&new->list, &kobj.list);
+	  }
+
+	  ...
+	  
+	  list_for_each_entry(new, &kobj.list, list) {
+	  	  printk(KERN_DEBUG "%p", new);
+	          ...
+	  }
+
+	  ...
+
+	  struct kobject *temp = NULL;
+	  list_for_each_entry_safe(new, temp, &kobj.list, list) {
+	          list_del(&new->list);
+		  kfree(new);
+	  }
+
+	  ...
+
+
+        another doubly linked list : hlist.
+	<linux/list.h>
+	  struct hlist_node {
+	          struct hlist_node *next, **prev;
+	  };
+	  struct hlist_head {
+	          struct hlist_node *first;
+	  };
+
+	methods are similar to list_head's all defined in <linux/list.h>
+
+
 
 
 	  
