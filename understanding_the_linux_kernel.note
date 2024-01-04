@@ -1,5 +1,5 @@
                                                 Understanding the Linux Kernel (Third Edition)
-Linux kernel version : 2.6
+Linux kernel version : 2.6.34.1
 
 Chapter 1 : Introducation
     Linux joins System V Release 4 (SVR4),developed by AT&T.
@@ -2006,6 +2006,94 @@ Chapter 3 : Processes
 	     *  dequeue_task - removes @p from @rq,called when a task is no longer runnable.
 	     */
 
+      Relationships Among Processes :
+        processes created by a program have a parent/child relationship.
+	and the children created by a program have sibling relationships.
+
+	task_struct.real_parent; /*  type task_struct*  */
+	task_struct.parent;	 /*  type task_struct*  */
+	task_struct.children;	 /*  type list_head     */
+	task_struct.sibling;	 /*  type list_head     */
+
+	real_parent : the process which has been created @this,or @init process.
+	parent : current parent,this is the process that must be signaled when the child process terminates.
+	       	 as usual,real_parent == parent,but it may occasionally differ,such as when another process issues a
+		 ptrace() system call requesting that it be allowed to monitor @this process.
+        children : @this process's children.
+	sibling : @this process's siblings.
+
+	task_struct.group_leader;  /*  type task_struct  */
+
+	#  a process can be a leader of a process group or of a login session,it can be a leader of a thread group,and
+	   it can also trace the execution of other processes.
+
+	(task_struct.signal)->leader_pid;	   /*  PID of the group leader  */
+	task_struct.tgid;			   /*  PID of the thread group leader  */
+	tasK_struct.sessionid;			   /*  ID of session associated now  */
+	task_struct.ptrace_children;		   /*  the head of a list containing all children being traced by a debugger  */
+						   /*  Linux 2.6 no such field  */
+	task_struct.ptraced;			   /*  a list of tasks this task is using ptrace on  */
+						   /*  Linux 2.6 no ptrace_list field  */
+
+      The pidhash table and chained lists :
+        kernel must be able to derive the process descriptor pointer corresponding to a PID.
+	scanning the process list sequentially and checking the @pid fields of the process descriptors is feasible but rather
+	inefficient.
+	four hash tables are used to speed up such operation :
+	  /*  the reason for multiple hash tables :
+	   *    the process descriptor includes fields that represent different types of PID.
+	   *    each type of PID requires its own hash table.
+	   */
+
+	  task_struct.pids[PIDTYPE_MAX];	/*  type pid_link  */
+
+          [type]         [field]  [introduce]
+	  PIDTYPE_PID    pid      PID of the process
+	  PIDTYPE_TGID 	 tgid     PID of thread group leader process
+	  PIDTYPE_PGID	 pgrp	  PID of the group leader process	/*  Linux 2.6 no such field  */
+	  PIDTYPE_SID    session  PID of the session leader process	/*  Linux 2.6 no such field  */
+	    /*  Linux 2.6,for retrive group leader's PID,use function task_pgrp(struct task_struct *) ,
+	     *  for retrive session leader's PID,use function task_session(struct task_struct *) .
+	     */
+
+	  task_struct.pid;  /*  this field has type pid_t,such type from typedef __kernel_pid_t,
+	  		     *  and __kernel_pid_t is type of int.
+			     */
+	  task_struct.pids; /*  an array of pid_link.
+	  		     *  struct pid_link {
+			     *          struct hlist_node node;
+			     *          struct pid *pid;
+			     *  };
+			     */
+
+          these four hash tables are dynamically allocated during the kernel initialization phase,the size of 
+	  a single hash table depends on the amount of available RAM.
+
+	  Linux 2.6 use find_pid_ns() and find_vpid() to get the pid object.
+	  <linux/pid.h>
+	    /*  find_pid_ns - find the pid in a specified pid_namespace.
+	     *  @nr : pid value.
+	     *  @second-arg : a pointer points to the pid_namespace which is used to find the pid.
+	     *  return - struct pid *,or NULL.
+	     */
+	    extern struct pid *find_pid_ns(int nr, struct pid_namespace *);
+
+	    /*  find_vpid - find the pid in current pid_namespace.  */
+	    extern struct pid *find_vpid(int nr);
+
+	  #define pid_hashfn(x)  hash_long((unsigned long)x, pidhash_shift)
+	  /*  Linux 2.6 no such macro.
+	   *  this macro is used to transform PID into a table index.
+	   *  @pidhash_shift stores the length in bits of a table index.
+	   */
+
+	  /*  hash_long() based on a multiplication of the index by a suitable large number.
+	   *  the magic constant is 0x9e370001(2654404609).
+	   *  unsigned long hash = val * 0x9e370001;
+	   *  0x9e370001 is a prime near to (2^32) * ((square_root(5) - 1) / 2) that can also
+	   *  easily multiplied by additions and bit shifts,because it is equal to 2^31 + 2^29 - 2^25 + 2^22 - 2^19 - 2^16 + 1
+	   */
+	   
 
 	  
 
