@@ -2082,7 +2082,8 @@ Chapter 3 : Processes
 	    extern struct pid *find_vpid(int nr);
 
 	  #define pid_hashfn(x)  hash_long((unsigned long)x, pidhash_shift)
-	  /*  Linux 2.6 no such macro.
+	  /*  Linux 2.6 : defined in <kernel/pid.c>
+	   *  #define pid_hashfn(nr, ns)  hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
 	   *  this macro is used to transform PID into a table index.
 	   *  @pidhash_shift stores the length in bits of a table index.
 	   */
@@ -2093,6 +2094,82 @@ Chapter 3 : Processes
 	   *  0x9e370001 is a prime near to (2^32) * ((square_root(5) - 1) / 2) that can also
 	   *  easily multiplied by additions and bit shifts,because it is equal to 2^31 + 2^29 - 2^25 + 2^22 - 2^19 - 2^16 + 1
 	   */
+
+	  Linux uses chaining to handle colliding PIDs;each table entry is the head of a doubly linked list of colliding
+	  process descriptors.(as usual,the number of processes in the system is far below 32768)
+
+	  the data structures used in the PID hash tables are quite sophisticated,because they must keep track of the 
+	  relationships between the processes.
+	    >  if kernel wants to retrive all processes in a specified thread group,it must finds out all the processes
+	       each tgid field == @tgid_value.
+	       but use @tgid_value to find a process just returns one process descritpor,the thread group leader.
+	       so kernel have to maintains a list of processes for each thread group!
+
+	       the fields of the pid structure :
+	         int nr;  /*  PID number  */
+		 struct hlist_node pid_chain;	/*  hash chain list  */
+		 struct list_head pid_list;	/*  the head of the per-PID list  */
+
+	       Linux 2.6 use another definition of pid structure :
+	         <linux/pid.h>
+		   struct upid {
+		           int nr;
+			   struct pid_namespace	*ns;
+			   struct hlist_node pid_chain;
+		   };  /*  this structure represented the Identifier for the pid structure.  */
+		   struct pid {
+		           atomic_t count;
+			   unsigned int level;
+			   struct hlist_head tasks[PIDTYPE_MAX];  /*  tasks that use this pid  */
+			   struct rcu_head rcu;
+			   struct upid numbers[1];
+		   };
+
+          pid handling functions :
+	    <linux/pid.h>
+	      /*  do_each_pid_task - do-while loop head.  */
+	      #define do_each_pid_task(pid, type, task)
+
+	      /*  @pid : the pid structure pointer.
+	       *  @type : pid type.
+	       *  @task : task_struct pointer used to iterate all tasks in the same pid.
+	       */
+
+	      #define while_each_pid_task(pid, type, task)
+	      /*  while_each_pid_task - do-while loop end.  */
+
+	      /*  Linux 2.6 no such functions  */
+	      #define find_task_by_pid_type(type, nr)
+	      #define find_task_by_pid(nr)
+
+	      /*  Linux 2.6 has these :
+	       *    <linux/sched.h>
+	       *      extern struct task_struct *find_task_by_vpid(pid_t nr);
+	       *      extern struct task_struct *find_task_by_pid_ns(pid_t nr, struct pid_namespace *ns);
+	       *      /*  use pid value or pid value with namespace to find the corresponding task.  */
+	       */
+
+	      /*  attach_pid - attach task with pid.
+	       *  @task : the task pointer.
+	       *  @type : pid type.
+	       *  @pid : the pid attach to.
+	       */
+	      extern void attach_pid(struct task_struct *task, enum pid_type type, struct pid *pid);
+
+	      /*  detach_pid - detach task with pid.
+	       *  @task : the task pointer.
+	       *  @second-arg : the pid type.
+	       *  #  @task will attach to NULL pid structure.
+	       *     and if pid_link[PIDTYPE].pid->tasks[ALL] is empty,then free_pid(pid).
+	       */
+	      extern void detach_pid(struct task_struct *task, enum pid_type);
+
+	      <linux/sched.h>
+	        /*  next_thread - retrive the next thread.
+		 *  @p : the task in the specified thread group.
+		 *  return - next task pointer in the thread group or @p.
+		 */
+	        static inline struct task_struct *next_thread(const struct task_struct *p);
 	   
 
 	  
