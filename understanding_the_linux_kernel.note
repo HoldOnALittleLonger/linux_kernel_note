@@ -2170,7 +2170,129 @@ Chapter 3 : Processes
 		 *  return - next task pointer in the thread group or @p.
 		 */
 	        static inline struct task_struct *next_thread(const struct task_struct *p);
-	   
+
+      How Processes Are Organized :
+        runqueue lists group all processes in a TASK_RUNNING state.
+
+	processes in a TASK_STOPPED,EXIT_ZOMBIE,EXIT_DEAD state are not linked in specific lists.
+	there is no need to group processes in any of these three states.
+
+	processes in a TASK_INTERRUPTIBLE,TASK_UNINTERRUPTIBLE state are subdivided into many classes,
+	each of which corresponds to a specific event.in this case,the process state does not provide enough
+	information to retrive the process quickly,so it is necessary to introduce additional lists of processes,
+	there are called wait queues.
+
+	Wait queues :
+	  wait queues used in kernel particularly for interrupt handling,process synchronization,timing.
+
+	  conditional waits on events :
+	    a process wishing to wait for a specific event places itself in the proper wait queue and
+	    relinquishes control.
+	    therefore,a wait queue represents a set of sleeping processes,which are woken up by the kernel
+	    when some condition becomes true.
+
+	  <linux/wait.h>
+	    typedef struct __wait_queue wait_queue_t;
+	    typedef int (*wait_queue_func_t)(wait_queue_t *wait, unsigned mode, int flags, void *key);
+	    struct __wait_queue {
+	            unsigned int flags;
+            #define WQ_FLAG_EXCLUSIVE	0x01
+		    void *private;			/*  private data,generally stored task_struct address */
+		    wait_queue_func_t func;
+		    struct list_head task_list;
+	    };
+
+	    struct __wait_queue_head {
+	            spinlock_t lock;
+		    struct list_head task_list;
+	    };
+	    typedef struct __wait_queue_head wait_queue_head_t;
+
+	    wait_queue_head_t {
+	            ... -> wait_queue_t.task_list - > task_list -> wait_queue_t.task_list {
+		            ... -> wait_queue_t.task_list -> wait_queue_t.task_list -> wait_queue_t.task_list -> ...
+		    };
+	    };
+
+	  there are two kinds of sleeping processes :
+	    exclusive processes - wait_queue_t.flags == 1 are selectively woken up by the kernel;
+	    nonexlusive processes - wait_queue_t.flags == 0 are always woken up by the kernel when the event occurs.
+
+	    #  two kinds to prevent race for a resource accessing just allow one process on it.
+	       a process waiting for a resource that can be granted to just one process at a time is a typical
+	       exclusive process.
+	       processes waiting for an event that may concern any of them are nonexclusive.
+
+	  Handling wait queues :
+	    <linux/wait.h>
+	      !  use these two macro to initialize a wait queue head object which is declared statically or dynamically.
+
+	      /*  DECLARE_WAIT_QUEUE_HEAD - declare a wait_queue_head_t object statically.  */	    
+	      #define DECLARE_WAIT_QUEUE_HEAD(name)  \
+	              wait_queue_head_t name = __WAIT_QUEUE_HEAD_INITIALIZER(name);
+
+	      extern void __init_waitqueue_head(wait_queue_head_t *q, struct lock_class_key *);
+	      /*  init_waitqueue_head - initialize a wait_queue_head_t object which is dynamically allocated.  */
+	      #define init_waitqueue_head(q) \
+	              do {		     \
+		              static struct lock_class_key __key;	\
+			      __init_waitqueue_head((q), &__key);	\
+		      } while (0)
+
+
+	      !  use these two functions to initialize a wait queue entry with @task or with @wake_up_func.
+
+	      /*  init_waitqueue_entry - initialize a wait_queue element with task @p.
+	       *  @q : the target to be initialized.
+	       *  @p : task pointer.
+	       *  #  @q->flags = 0;
+	       *     @q->private = @p;
+	       *     @q->func = default_wake_function;	/*  for nonexclusive process  */
+	       */
+	      static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p);
+
+	      /*  init_waitqueue_func_entry - initialize @q with @func.
+	       *  @q : the wait_queue_t object's address.
+	       *  @func : the wake up function.
+	       *  #  @q->flags = 0;
+	       *     @q->private = NULL;
+	       *     @q->func = func;
+	       */
+	      static inline void init_waitqueue_func_entry(wait_queue_t *q, wait_queue_func_t func);
+
+
+	      !  use these two macros to put "current" into a wait queue and automatically remove it later.
+
+	      /*  DEFINE_WAIT_FUNC - declare a wait_queue_t object @name and initialize it with @function,
+	       *                     this object's private field will be initialized to "current".
+	       */
+	      #define DEFINE_WAIT_FUNC(name, function)
+	      /*  DEFINE_WAIT - put "current" process into wait queue and automatically remove it at the time
+	       *                it is woken up.
+	       *  #  autoremove_wake_function() will invokes default_wake_function() at first,then remove this
+	       *     element from the wait queue.
+	       */
+	      #define DEFINE_WAIT(name)  DEFINE_WAIT_FUNC(name, autoremove_wake_function)
+
+
+	      !  use these three functions to complete INSERT | INSERT INTO EXCLUSIVE | REMOVE operations.
+
+	      /*  add_wait_queue - insert @wait to @q.
+	       *  @q : the head.
+	       *  @wait : the element.
+	       *  #  for nonexclusive processes.
+	       */
+	      extern void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
+
+	      /*  add_wait_queue_exclusive - insert @wait to @q.
+	       *  #  for exclusive processes.
+	       */
+	      extern void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t *wait);
+
+	      /*  remove_wait_queue - remove @wait from @q.
+	       *  #  this function does not use the @q parameter,but it as an identifier.
+	       */
+	      extern void remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 
 	  
 
