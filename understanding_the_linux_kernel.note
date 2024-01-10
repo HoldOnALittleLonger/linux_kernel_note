@@ -2294,5 +2294,141 @@ Chapter 3 : Processes
 	       */
 	      extern void remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 
+	      !  use this function to check if the wait queue is active.
+
+	      /*  waitqueue_active - check if @q is activing(it is not empty) now.  */
+	      static inline int waitqueue_active(wait_queue_head_t @q);
+
+            Process wishing to wait :
+	    <linux/wait.h>
+	      /*  sleep_on - let "current" sleep on @q and it will enter TASK_UNINTERRUPTIBLE state.  */
+	      extern void sleep_on(wait_queue_head_t *q);
+	      /*  interruptible_sleep_on - "current" will enter TASK_INTERRUPTIBLE state.  */
+	      extern void interruptible_sleep_on(wait_queue_head_t *q);
+
+	      /*  sleep_on_timeout - timer version,@timeout is the maximum time to sleep.
+	       *                     "current" will enter TASK_UNINTERRUPTIBLE state.
+	       *                     if "current" is woken up before timer expire,then
+	       *                     the left time will be returned.
+	       */
+	      extern long sleep_on_timeout(wait_queue_head_t *q, signed long timeout);
+	      /*  interruptible_sleep_on - TASK_INTERRUPTIBLE version.  */
+	      extern long interruptible_sleep_on_timeout(wait_queue_head_t *q, signed long timeout);
+
+	      !  the sleep_on()-like functions cannot be used in the common situation where one has to
+	         test a condition and atomatically put the process to sleep when the condition is not
+		 verified.
+		 they are a well-known source of race conditions,their use is discouraged.
+	         #  sleep_on()-like functions were defined in <kernel/sched.c>.
+		    for sleep_on(),it calls to sleep_on_common(),that function sets "current"'s state to
+		    TASK_UNINTERRUPTIBLE,initializes a wait entry with "current",and insert it into @q,
+		    calls schedule_timeout() with MAX_SCHEDULE_TIMEOUT left current process sleeping.
+
+	      /*  prepare_to_wait - does the prepare works for "current" is going to wait.
+	       *  @q : the wait queue head.
+	       *  @wait : the wait entry.
+	       *  @state : the state "current" will be.
+	       *  #  this function will set "current"'s state to @state at first,then insert @wait
+	       *     into @q.
+	       *  #  this version is defined for nonexclusive process.
+	       */
+	      void prepare_to_wait(wait_queue_head_t *q, wait_queue_t *wait, int state);
+
+	      /*  prepare_to_wait - exclusive version.  */
+	      void prepare_to_wait_exclusive(wait_queue_head_t *q, wait_queue_t *wait, int state);
+
+	      /*  finish_wait - finish "current" waiting.
+	       *  @q : the wait queue head.
+	       *  @wait : the wait entry.
+	       *  #  this function will removes @wait from @q,and sets "current"'s state to
+	       *     TASK_RUNNING(this will happens before removing).
+	       */
+	      void finish_wait(wait_queue_head_t *q, wait_queue_t *wait);
+
+	      Usage for prepare_to_wait_*() and finish_wait() :
+	        #define __wait_event(wq, condition)					\
+		do {			 		      				\
+		        DEFINE_WAIT(__wait);		      				\
+							      				\
+			for (;;) {			      				\
+			        prepare_to_wait(wq, &__wait, TASK_UNINTERRUPTIBLE);	\
+				if (condition)	    	     				\
+				        break;		     				\
+				schedule();		     				\
+			}   	 			      				\
+			finish_wait(wq, &__wait);	      				\
+		} while (0)
+		  
+
+	      /*  wait_event - "current" waiting for @condition gets TRUE.
+	       *  @wq : the wait queue head pointer.
+	       *  @condition : the condition is a C expression.
+	       *  #  "current" will enter TASK_UNINTERRUPTIBLE state.
+	       *     @condition will be checked each time @wq is woken up.
+	       *  #  function wake_up() is used to wake a wait_queue up.
+	       */	      
+	      #define wait_event(wq, condition)		\
+	      do {					\
+	              if (condition)			\
+	                      break;			\
+		      __wait_event(wq, condition);	\
+	      } while (0)
+
+	      /*  wait_event_timeout - timer version.
+	       *                       if "current" is woken up before timer expired,
+	       *                       the left time will be returned.
+	       */
+              #define wait_event_timeout(wq, condition, timeout)
+	      
+	      /*  wait_event_interruptible - TASK_INTERRUPTIBLE version.
+	       *  return - interrupted,returns -ERESTARTSYS;
+	       *           condition got TRUE,returns 0.
+	       */
+	      #define wait_event_interruptible(wq, condition)
+
+
+            Kernel wake up the waiting processes :
+	    <linux/wait.h>
+	      /*  __wake_up* - the main procedure to wake up processes.
+	       *               defined in <kernel/sched.c>
+	       */	    
+	      void __wake_up(wait_queue_head_t *q, unsigned int mode, int nr, void *key);
+	      void __wake_up_locked(wait_queue_head_t *q, unsigned int mode);
+	      void __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr);
+
+	      /*  TASK_UNINTERRUPTIBLE processes.  */
+	      #define wake_up(x)  __wake_up(x, TASK_NORMAL, 1, NULL)
+	      #define wake_up_nr(x, nr)  __wake_up(x, TASK_NORMAL, nr, NULL)
+	      #define wake_up_all(x)  __wake_up(x, TASK_NORMAL, 0, NULL)
+	      #define wake_up_locked(x)  __wake_up_locked((x), TASK_NORMAL)
+
+	      /*  TASK_INTERRUPTIBLE processes.  */
+	      #define wake_up_interruptible(x)  __wake_up(x, TASK_INTERRUPTIBLE, 1, NULL)
+	      #define wake_up_interruptible_nr(x, nr)  __wake_up(x, TASK_INTERRUPTIBLE, nr, NULL)
+	      #define wake_up_interruptible_all(x)  __wake_up(x, TASK_INTERRUPTIBLE, 0, NULL)
+	      #define wake_up_interruptible_sync(x)  __wake_up_sync((x), TASK_INTERRUPTIBLE, 1)
+
+	      !  all macros wakeup all nonexclusive processes.
+	      	 that is the parameter @nr to __wake_up*() functions is 0,just wake up everything;
+		 (includes all nonexclusive processes and all exclusive processes)
+		 if @nr == small + venumber,then wake up all nonexclusive processes and one
+		 exclusive process.(that is what wake_up() to do)
+		 e.g. (code)
+		   if (curr->func(curr, mode, wake_flags, key) &&
+		           (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+	                   break;
+			                                  /*  negative number also is TRUE  */
+
+	      !  TASK_NORMAL is used to wake up TASK_UNINTERRUPTIBLE processes;
+	         TASK_INTERRUPTIBLE is used to wake up TASK_INTERRUPTIBLE processes.
+	      !  '_nr' suffix macros are used to wake up exclusive processes with the given @nr.
+	      	 @nr => @nr_exclusive.
+	      !  '_all' suffix macros will wake up all exclusive processes.
+	      !  '_sync' suffix macro check whether the priority of any of the woken processes is
+	      	 higher than that of the processes currently running in the systems and incoke
+		 schedule() if necessary.(these checks is not made by this macro)
+	      !  '_locked' suffix macro requires the wait_queue_head_t.lock has been held.
+	      
+
 	  
 
