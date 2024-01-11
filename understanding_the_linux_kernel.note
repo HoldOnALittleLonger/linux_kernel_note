@@ -2429,6 +2429,72 @@ Chapter 3 : Processes
 		 schedule() if necessary.(these checks is not made by this macro)
 	      !  '_locked' suffix macro requires the wait_queue_head_t.lock has been held.
 	      
+      
+      Process Resource Limits :
+        each process has an associated set of resource limits,which specify the amount of system resources
+	it can use.
 
-	  
+	<linux/sched.h>
+	  struct signal_struct {
+	          ...
+		  struct rlimit rlim[RLIM_NLIMITS];
+		  ...
+	  };
 
+	  task_struct.signal->rlim;
+
+	<linux/resource.h>
+	  struct rlimit {
+	          unsigned long rlim_cur;  /*  the current resource limit  */
+		  unsigned long rlim_max;  /*  the maximum resource limit  */
+	  };
+
+	!  only the superuser(or,more precisely,a user who has the CAP_SYS_RESOURCE capability) can increase the 
+	   @rlim_max or set the @rlim_cur to a value greater than the corresponding @rlim_max field.
+
+	Kernel use the @index of @rlim member to identify the type of resource-limit.
+	Toltal number of resource-limits in Linux 2.6 is 16,they are defined in <include/asm-generic/resource.h>.
+
+	#define RLIMIT_CPU  0		        /*  if cpu time exceeds,kernel will send SIGXCPU to the process,  */
+	  /*  CPU time in sec  */		/*  then,if the process does not terminate,SIGKILL will be sent.  */
+	#define RLIMIT_FSIZE  1			/*  if process wish to enlarge filesize greater than this limit,  */
+	  /*  maximum filesize  */		/*  kernel will send SIGXFSZ  signal.  */
+	#define RLIMIT_DATA  2			/*  heap size in bytes  */
+	  /*  max data size  */
+	#define RLIMIT_STACK  3
+	  /*  max stack size  */
+	#define RLIMIT_CORE  4			/*  if limit == 0,kernel does not creates core dump file  */
+	  /*  max core file size  */
+
+	#ifndef ...
+	#define RLIMIT_RSS  5
+	  /*  max resident set size  */
+	#define RLIMIT_NPROC  6
+	  /*  max number of processes  */
+	#define RLIMIT_NOFILE  7
+	  /*  max number of open files  */
+	#define RLIMIT_MEMLOCK  8		/*  size of nonswappable memory in bytes  */
+	  /*  max locked-in-memory address space  */
+	#define RLIMIR_AS  9	   	        /*  kernel checks this limit when malloc() was called  */
+	  /*  address space limit  */
+	#define RLIMIT_LOCKS  10
+	  /*  maximum file locks held  */
+	#define RLIMIT_SIGPENDING  11
+	  /*  max number of pending signals  */
+	#define RLIMIT_MSGQUEUE  12
+	  /*  maximum bytes in POSIX mqueues  */
+	#define RLIMIT_NICE  13
+	  /*  max nice prio allowed to raise to  0-39 for nice level 19 .. -20  */
+	#define RLIMIT_RTPRIO  14
+	  /*  maximum realtime priority  */
+	#define RLIMIT_RTTIME  15
+	  /*  timeout for RT tasks in us  */
+	#endif 
+
+	#define RLIMIT_NLIMITS  16
+
+	/*  resource limit value  */
+	#ifndef RLIM_INFINITY
+	#define RLIM_INFINITY  (~0UL)
+	  /*  no user limit is imposed on the corresponding resource  */
+	#endif
