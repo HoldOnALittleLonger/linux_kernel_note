@@ -2616,4 +2616,88 @@ Chapter 3 : Processes
 	       *  registers such as eax,ebx, etc.,which are stored in the Kernel Mode stack.
 	       */
 
+
+        Performing the Process Switch :
+	  A process switch may occur at just one well-defined point :
+	    the schedule() function.(<include/linux/sched.h>, <kernel/sched.c>)
+	    
+	  every process switch consists of two steps :
+	    1>  switching the Page Global Directory to install a new address space.
+	    2>  switching the Kernel Mode stack and the hardware context,which provides all the
+	    	information needed by the kernel to execute the new process,including the CPU registers.
+
+          @prev -> the process been replaced.
+	  @next -> the process being activated.
+
+	  The switch_to macro :
+	    <include/asm-generic/system.h>
+              /*  switch_to - switch previous process to next process.
+	       *  @prev : the previous process,it is often got by "current".
+	       *  @next : the next process switch to.
+	       *  @last : it is an output parameter that specifies a memory location
+	       *  	  in which the macro writes the descriptor address of process C.
+	       *	  (this is done after A resumes its execution)
+	       *	  before the process switching,the macro saves in the eax CPU register
+	       *	  the content of the variable identified by the first input parameter @prev,
+	       *	  after the process switching,when A has resumed its execution,the macro
+	       *	  writes the content of the eax CPU register in the memory location of A
+	       *	  identified by the third output parameter @last.
+	       *  #  this function will call to the architectur based __switch_to()
+	       *     function to accomplishes the primary works,that function is
+	       *     defined in <arch/"model"/asm/process_(32 | 64).h>
+	       */
+	      #define switch_to(prev, next, last)			\
+	              do {						\
+		              ((last) = __switch_to((prev), (next)));	\
+		      } while (0)
+
+	      !  there is another switch_to() function is defined in <arch/x86/include/asm/system.h>,
+	      	 which has introduced the detail for how process switching be executed.
+
+	      figure :
+	        switch_to(A, B, A) {
+		  A {
+		    prev = A
+		    next = B
+		    eax = A
+		    last = A
+		  }
+
+		  B {
+		    prev = B
+		    next = other
+		    eax = A	/*  this register will be updated after function invocation completed
+		    	  	 *  or process switching was occurred.
+				 */
+	            last = A
+		  }
+		}
+		/*  there just one kernel existed,so the code for context switching is same between
+		 *  processes.
+		 */
+		switch_to(C, A, C) {
+		  C {
+		    prev = C
+		    next = A
+		    eax = C
+		    last = C
+		  }
+
+		  A {
+		    prev = A
+		    next = other
+		    eax = C	/*  this register will be updated after function invocation completed
+		    	  	 *  or process switching was occurred.
+				 */
+		    last = C
+		  }
+		}
+
+		!  the process has been switched at the time that @next->thread.esp was loadded into
+		   esp register.
+		   (this operation is take affect when arch_end_context_switch(@next) was called)
+		   the kernel stack of previous process is saved in @prev->thread.esp.
+		   (this operation is accomplished when arch_start_context_switch(@prev) was called)
+	   
+
 	    
