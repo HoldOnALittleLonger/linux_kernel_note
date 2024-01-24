@@ -481,6 +481,8 @@ Chapter 2 : Memory Addressing
 	cs : code segment register,which points to a segment containing program instructions.
 	ss : stack segment register,which points to a segment containing the current program stack.
 	ds : data segment register,which points to a segment containing global and static data.
+	es,fs,gs : these are extra segment registers available for far pointer addressing like video
+		   memory and such.
         
 	the remaining three segmentation registers are general purpose and may refer to arbitrary data segments.
 
@@ -2642,7 +2644,7 @@ Chapter 3 : Processes
 	       *	  after the process switching,when A has resumed its execution,the macro
 	       *	  writes the content of the eax CPU register in the memory location of A
 	       *	  identified by the third output parameter @last.
-	       *  #  this function will call to the architectur based __switch_to()
+	       *  #  this function will call to the architecture based __switch_to()
 	       *     function to accomplishes the primary works,that function is
 	       *     defined in <arch/"model"/asm/process_(32 | 64).h>
 	       */
@@ -2653,6 +2655,23 @@ Chapter 3 : Processes
 
 	      !  there is another switch_to() function is defined in <arch/x86/include/asm/system.h>,
 	      	 which has introduced the detail for how process switching be executed.
+		 the switch_to() in <asm/system.h> is the architecture based switch_to() function,
+		 not the asm-generic version.
+		 for x86,this switch_to() will be called by context_switch() function which is defined
+		 in <kernel/sched.c>.(because <linux/sched.h> includes <asm/systemd.h>)
+		 the primary assembly :
+		   pushfl			#  save eflags
+		   pushl %%ebp			#  save base stack pointer
+		   movl	 %%esp, %[prev_sp]	#  save  stack pointer
+		   movl	 %[next_sp], %%esp	#  restore stack pointer
+		   movl	 $1f, %[prev_ip]	#  save ip
+		   pushl %[next_ip]		#  push ip into stack for ret instruction
+		   __switch_canary		#  macro defined in <asm/system.h>
+		   jmp   __switch_to		#  jump to __switch_to() function
+		 1:	 			#  symbol
+		   popl	 %%ebp			#  restore base stack pointer
+		   popfl 			#  restore eflags
+
 
 	      figure :
 	        switch_to(A, B, A) {
@@ -2700,4 +2719,57 @@ Chapter 3 : Processes
 		   (this operation is accomplished when arch_start_context_switch(@prev) was called)
 	   
 
-	    
+	  The __switch_to() function :
+	    <arch/x86/include/asm/system.h>
+	    <arch/x86/kernel/process_(32 | 64).c>
+
+	      /*  __switch_to - does the bulk of the process switch started by the switch_to() macro.
+	       *  @prev_p : previous task pointer.
+	       *  @next_p : next task pointer.
+	       *  return -  @prev_p.
+	       *  	    switch_to() macro will replaces esp register(ebp was not replaced,it was pushed
+	       *            into the stack of @prev and popped up later) before jmp to __switch_to().
+	       *	    but the arguments of __switch_to() are stored in CPU generic-purpose registers
+	       *	    that is eax(@prev_p) and edx(@next_p),finally,it returns the value in eax register,
+	       *	    so it is @prev_p.
+	       *  #  __attribute__(regparm(3)) should be attached to __switch_to(),but it did not detect such
+	       *     GCC attribute is used.
+	       *     regparm(number) : this attribute just take affect only if x86-32 targers,it tell compiler
+	       *     		       that,store the parameter from number one to @number in CPU registers
+	       *		       eax,edx,ecx(so the maximum @number is 3) to instead store them on stack.
+	       */
+	      __notrace_funcgraph struct task_struct *
+	      __switch_to(struct task_struct *prev_p, struct task_struct *next_p);
+
+	      the works this function does :
+	        /*  @prev_p -> previous task pointer.
+		 *  @prev   -> previous task's thread structure.
+		 *  @next_p -> next task pointer.
+		 *  @next   -> next task's thread structure.
+		 */
+	        1>  get local CPU id and local tss.
+		2>  check if the task @next_p is used math function,if it used and
+		    @next_p->fpu_counter > 5,then set @preload_fpu to true.
+		3>  call to "__unlazy_fpu(prev_p);" this macro optionally save the contents of the FPU,MMX,XMM of
+		    @prev_p.
+		4>  if @preload_fpu is T => prefetch(@next->xstate) .
+		5>  call to "load_sp0(@tss, @next);",load @next->esp0 into @tss->esp0.
+		    any future privilege level change from User Mode to Kernel Mode raised by a sysenter assembly
+		    instruction will copy this address in the esp register.
+		6>  call to "lazy_save_gs(@prev->gs);",this macro is defined through savesegment(gs, (v)),it stores
+		    gs register in the @prev->gs.
+		7>  call to "load_TLS(@next, @cpu);",loads in the Global Descriptor Table of the local CPU the 
+		    Thread-Local Storage segments used by the @next_p process,the Segment Selectors are stored in
+		    @next->tls_array member.
+		8>  restore IOPL if needed.
+		    in normal use,the flags restore in the switch assembly will handle this,but if the kernel
+		    is running virtualized at a non-zero CPL,the popf will not restore flags,so it must be done
+		    in a separate step.
+		9>  handle debug registers and/or IO bitmaps.
+		    if this is necessary,call to "__switch_to_xtra(@prev_p, @next_p, @tss);".
+		10> if @preload_fpu is T => execute clts instruction.
+		11> call to "arch_end_context_switch(@next_p);" to ensure context switching has been completed.
+		12> if @preload_fpu is T => call to "__math_stat_restore();" restore math registers.
+		13> restore gs if needed(if (@prev->gs || @next->gs) lazy_load_gs(@next->gs); ).
+		14> update percpu data via "percpu_write(current_task, @next_p);").
+		15> return @prev_p.
