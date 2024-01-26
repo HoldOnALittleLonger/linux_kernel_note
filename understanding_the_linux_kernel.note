@@ -2773,3 +2773,157 @@ Chapter 3 : Processes
 		13> restore gs if needed(if (@prev->gs || @next->gs) lazy_load_gs(@next->gs); ).
 		14> update percpu data via "percpu_write(current_task, @next_p);").
 		15> return @prev_p.
+
+
+          Saving and Loading the FPU,MMX,XMM registers :
+	    from Intel 80486DX,the arithmetic floating-point unit(FPU) has been integrated into the CPU.the name
+	    'mathematical coprocessor' continues to be used in memory of the days when floating-point computations
+	    were executed by an expensive special-purpose chip.
+	    ESCAPE instructions(for compatible with older models) are instructions with a prefix byte ranging
+	    between 0xd8 -- 0xdf,these instructions act on the set of floating-point registers included in the CPU.
+	    !  if a process is using ESCAPE instructions,the contents of the FPU registers belong to its hardware
+	       context,so they are should be saved and restored later.
+
+	    MMX : new instructions were introduced on Pentium models,supposed to speed up the execution of multimedia
+	    	  applications.
+		  MMX instructions act on the FPU registers.
+		  disadvantage : programmers can not mix FPU instructions and MMX instructions.
+		  advantage    : for OS designer,save the FPU state is to save MMX state.
+		  MMX introduced SIMD(single-instruction multiple-data) pipeline inside the processor.
+
+		  !  Pentium III model extends that SIMD capability :
+		       it introduces the SSE extensions(Streaming SIMD Extensions),which adds facilities for handling
+		       floating-point values caontained in eight 128-bit registers called the XMM registers.
+		       (XMM0 -- XMM7)
+		       XMM registers do not overlap the FPU and MMX registers.(it is able to mix SSE and FPU/MMX)
+		  !  Pentium 4 model introduces yet another feature : SSE2 Extensions.
+		       which is basically an extension of SSE supporting higher-precision floating-point values,
+		       it uses the same set of XMM registers as SSE.
+
+            80x86 model do not save the FPU,MMX,XMM registers in the TSS automatically,but it enables kernel to do
+	    that if necessary.
+
+	    cr0.TS flag : TS(Task-Switching)
+	    	   	  which obeys the following rules :
+			    >  every time a hardware context switch is performed,the TS flag is set.
+			    >  every time an ESCAPE,MMX,SSE,SSE2 instruction is executed when the TS flag is set,
+			       the control unit raises a "Device not available" exception.
+
+	      figure :
+	        A is using mathematical coprocessor;
+		switch occurs from A to B,cr0.TS = 1,saves floating-point registers to A.tss;
+		B is not using mathmetical coprocessor => kernel do not need to restore floating-point registers;
+		B try to use mathmetical coprocessor -> cr0.TS has been setted -> "Device not available" exception;
+		kernel handle the exception => restore the floating-point registers from B.tss;
+
+            FPU,MMX,XMM structures :
+	      <arch/x86/include/asm/processor.h>
+	        struct i387_fsave_struct;	/*  FPU,MMX state  */
+		struct i387_fxsave_struct;	/*  SSE,SSE2 state */
+		struct i387_soft_struct;	/*  older compatibility  */
+		       				/*  it is used for the older CPU model which is no
+						 *  mathmetical coprocessor.
+						 */
+		union thread_xstate {
+		        struct i387_fsave_struct fsave;
+			struct i387_fxsave_struct fxsave;
+			struct i387_soft_struct soft;
+			struct xsave_struct xsave;
+		};  /*  thread_struct.xstate (pointer type)  */
+
+            the process descriptor includes two additional flags :
+	      task_struct.thread_info.status { TS_USEDFPU }
+	      task_struct.flags { PF_USED_MATH }
+
+	      TS_USEDFPU : it specifies whether the process used the FPU,MMX,XMM registers in the current execution run.
+	      PF_USED_MATH : it specifies whether the contents of the thread_struct.xstate are significant,the flag is
+	      		     cleared in two cases :
+			       1>  when the process starts executing a new program by invoking an execve() system call,
+			       	   because the control will never return to the former program,the data currently stored
+				   in thread_struct.xstate is never used again.
+			       2>  when a process that was executing a program in User Mode starts executing a signal
+			       	   handler procedure,because signal handlers are asynchronous with respect to the program
+				   execution flow,the floating-point registers could be meaningless to the signal handler.
+				   however,the kernel saves the floating-point registers in thread_struct.xstate before
+				   starting the handler and restores them after the handler terminates.(that is the signal
+				   handler is allowed to use floating-point features)
+
+            Saving the FPU registers :
+	      <arch/x86/include/asm/i387.h>
+	        /*  __unlazy_fpu - save fpu state.
+		 *  @tsk : the target,which often is @prev in __switch_to().
+		 *  return - none.
+		 *  #  this function checks if TS_USEDFPU flag of @tsk's thread_info.status is set,
+		 *     TS_USEDFPU == 1,then call to __save_init_fpu(@tsk),and call to stts().
+		 *     TS_USEDFPU == 0,then @tsk->fpu_counter = 0.
+		 */
+	        static inline void __unlazy_fpu(struct task_struct *tsk);
+
+		/*  __save_init_fpu - save fpu state and then initializes them.
+		 *  @tsk : the target.
+		 *  return - none.
+		 *  #  this function maybe call to either xsave(@tsk) or fxsave(@tsk),that is determined by
+		 *     task_thread_info(@tsk)->status & TS_XSAVE.
+		 *     then call to clear_fpu_state(@tsk) to initializes fpu state to fixed values,
+		 *     and clear TS_USEDFPU in the @tsk's thread_info.status.
+		 */
+		static inline void __save_init_fpu(struct task_struct *tsk);
+
+              <arch/x86/include/asm/system.h>
+	        /*  stts - a macro sets cr0.TS flag.  */
+	        #define stts() write_cr0(read_cr0() | X86_CR0_TS)
+
+            Loading the FPU registers :
+	      the contents of the floating-point registers are not restored right after the @next process
+	      resumes execution.(but __switch_to() restored it if @preload_fpu is TRUE)
+	      however,the TS flag of cr0 has been set by __unlazy_fpu(),thus,the first time the @next process
+	      tries to execute an ESCAPE,MMX,SSE/SSE2 instruction will traps an exception,then handler calls to
+	      math_state_restore() to restore the contents.
+
+	      <arch/x86/include/asm/i387.h>
+	        /*  math_state_resotre - exception handler to deal with use mathematical coprocessor when TS == 1.
+		 *  #  this function checks @task is used math at first(PF_USED_MATH flag),
+		 *     if it is not,then call to init_fpu() to initializes FPU(PF_USED_MATH set to 1) before
+		 *     next execution;
+		 *     call to clts() to clear cr0.TS,then invoke __math_state_restore() to do primary works.
+		 *     (if TS == 1,execute ESCAPE,MMX,SSE/SSE2 instruction will traps exception)
+		 */
+	        extern asmlinkage void math_state_restore(void);
+
+		/*  __math_state_restore - restores fpu for @tsk and set TS_USEDFPU.
+		 *  #  @tsk = thread->task;  =>
+		 *     @thread = current_thread_info();
+		 *     call to restore_fpu_checking(@tsk),(this function execute "fxrstor" instruction)
+		 *     set TS_USEDFPU,
+		 *     @tsk->fpu_counter++.
+		 */
+		extern void __math_state_restore(void);
+
+            Using the FPU,MMX,and SSE/SSE2 units in Kernel Mode :
+	      !  IF IT IS NOT NECESSARY,DO NOT USE x87 IN KERNEL MODE.
+	      use x87 in Kernel Mode is more expensive than User Mode.
+	      
+	      if kernel use FPU,it should avoid interfering with any computation carried on by the current 
+	      User Mode process.
+
+	      <arch/x86/include/asm/i387.h>
+	        /*  kernel_fpu_begin - kernel ready to use FPU.
+		 *  #  disable preempt,
+		 *     checks if current thread is used FPU(TS_USEDFPU),then save the state,
+		 *     if it is not,just clts().
+		 */
+	        static inline void kernel_fpu_begin(void);
+
+		/*  kernel_fpu_end - kernel end use FPU.
+		 *  #  set cr0.TS by stts(),
+		 *     enable preempt.
+		 */
+		static inline void kernel_fpu_end(void);
+
+              because the FPU state of User Mode process has been saved,so math_state_restore() will be called
+	      later when the process tries to execute an ESCAPE,MMX,SSE/SSE2 instruction.
+
+	      !  the kernel uses FPU only in a few places,typically when moving or clearing large memory areas
+	      	 or when computing checksum functions.
+
+
