@@ -2927,3 +2927,83 @@ Chapter 3 : Processes
 	      	 or when computing checksum functions.
 
 
+      Creating Processes :
+        Traditional Unix systems treat all processes in the same way :
+	  resources owned by the parent process are duplicated in the child process.
+	  !  this approach makes process creation very slow and inefficient.
+
+	Modern Unix kernels solve this problem by introducing three different mechanisms :
+	  1>  Copy-On-Write
+	  2>  Lightweight processes allow both the parent and the child to share many perprocess kernel data
+	      structures,such as the paging tables,the open file tables,and the signal dispositions.
+	  3>  the vfork() system call creates a process that shares the memory address space of its parent,
+	      to prevent the parent from overwriting data needed by the child,the parent's execution is blocked
+	      until the child exits or executes a new program.
+
+	The clone(),fork(),and vfork() System Calls :
+	  Lightweight processes are created in Linux by using a function named clone().
+	  <linux/sched.h>
+	    /*  clone - Linux system call,create a lightweight process.
+	     *  @fn : the function to be executed.
+	     *  @child_stack : User Mode stack pointer was assigned to esp register.
+	     *  @flags : flags,the low byte specifies the signal number to be sent to the parent process when
+	     *           child terminates,the SIGCHLD signal is generally selected;
+	     *           remaining three bytes encode a group of clone flags.
+	     *  @arg : arguments to @fn.
+	     *  @ptid : address of a User Mode variable of the parent process that will hold the PID of the 
+	     *          new lightweight process.meaningful only if the CLONE_PARENT_SETTID flag is set.
+	     *  @newtls : address of a data structure that defines a Thread Local Storage segment for the new
+	     *            lightweight process,meaningful only if the CLONET_SETTLS flag is set.
+	     *  @ctid : address of a User Mode variable of the new lightweight process that will hold the PID
+	     *          of such process,meaningful only if the CLONE_CHILD_SETTID flag is set.
+	     *  return - lighetweight process's thread ID will be returned,if succeed.
+	     *           Otherwise,-1 will be returned,and no lightweight process has been created.
+	     *		 error value will be set appropriately.
+	     */
+	    int clone(int (*fn)(void *), void *child_stack, int flags, void *arg,
+	              /*  pid_t *ptid, void *newtls, pid_t *ctid  */ ...);
+            /*  System-Call  */
+
+	    clone flags :
+	      CLONE_VM - shares the memory descriptor and all Page Tables.
+	      CLONE_FS - shares the table that identifies the root directory and the current working directory,
+	      	       	 as well as the value of the bitmask used to mask the initial file permissions of a new
+			 file.
+	      CLONE_FILES - shares the table that identifies the open files.
+	      CLONE_SIGHAND - shares the tables that identify the signal handlers and the blocked and pending signals.
+	      		      if this flag is true,the CLONE_VM flag must also be set.
+	      CLONE_PTRACE - if traced,the parent wants the child to be traced too,furthermore,the debugger may want
+	      		     to trace the child on its own,in this case,the kernel forces the flag to 1.
+	      CLONE_VFORK - set when the system call issued is a vfork().
+	      CLONE_PARENT - set the parent of the child to the parent of the calling process.
+	      CLONE_THREAD - inserts the child to the same thread group of the parent,and forces the child to share
+	      		     the signal descriptor of the parent,the child's tgid and group_leader fields are set
+			     accordingly.if the flag is true,the CLONE_SIGHAND flag must also be set.
+	      CLONE_NEWNS - set if the clone needs its own namespace,that is,its own view of the mounted filesystems;
+	      		    it is not possible to specify both CLONE_NEWNS and CLONE_FS.
+	      CLONE_SYSVSEM - shares the SystemV IPC undoable semaphore operations.
+	      CLONE_SETTLS - creates a new Thread Local Storage segment for the lightweight process.
+	      CLONE_PARENT_SETTID - writes the PID of the child into the User Mode variable of the parent pointed to
+	      			    by the @ptid parameter.
+	      CLONE_CHILD_CLEARTID - when set,the kernel sets up a mechanism to be triggered when process will exit or
+	      			     when it will start executing a new program.in these cases,the kernel will clear the
+				     User Mode variable pointed to by the @ctid parameter and will awaken any process
+				     waiting for this event.
+	      CLONE_DETACHED - a legacy flag ignored by the kernel.
+	      CLONE_UNTRACED - set by the kernel to overried the value of the CLONE_PTRACE flag.
+	      CLONE_CHILD_SETTID - writes the PID of the child into the User Mode Variable of the child pointed by the
+	      			   @ctid parameter.
+	      CLONE_STOPPED - forces the child to start in the TASK_STOPPED state.
+
+	    !  the clone() in C library is actually a wrapper of the sys_clone() defined in <arch/x86/kernel/process.c>.
+	       and sys_clone() will call to do_fork() function.
+	       sys_clone() does not have the @fn and @arg parameters,in fact,the wrapper function saves the pointer @fn
+	       into the child's stack position corresponding to the return address of the wrapper function itself;
+	       the pointer @arg is saved on the child'stack right below @fn.
+
+	    !  sys_fork() similar to sys_clone(),but flag only the SIGCHLD was set and all clone flags are cleared,
+	       stack pointer is point to the parent's stack,remaining arguments set to NULL.
+
+	    !  sys_vfork() similar to sys_clone(),but flag is set to CLONE_VFORK | CLONE_VM | SIGCHLD combination,
+	       stack pointer is point to the parent's stack,remaining arguments set to NULL.
+
