@@ -3007,3 +3007,72 @@ Chapter 3 : Processes
 	    !  sys_vfork() similar to sys_clone(),but flag is set to CLONE_VFORK | CLONE_VM | SIGCHLD combination,
 	       stack pointer is point to the parent's stack,remaining arguments set to NULL.
 
+
+        The do_fork() function :
+	  <linux/sched.h> <kernel/fork.c>
+	    /*  do_fork - the main fork routine.
+	     *  @clone_flags : same as the @flags parameter of clone().
+	     *  @stack_start : the stack's start point,same as the @child_stack parameter of clone().
+	     *  @regs : pointer to the values of the general purpose registers saved into the Kernel Mode stack
+	     *          when switching from User Mode to Kernel Mode.
+	     *  @stack_size : unused parameter,always set to 0.
+	     *  @parent_tidptr : same as the @ptid parameter of the clone().
+	     *  @child_tidptr : same as the @ctid parameter of the clone().
+	     *  return - pid of the forked process returned on successful,otherwise returns error code.
+	     *           return from fork is different between parent and child!(but do_fork() always called 
+	     *           by kernel in parent's context)
+	     */
+	    extern long do_fork(unsigned long clone_flags, unsigned long stack_start, struct pt_regs *regs,
+	    	   	        unsigned long stack_size, int __user *parent_tidptr, int __user *child_tidptr);
+
+	  the primary works that do_fork() do :
+	    /*  do_fork() call to copy_process() to finish process copying,and copy_process() call to copy_thread()
+	     *  to finish thread copying.
+	     */
+	    1>  allocates a new PID for the child by looking in the @pidmap_array bitmap.
+
+	    2>  checks the ptrace field of the parent(current->ptrace) :
+	          ptrace != 0 => the parent process is being traced by another process,thus do_fork() checks whether
+		  the debugger wants to trace the child on its own(independently of the value of the CLONE_PTRACE
+		  flag specified by the parent),in this case,if the child is not a kernel thread(CLONE_UNTRACED
+		  flag cleared),the function sets the CLONE_PTRACE flag.
+
+            3>  invokes copy_process() to make a copy of the process descriptor.
+
+	    4>  if either the CLONE_STOPPED flag is set or the child process must be traced,that is,the PT_PTRACED flag
+	    	is set in @p->ptrace,do_fork() set the state of the child to TASK_STOPPED and adds a pending SIGSTOP
+		signal to it.
+		
+            5>  if the CLONE_STOPPED flag is not set,it invokes the wake_up_new_task() function,which performs the following
+	    	operations :
+		  >  adjusts the scheduling parameters of both the parent and the child.
+
+		  >  if the child will run on the same CPU as the parent,and parent and child do not share the same set of
+		     page tables(CLONE_VM flag cleared),it then forces the child to run before the parent by inserting it 
+		     into the parent's runqueue right before the parent.(if child flushes its address space and executes a new
+		     program right after the forking,this way will prevent unnecessary cost for COPY-ON-WRITE)
+		     otherwise(child run on the same CPU as parent,or CLONE_VM flag set),it inserts the child in the last
+		     position of the parent's runqueue.
+
+	    6>  CLONE_STOPPED == 1 => put @child -> TASK_STOPPED.
+
+	    7>  if the parent process is being traced,it stores the PID of the child in the current->ptrace_message,
+	    	and invokes ptrace_notify().(this function was called by ptrace_event()<linux/ptrace.h>,and ptrace_event() was
+		called by tracehook_report_clone_complete()<linux/tracehook.h>)
+		ptrace_notify() stops the current process and sends a SIGCHLD signal to its parent,the "grandparent" of the child
+		is the debugger that is tracing the parent;the SIGCHLD signal notifies the debugger that current has forked a child,
+		whose PID can be retrieved by looking into the  current->ptrace_message field.
+		/*  Linux 2.6,ptrace_notify() was called in ptrace_event() with ((event << 8) | SIGTRAP),
+		 *  a siginfo_t structure was allocated in ptrace_notify() and @info.si_signo set to SIGTRAP,ptrace_notify() then
+		 *  call to ptrace_stop(),which set current->last_siginfo = @info,and put current into TASK_TRACED(let debugger run).
+		 *  I DID NOT FIND OUT THE SIGCHLD WAS SEND TO THE @current's PARENT FROM THE SOURCE CODE!
+		 *  ptrace_notify() JUST CALLED WITH THE PARAMETER 100000101 BY ptrace_event()(SIGTRAP == 5,PTRACE_EVENT_FORK == 1).
+		 */
+
+            8>  if the CLONE_VFORK flag is specified,it inserts the parent process in a wait queue and suspends it until the child
+	    	releases its memory address space.
+
+            9>  terminates by returning the PID of the child.
+
+
+		
