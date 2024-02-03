@@ -2030,12 +2030,13 @@ Chapter 3 : Processes
         children : @this process's children.
 	sibling : @this process's siblings.
 
-	task_struct.group_leader;  /*  type task_struct  */
+	task_struct.group_leader;  /*  type task_struct,thread group leader  */
 
 	#  a process can be a leader of a process group or of a login session,it can be a leader of a thread group,and
 	   it can also trace the execution of other processes.
 
-	(task_struct.signal)->leader_pid;	   /*  PID of the group leader  */
+	(task_struct.signal)->leader_pid;	   /*  PID of the group leader in the thread group  */
+	task_struct.pid				   /*  Process ID  */
 	task_struct.tgid;			   /*  PID of the thread group leader  */
 	tasK_struct.sessionid;			   /*  ID of session associated now  */
 	task_struct.ptrace_children;		   /*  the head of a list containing all children being traced by a debugger  */
@@ -2995,6 +2996,8 @@ Chapter 3 : Processes
 	      			   @ctid parameter.
 	      CLONE_STOPPED - forces the child to start in the TASK_STOPPED state.
 
+	    !  the clone flags were defined in kernel have more values,these values were used by kernel routine.
+
 	    !  the clone() in C library is actually a wrapper of the sys_clone() defined in <arch/x86/kernel/process.c>.
 	       and sys_clone() will call to do_fork() function.
 	       sys_clone() does not have the @fn and @arg parameters,in fact,the wrapper function saves the pointer @fn
@@ -3065,7 +3068,7 @@ Chapter 3 : Processes
 		/*  Linux 2.6,ptrace_notify() was called in ptrace_event() with ((event << 8) | SIGTRAP),
 		 *  a siginfo_t structure was allocated in ptrace_notify() and @info.si_signo set to SIGTRAP,ptrace_notify() then
 		 *  call to ptrace_stop(),which set current->last_siginfo = @info,and put current into TASK_TRACED(let debugger run).
-		 *  I DID NOT FIND OUT THE SIGCHLD WAS SEND TO THE @current's PARENT FROM THE SOURCE CODE!
+		 *  I DID NOT FIND OUT THE SIGCHLD WAS SENT TO THE @current's PARENT FROM THE SOURCE CODE!
 		 *  ptrace_notify() JUST CALLED WITH THE PARAMETER 100000101 BY ptrace_event()(SIGTRAP == 5,PTRACE_EVENT_FORK == 1).
 		 */
 
@@ -3073,6 +3076,62 @@ Chapter 3 : Processes
 	    	releases its memory address space.
 
             9>  terminates by returning the PID of the child.
+
+
+        The copy_process() function :
+	  the copy_process() function sets up the process descriptor and any other kernel data structure required for a child's
+	  execution.
+	  <kernel/fork.c>
+	    /*  copy_process - create a new process as a copy of the old one,but does not actually start it yet.
+	     *  @clone_flag:   clone flags same as do_fork().
+	     *  @stack_start:  same as do_fork() @stack_start.
+	     *  @regs:	       same as do_fork() @regs.
+	     *  @stack_size:   same as do_fork() @stack_size,it is unused.
+	     *  @child_tidptr: same as do_fork() @child_tidptr.
+	     *  @pid:	       a pointer points to an object which type is struct pid,this parameter is used
+	     *		       to save child's pid.
+	     *  @trace:	       for ptrace mechanism.
+	     *  return -       the task_struct pointer of the child process,ERR_PTR would be returned if 
+	     *	       	       any error occurred.
+	     */
+	    static struct task_struct *copy_process(unsigned long clone_flag, unsigned long stack_start,
+	    	   	  	      		    struct pt_regs *regs, unsigned long stack_size, 
+						    int __user *child_tidptr, struct pid *pid, int trace);
+
+          the primary works of copy_process() :
+	    1>  checks whether the flags passed in the clone_flags parameter are compatible.
+	    	in particular,it returns an error code in the following cases :
+		  <  CLONE_NEWNS == 1 AND CLONE_FS == 1
+		  <  CLONE_THREAD == 1 AND CLONE_SIGHAND == 0
+		  <  CLONE_SIGHAND == 1 AND CLONE_VM == 0
+	    
+	    2>  performs any additional security checks by invoking security_task_create(),this function call to
+	    	security_ops->task_create().
+
+            3>  invokes dup_task_struct() to get the process descriptor for the child.
+	    	this function performs the following actions :
+		  <  invokes __unlazy_fpu() on the current process to save,if necessary.
+		     later,dup_task_struct() will copy these values in the thread_info structure of the child.
+		  <  executes the alloc_task_struct() macro to get a process descriptor for the new process,and
+		     stores its address in the @tsk local variable.
+		  <  executes the alloc_thread_info macro to get a free memory area to store the thread_info structure
+		     and the Kernel Mode stack of the new process,and saves its address in the @ti local variable.
+		  <  copies the contents of the @current's process descriptor into @tsk,then sets @tsk->thread_info
+		     to @ti.
+		  <  copies the contents of the @current's thread_info descriptor into @ti,then sets @ti->task to @tsk.
+		  <  sets the usage counter of the new process descriptor(@tsk->usage) to 2 to specify that the process
+		     descriptor is in use and that the corresponding process is alive.
+		  <  returns the process descriptor pointer of the new process(@tsk).
+
+            4>  checks whether the value stored in @current->signal->rlim[RLIMIT_NPROC].rlim_cur is smaller than the
+	    	current number of process owned by the user.
+		if it is not true,an error code is returned,unless 'capable(CAP_SYS_ADMIN) OR capable(CAP_SYS_RESOURCE) OR
+		@p->real_cred->user-> == INIT_USER)'.
+		this function gets the current number of processes owned by the user from a per-user data structure named
+		user_struct,this data structure can be found through a pointer in the user field of the process descriptor.
+		(task_struct->real_cred->user->processes)
+	    
+	  
 
 
 		
