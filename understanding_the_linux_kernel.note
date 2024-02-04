@@ -2058,12 +2058,23 @@ Chapter 3 : Processes
 
           [type]         [field]  [introduce]
 	  PIDTYPE_PID    pid      PID of the process
-	  PIDTYPE_TGID 	 tgid     PID of thread group leader process
-	  PIDTYPE_PGID	 pgrp	  PID of the group leader process	/*  Linux 2.6 no such field  */
-	  PIDTYPE_SID    session  PID of the session leader process	/*  Linux 2.6 no such field  */
-	    /*  Linux 2.6,for retrive group leader's PID,use function task_pgrp(struct task_struct *) ,
-	     *  for retrive session leader's PID,use function task_session(struct task_struct *) .
-	     */
+	  PIDTYPE_TGID 	 tgid     PID of thread group leader process  /*  Linux 2.6 no such PIDTYPE,but has this field  */
+	  PIDTYPE_PGID	 pgrp	  PID of the group leader process	
+	  PIDTYPE_SID    session  PID of the session leader process	
+	  /*  Linux 2.6 does not exist @pgrp and @session fields in task_struct,there is a field named 'pids' which type
+	   *  is array of struct pid_link and represents the four type pid hashlist.
+	   */
+	  /*  Linux 2.6,for retrive group leader's PID,use function task_pgrp(struct task_struct *) ,
+	   *  for retrive session leader's PID,use function task_session(struct task_struct *) .
+	   */
+
+	  <linux/pid.h>
+	    enum pid_type {
+	            PIDTYPE_PID,
+		    PIDTYPE_PGID,
+		    PIDTYPE_SID,
+		    PIDTYPE_MAX
+	    };  /*  Linux 2.6 only has three types of pid.  */
 
 	  task_struct.pid;  /*  this field has type pid_t,such type from typedef __kernel_pid_t,
 	  		     *  and __kernel_pid_t is type of int.
@@ -3130,6 +3141,108 @@ Chapter 3 : Processes
 		this function gets the current number of processes owned by the user from a per-user data structure named
 		user_struct,this data structure can be found through a pointer in the user field of the process descriptor.
 		(task_struct->real_cred->user->processes)
+
+            5>  increase the usage counter of the user_struct structure(user_struct.__count) and the counter of the process
+	    	owned by the user(user_struct.processes).
+
+            6>  checks that the number of processes in the system does not exceed the value of the max_threads variable.
+	        /*  write a new value into /proc/sys/kernel/threads-max file is able to change this limit dynamically.  */
+
+            7>  if the kernel functions implementing the execution domain and the executable format of the new process
+	    	are included in the kernel modules,it increase their usage counters.
+
+            8>  sets a few crucial fields related to the process state :
+	          <  @tsk->lock_depth = -1 	  (no lock hold)
+		  <  @tsk->did_exec = 0 	  (no exec did)
+		  <  @tsk->flags = @current->flags & ~PF_SUPERPRIV | PF_FORKNOEXEC
+
+            9>  @tsk->pid = pid_nr(pid)  /*  @pid is allocated by alloc_pid()  */
+	    
+	    10> if @clone_flags & CLONE_PARENT_SETTID => *@parent_tidptr = @tsk->pid
+	    	this work is did by do_fork() through put_user(Linux 2.6)
+
+            11> initializes the list_head data structures and the spin locks included in the child's process descriptor,
+	    	and sets up several other fields related to pending signals,timers,and time statistics.
+
+            12> invokes copy_semundo(),copy_files(),copy_fs(),copy_sighand(),copy_signal(),copy_mm(),copy_namespace()
+	    	to create new data structures and copy into them the values of the corresponding parent process
+		data structures unless specified differently by the @clone_flags.
+
+	    13> invokes copy_thread() to initialize the Kernel Mode stack of the child process with the values contained
+	    	in the CPU registers when the clone() system call was issued.(these values have been saved in the Kernel
+		Mode stack of parent)
+		However,the function forces the value 0 into the field corresponding to the eax register(child process
+		fork() return or clone() system-call).
+		@thread.esp = the base address of the child's Kernel Mode stack
+		@thread.eip = address of ret_from_fork()  /*  an assembly function  */
+		if parent makes use of an I/O Permission Bitmap,the child gets a copy of such bitmap.
+		if @clone_flags & CLONE_SETTLS => child gets the TLS segment specified by the User Mode data structure
+		pointed to by the @tls parameter of the clone() system-call.
+
+	    14> if @clone_flags & CLONE_CHILD_SETTID => @tsk->set_child_tid = @child_tidptr
+	        if @clone_flags & CLONE_CHLID_CLEARTID => @tsk->clear_child_tid = @child_tidptr
+		these flags specify that the value of the variable pointed to by @child_tidptr in the User Mode address
+		space of the child has to be changed,although the actual write operations will be done later.
+
+            15> turns off the TIF_SYSCALL_TRACE flag in the thread_info structure of the child.(ret_from_fork() will not
+	    	notify the debugging process about the system-call termination)
+		(system-call tracing is controled by PTRACE_SYSCALL flag in @tsk->ptrace)
+
+	    16> @tsk->exit_signal = (@clone_flags & CLONE_THREAD) ? -1 : (@clone_flags & CSIGNAL)
+	    	only the death of the last member of a thread group(usually,the thread group leader) causes a signal
+		notifying the parent of the thread group leader.
+
+	    17> invokes sched_fork() to complete the initialization of the scheduler data structure of the new process.
+	    	the function also sets the state of the new process to TASK_RUNNING and sets the preempt_count field
+		of the thread_info structure to 1,thus disabling kernel preemption.
+		Moreover,in order to keep process scheduling fair,the function shares the remaining timeslice of the 
+		parent between the parent and the child.
+
+	    18> sets the field in the thread_info structure of @tsk to the number of the local CPU returned by
+	    	smp_processor_id().
+
+	    19> initializes the fields that specify the parenthood relationships.
+	    	if @clone_flags & (CLONE_PARENT | CLONE_THREAD) =>
+	                @tsk->real_parent = @tsk->parent = @current->real_parent
+		else
+		        @tsk->real_parent = @tsk->parent = @current
+		/*  ! I DID NOT FIND OUT THE CODE SETS @TSK->PARENT = @CURRENT->REAL_PAREN,
+		 *    DUP_TASK_STRUCT() DID @TSK = @CURRENT.
+		 */
+
+	    20> if the child does not need to be traced(@clone_flags & ~CLONE_PTRACE),it sets the @tsk->ptrace to 0.
+
+	    21> executes the SET_LINKS macro to insert the new process descriptor in the process list.
+
+	    22> if the child must be traced(PT_PTRACED),it sets @tsk->parent to @current->parent and inserts the child
+	    	into the trace list of the debugger.
+		this work is accomplished by tracehook_finish_clone().
+
+	    23> invokes attach_pid() to insert the PID of the new process descriptor in the @tsk->pids[PIDTYPE_PID] hash table.
+
+	    24> if the child is a thread group leader(@clone_flags & ~CLONE_THREAD) :
+	          <  @tsk->tgid = @tsk->pid
+		  <  @tsk->group_leader = @tsk
+		  <  invokes three times attach_pid() to insert the child in the PID hash tables of type
+		     PIDTYPE_TGID,PIDTYPE_PGID,PIDTYPE_SID.
+		     /*  !  I DID NOT FIND OUT CODE THAT ATTACHED PIDTYPE_TGID IN COPY_PROCESS(),BECAUSE LINUX 2.6
+		      *     NO SUCH PIDTYPE HAD BEEN DEFINED.
+		      */
+
+            25> otherwise,if the child belongs to the thread group of its parent(@clone_flags & CLONE_THREAD) :
+	    	  <  @tsk->tgid = @current->tgid
+		  <  @tsk->group_leader = @current->group_leader
+		  <  invokes attach_pid() to insert the child in the PIDTYPE_TGID hash table
+		     (more specifically,in the per-PID list of the @current->group_leader process)
+
+	    26> a new process has now been added to the set of processes : ++nr_threads
+
+	    27> ++total_forks to keep trace of the number of forked processes.
+
+	    28> terminated by returning the child's process descriptor pointer(@tsk).
+	
+
+
 	    
 	  
 
