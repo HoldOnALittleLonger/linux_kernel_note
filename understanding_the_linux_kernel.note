@@ -3242,9 +3242,140 @@ Chapter 3 : Processes
 	    28> terminated by returning the child's process descriptor pointer(@tsk).
 	
 
+      Kernel Threads :
+        What is the Kernel Thread :
+	  the system process running only in Kernel Mode and deal with some critical tasks such flash cache,swap pages,serving
+	  network connections,modern operating systems delegate their functions to Kernel threads.
+	  such Kernel Thread are not encumbered with the unnecessary User Mode context.
 
+	Differ to regular process :
+	  >  Kernel threads run only in Kernel Mode,while regular processes run alternatively in Kernel Mode and in User Mode.
+	  >  Because kernel threads run only in Kernel Mode,they use only linear addresses greater than PAGE_OFFSET(as above,
+	     PAGE_OFFSET is 0xc0000000).
+	     Regular processes,on the other hand,use all four gigabytes of linear addresses,in either User Mode or Kernel Mode.
+
+	Creating a kernel thread :
+	  <arch/x86/kernel/process.c>
+	    /*  kernel_thread - this is the kernel thread create function depends on architecture.
+	     *  @fn:	      	the function to execute.
+	     *  @arg:	      	the argument of @fn.
+	     *	@flags:	      	the clone_flags,because this function call to do_fork().
+	     *	return -      	returns what the do_fork() return.
+	     */
+	    int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags) EXPORT_SYMBOL(kernel_thread);
+
+	    /*  !  this is the artecture depending function,so when developer developing kernel at the part it is not
+	     *	   depend on architecture should use function kthread_create() to instead invocation of kernel_thread().
+	     */
+
+	  <linux/kthread.h>
+	    /*  kthread_create - kthread helper used to create a kernel thread,the kernel thread will be stopped,
+	     *		       	 use wake_up_process() to start it.
+	     *	@threadfn:	 the function to execute.
+	     *	@data:		 argument of @threadfn.
+	     *	@namefmt:	 const char pointer point to a printf-style string.
+	     *	@additional:	 parameters used to resolve @namefmt.
+	     *	return -	 task_struct pointer points to the kthread or ERR_PTR(-ENOMEM).
+	     */
+	    struct task_struct *kthread_create(int (*threadfn)(void *data), void *data, const char namefmt[], ...);
+
+	    !  @threadfn can either call do_exit() directly if it is a standalone thread for which noone will call
+	       kthread_stop(),or return when 'kthread_should_stop()' is true(means kthread_stop() has been called)
+	       its return value should be a zero value or a negative error code,kthread_stop() will returns what
+	       @threadfn returned.
+
+	    /*  kthread_run - macro used to create a kernel thread and start it.  */
+	    #define kthread_run(threadfn, data, namefmt, ...)
+
+	  kernel_thread() call to do_fork() with (@clone_flags | CLONE_VM | CLONE_UNTRACED),avoids duplicate page tables
+	  and ensure no process is able to trace the new kernel thread(even if the calling process is being traced).
+	  @regs to do_fork() is the initial value of CPU registers for a new thread(copy_thread() function sets the
+	  CPU registers with this initial value for new thread,too)
+	    /*  kernel_thread() builds up this stack area so that :
+	     *    >  ebx and edx will be set by copy_thread() to the values of the parameters @fn and @arg,respectively.
+	     *    >  eip wii be set to the address of the following assembly language fragment :
+	     *         movl  %edx,%eax
+	     *	       pushl %edx
+	     *	       call  %ebx
+	     *	       pushl %eax
+	     *	       call  do_exit
+	     *	       #  Linux 2.6,regs.ip = (unsigned long)kernel_thread_helper,so kernel_thread_helper() will run before
+	     *	       	  @fn.
+	     */
+
+        Process 0 :
+	  ancestor of all process called "process 0",the "idle process",or,for historical reasons,the "swapper process",is a 
+	  kernel thread created from scratch during the initialization phase of Linux.
+	  the statically allocated data structured used by process 0 :
+	    >  a process descriptor stored in the init_task variable,which is initialized by the INIT_TASK macro.
+	    >  a thread_info descriptor and a Kernel Mode stack stored in the init_thread_union variable and initialized
+	       by the INIT_THREAD_INFO macro.
+	    >  the following tables,which the process descriptor points to :
+	         init_mm     		  (INIT_MM)   	/*  initialization macro  */
+		 init_fs		  (INIT_FS)
+		 init_files		  (INIT_FILES)
+		 init_signals		  (INIT_SIGNALS)
+		 init_sighand		  (INIT_SIGHAND)
+	    >  the master kernel Page Global Directory stored in swapper_pg_dir.
+
+	  <linux/start_kernel.h> <init/main.c>
+	    /*  start_kernel - architecture indepening kernel starting routine.
+	     *  #  on x86_64 platform,this function is called by x86_64_start_kernel_reservations()<arch/x86/kernel/head64.c>.
+	     */
+	    extern asmlinkage void __init start_kernel(void);
+
+	    start_kernel() initializes all the data structures needed by the kernel,then call to rest_init(),which create 
+	    a kernel thread named "kernel_init" via kernel_thread(),@clone_flags = CLONE_FS | CLONE_SIGHAND.
+	    "kthreadadd" kernel thread also created by rest_init(),which deal with new kthread add into system,finally,
+	    rest_init() enable preempt without resched,next call to schedule() let the process 1 get CPU.
+	    if rest_init() get CPU later by scheduler assigned,it just call to cpu_idle() without preempt enabled,
+	    cpu_idle() is a function depends on architecture,on x86 platform,it defined in <kernel/process_64.c>.
+
+	    /*  process 0 selected by scheduler only when there are no other processes in the TASK_RUNNING state.
+	     *  and for SMP,there is a process 0 for each CPU.
+	     */
+
+	    kernel_init() defined in <init/main.c> as a static function,which initializes SMP and SMP Scheduler,does some
+	    basic works,then open /dev/console(sys_dup(0) called twice for set up STDOUT and STDERR),finally call to
+	    init_post()<init/main.c>.
+	    init_post() execute call to run_init_process()<init/main.c> on one of @ramdisk_execute_command,@execute_command,"/sbin/init",
+	    "/etc/init","/bin/init","/bin/sh",at least one of these commands must be succeed,otherwise,kernel panic.
+	    run_init_process() call to kernel_execve()<arch/x86/kernel/sys_i386_32.c>,which do a system call(execve) from kernel
+	    instead of calling sys_execve.
+
+	    !  console maybe open six "tty"s(on my computer,this is default).
+
+        Process 1 :
+	  Has descripted above.
+	  as a result,the init kernel thread becomes a regular process(kernel_execve() called) having its own per-process
+	  kernel data structure.
+	  the process started by run_init_process() will stays alive until the system is shut down.
+
+	Other kernel Threads :
+	  Linux uses many other kernel threads,some of them are created in the initialization phase and run until shutdown;
+	  others are created "on demand",when the kernel must execute a task that is better performed in its own execution
+	  context.
+	  >
+	    keventd(also called events)
+	      executes the functions in the @keventd_wq workqueue.
 	    
-	  
+	    kapmd
+	      handles the events related to the Advanced Power Management(APM).
+	      /*  the newer OS use APIC to manages computer power.  */
 
+	    kswapd
+	      reclaims memory.
 
-		
+	    pdflush
+	      flushes "dirty" buffers to disk to reclaim memory.
+	      
+	    kblockd
+	      executes the function in the @kblockd_workqueue workqueue,essentially,it periodically activates the block
+	      device drivers.
+
+	    ksoftirqd
+	      runs the tasklets(bottom of interrupt);there is one of these kernel threads for each CPU in the system.
+	      /*  for example,get informations through the shell command :
+	       *    ps ax | grep -E '\[.*\]' | grep ksoftirqd
+	       */
+
