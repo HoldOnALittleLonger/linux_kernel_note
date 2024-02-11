@@ -3373,3 +3373,135 @@ Chapter 3 : Processes
 	       *    ps ax | grep -E '\[.*\]' | grep ksoftirqd
 	       */
 
+
+    Destroying Processes :
+      process "die" is the process terminates executing the code suppose it run.
+      when this occurs,the kernel must be notified so that it can release the resources owned by the process.
+      The usual way for a process to terminate is to invoke the exit() C library function.
+      this function can be called explicitly by programmer or be called implicitly by compiler.
+
+      Alternaitively,the kernel may force a whole thread group to die,this typically occurs when a process in the
+      group has received a signal that it cannot handle or ignore or when an unrecoverable CPU exception has been
+      raised in Kernel Mode while the kernel was running on behalf of the process.
+
+      Process Termination :
+        In Linux 2.6 there are two system calls that terminate a User Mode application :
+          >  <linux/syscalls.h> /*  Kernel code tree  */
+               asmlinkage long sys_exit_group(int error_code);
+             <linux/unistd.h>   /*  C Library encapsulate  */
+               void exit_group(int status);
+
+             the function terminates a full thread group,that is,a whole multithreaded application.
+             the main kernel function that implements this system call is called do_group_exit().
+             and this system call should be called by exit().
+
+          >  <linux/syscalls.h>
+               asmlinkage long sys_exit(int error_code);
+             <linux/unistd.h>
+               void _exit(int status);
+             <stdlib.h>
+               void exit(int status);
+
+             the _exit() system call,while terminates a single process,regardless of any other process in the
+             thread group of the victim.
+             the main kernel function that implements this system call is called do_exit().
+             for example,this system call invoked by the pthread_exit() function of the Linux POSIX Thread Library.
+
+        The do_group_exit() function :
+          <linux/sched.h> <kernel/exit.c>
+            /*  do_group_exit - terminates all threads belong to the thread group of "current".
+             *  @exit_code:     the exit code will pass to do_exit(),its value maybe changed in some case.
+             *                  the value is passed by exit_group() system call,or an error code supplied by the kernel.
+             *                  (abnormal termination)
+             *  #  before call to do_exit(),it will sets SIGNAL_GROUP_EXIT up in signal_struct.flags.(if no this flag had
+             *     been setted up before)
+             */    
+            extern NORET_TYPE do_group_exit(int exit_code);
+
+            The function executes the following operations :
+              1>  checks whether the SIGNAL_GROUP_EXI flag of current->signal->flags has been setted up.
+                  which means that the kernel already started an exit procedure for this thread group,in this case,
+                    exit_code = current->signal->group_exit_code;
+                    goto invoke do_exit(exit_code);
+              
+              2>  if signal_group_sig(current->signal) == F
+                    sets SIGNAL_GROUP_EXIT flag
+                    current->signal->group_exit_code = exit_code
+
+              3>  invokes the zap_other_threads() function to kill the other processes in the thread group of current,
+                  if any.
+                  in order to do this,the function scans the per-PID list in the PIDTYPE_TGID hash table corresponding
+                  to current->tgid,for each process in the list different from current,it sends a SIGKILL signal to it.
+                  as a result,all such processes will eventually execute the do_exit() function.
+                  /*  because Linux 2.6 no PIDTYPE_TGID was existed,so this function call to next_thread() to retrive
+                   *  the next thread in the thread group.
+                   */
+
+              4>  invokes the do_exit() function passing to it the process termination code(@exit_code).
+                  do_exit() terminates the process and call to schedule().  /*  no return  */
+
+        The do_exit() function :
+          <linux/kernel.h> <kernel/exit.c>
+            /*  do_exit - terminates the current task.
+             *  @error_code:  the exit code return to User Mode or an error code reported by kernel.
+             *  #  do_exit() do not return,and @tsk->exit_code will be setted up with the value @error_code /*  code  */.
+             *     (schedule() will be called,so this routine no return,and process switching will be executed by scheduler.)
+             */
+            NORET_TYPE do_exit(long error_code /*  long code  */) ATTRIB_NORET;
+
+            /*  The C Library function exit() is call to this function via sys_exit() system call  */
+
+            the essential actions are executed as the following :
+              1>  sets the PF_EXITING flag in the @flag field of the process descriptor to indicate that the process is being
+                  eliminated.
+                  if PF_EXITING have being setted up in @flags of current when do_exit() is executing,do_exit() will fix
+                  recursive fault and sets up PF_EXITDONE in @flags,then put process state to TASK_UNINTERRUPTIBLE.
+                  (in this case,reboot is needed)
+
+              2>  removes,if necessary,the process descriptor from a dynamic timer queue via the del_timer_sync() function.
+
+              3>  detaches from the process descriptor the data structures related to paging,semaphores,filesystem,open file
+                  descriptors,namespaces,and I/O Permission Bitmap,respectivly,with the exit_mm(),exit_sem(),exit_files(),
+                  exit_fs(),exit_namespace(),and exit_thread() functions.
+                  these functions also remove each of these data structures if no other processes are sharing them.
+
+              4>  if the kernel functions implementing the execution domain and the executable format of the process being killed
+                  are included in kernel modules,the function decreases their usage counters.
+              
+              5>  sets the @exit_code of the process descriptor to the process termination code.
+
+              6>  invokes the exit_notify() function to perform the following operations :
+                    a>  updates the parenthood relationships of both the parent process and the child processes.
+                        all child processes created by the terminating process become children of another process in the
+                        same thread group,if any is running,or otherwise of the "init" process.
+
+                    b>  checks whether the @exit_signal process descriptor field of the process being terminated is different
+                        from -1,and whether the process is the last member of its thread group.
+                        in this case,the function sends a signal(usually SIGCHLD) to the parent of the process being terminated
+                        to notify the parent about a child's death.
+        
+                    c>  otherwise,if the @exit_signal field is equal to -1 or the thread group includes other processes,the
+                        function sends a SIGCHLD signal to the parent only if the process is being traced.
+                        (informed of the death of the lightweight process)
+
+                    d>  if the @exit_signal process descriptor field is equal to -1 and the process is not being traced,
+                        it sets the @exit_state field of the process descriptor to EXIT_DEAD,and invokes release_task()
+                        to reclaim the memory of the remaining process data structures and to decrease the usage counter
+                        of the process descriptor.
+                        the usage counter becomes equal to 1,so that the process descriptor itself is not released right
+                        away.
+
+                    e>  otherwise,if the @exit_signal process descriptor field is not equal to -1 or the process is being
+                        traced,it sets the @exit_state field to EXIT_ZOMBIE.
+                
+                    f>  sets the PF_DEAD flag in the @flags field of the process descriptor.
+
+              7>  invokes the schedule() function to select a new process to run.
+                  because a process in an EXIT_ZOMBIE state is ignored by the scheduler,the process stops executing right after
+                  the switch_to macro in schedule() is invoked.
+                  the scheduler will check the PF_DEAD flag and will decrease the usage counter in the descriptor of the
+                  zombie process being replaced to denote the fact that the process is no longer alive.
+              
+
+
+            
