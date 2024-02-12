@@ -201,7 +201,7 @@ Chapter 1 : Introducation
       Unix kernels provide an execution environment in which applications may run.
       
       The Process/Kernel Mode - Actually,some CPUs can have more than two execution states,but all standard Unix
-      	  		       	         kernels use only Kernel Mode and User Mode.
+      	  		       	        kernels use only Kernel Mode and User Mode.
 	    A program usually executes in User Mode and switches to Kernel Mode only when requesting
 		a service provided by the kernel.when the kernel has satisfied the program's request,it
 		puts the program back in User Mode.the way is system calls.
@@ -260,9 +260,9 @@ Chapter 1 : Introducation
 			       process is runnable.(lower intterupt could be preempted by higher interrupt)
 
 			  three states of CPU current be :
-			    >  running a process in User Mode			(process context)
+			    >  running a process in User Mode			        (process context)
 			    >  running an exception or a system call handler	(process context)
-			    >  running an interrupt handler	     		(interrupt context)
+			    >  running an interrupt handler	     		        (interrupt context)
 
       Process Address Space - Each process runs in its private address space.A process running in User Mode refers to private stack,
       	      	      	      data,and code areas.when running in Kernel Mode,the process addresses the kernel data and code areas
@@ -419,6 +419,9 @@ Chapter 1 : Introducation
 	       minimizing the size of the kernel image strored in RAM.
 
 
+/*  END OF CHAPTER1  */
+
+
 Chapter 2 : Memory Addressing
     Memory Address :
       the three kinds of addresses on 80x86 microprocessors >
@@ -498,7 +501,7 @@ Chapter 2 : Memory Addressing
     	ldtr : ldtr control register,it contains the address and size of the current LDT in main memory.
 
 	Format of Segment Descriptor : (every 8-byte 64-bit)
-	  Field :
+	  Fields >
 	    Base :      contains the linear address of the first byte of the segment.
 	    G :         granularity flags,if it is cleared(0),the segment size is expressed in bytes;otherwise,it is
 	      	        expressed in multiples of 4096 bytes.
@@ -1715,6 +1718,9 @@ Chapter 2 : Memory Addressing
 
 	      >  if the CPU switches to another process that is using the same set of page tables as the kernel thread that
 	         is being replaced,the kernel invokes __flush_tlb() to invalidate all non-global TLBs of the CPU.
+
+
+/*  END OF CHAPTER2  */
 
 
 Chapter 3 : Processes
@@ -3373,7 +3379,6 @@ Chapter 3 : Processes
 	       *    ps ax | grep -E '\[.*\]' | grep ksoftirqd
 	       */
 
-
     Destroying Processes :
       process "die" is the process terminates executing the code suppose it run.
       when this occurs,the kernel must be notified so that it can release the resources owned by the process.
@@ -3502,6 +3507,76 @@ Chapter 3 : Processes
                   the scheduler will check the PF_DEAD flag and will decrease the usage counter in the descriptor of the
                   zombie process being replaced to denote the fact that the process is no longer alive.
               
+    Process Removal :
+      The Unix operating system allows a process to query the kernel to obtain the PID of its parent process or the execution
+      state of any of its children.
+      Unix kernels are not allowed to discard data included in a process descriptor field right after the process terminates.
+      They are allowed to do so only after the parent process has issued a wait()-like system call that refers to the 
+      terminated process.
 
+      EXIT_ZOMBIE : although the process is technically dead,its descriptor must be saved until the parent process is notified.
+      
+      If parent dead before children,then system forcing all orphan processes to become children of the init process.
+      init process issues wait()-like system call period.
 
+      The release_task() function detaches the last data structures from the descriptor of a zombie process,it is applied on a
+      zombie process in two possible ways :
+        1>  by the do_exit() function if the parent is not interested in receiving signals from the child(SIGCHLD).
+        2>  by the wait4() or waitpid() system calls after a signal has been sent to the parent.
+
+        #   the default action was taken by a process for the signal SIGCHLD is ignores it,but this signal is able to be handled.
+
+        FOR 1> : the memory reclaiming will be done by the scheduler.
+        FOR 2> : the memory reclaiming will be progressed immediately.
+                 /*  libc wait system call wrapper call to system call wait4(),which is defined in <kernel/exit.c>,
+                  *  wait4() call to do_wait() complete the primary recycle routine.
+
+        <linux/sched.h>
+          /*  release_task - recycle the resources have holden by @p.
+           *  @p:            the task to be released.
+           */
+          extern void release_task(struct task_struct *p);
+
+          This function executes the following steps :
+            1>  decreases the number of processes belonging to the user owner of the terminated process.
+                (in user_struct)
+
+            2>  if the process is being traced,the function removes it from the debugger's ptrace_children list and
+                assigns the process back to its original parent.
+
+            3>  invokes __exit_signal() to cancel any pending signal and to release the signal_struct descriptor of the 
+                process.
+                if the descriptor is no longer used by other lightweight processes,the function also removes this data
+                structure.
+                Moreover,the function invokes exit_itimers() to detach any POSIX interval timer from the process.
+
+            4>  invokes __exit_sighand() to get rid of the signal handlers.
+
+            5>  invokes __unhash_process(),which in turn :
+                  a>  decreases by 1 the nr_threads variable.
+                  b>  invokes detach_pid() twice to remove the process descriptor from the pidhash hash tables of type
+                      PIDTYPE_PID and PIDTYPE_TGID.
+                  c>  if the process is a thread group leader,invokes again detach_pid() twice to remove the process
+                      descriptor from the PIDTYPE_PGID and PIDTYPE_SID hash tables.
+                  d>  use the REMOVE_LINKS macro to unlink the process descriptor from the process list.
+
+                  /*  __unhash_process() is called by __exit_signal(),and timer detaching also have done by it.  */
+                  /*  Linux 2.6 have no PIDTYPE_TGID,so __unhash_proces() call to detach_pid() thrice.  */
+
+            6>  if the process is not a thread group leader,the leader is a zombie,and the process is the last member
+                of the thread group,the function sends a signal to the parent of the leader to notify it of the death
+                of the process.(via do_notify_patent())
+
+            7>  invokes the sched_exit() function to adjust the timeslice of the parent process.
+                (similar to copy_process() where sched_fork() was called)
+
+            8>  invokes pus_task_struct() to decrease the process descriptor's usage counter(via call_rcu());
+                if the counter becomes zero,the function drops any remaining reference to the process :
+                  a>  decreases the usage counter(@__count field) of the user_struct data structure of the user that owns
+                      the process,and release that data structure if the usage counter becomes zero.
+                  b>  releases the process descriptor and the memory area used to contain the thread_info descriptor and
+                      the Kernel Mode stack.
+                
+
+/*  END OF CHAPTER3  */
             
