@@ -3676,3 +3676,37 @@ Chapter 4 : Interrupts and Exceptions
         #  each interrupt or exception is identified by a number ranging from 0 -- 255,Intel calls this 8-bit unsigned number
            a vector.the vectors of nonmaskable interrupts and exceptions are fixed,while those of maskable interrupts can be
            altered by programming the Interrupt Controller.
+
+    IRQs and Interrupts :
+      each hardware device controller capable of issuing interrupt requests usually has a single output line designated as
+      the Interrupt ReQuest(IRQ) line(more sophisticated devices use several IRQ lines,i.e. PCI card).
+      all existing IRQ lines are connected to the input pins of a hardware circuit called the Programmable Interrupt Controller.
+      the actions that Programmable Interrupt Controller takes :
+        1>  Monitors the IRQ lines,checking for raised signals.If two or more IRQ lines are raised,selects the one having the
+            lower pin number.
+        2>  If a raised signal occurs on an IRQ line :
+              >  Converts the raised signal received into a corresponding vector.
+              >  Stores the vector in an Interrupt Controller I/O part,thus allowing the CPU to read it via the data bus.
+              >  Sends a raised signal to the processor INTR pin--that is,issues an interrupt.
+              >  Waits until the CPU acknowledges the interrupt signal by writing into one of the Programmable Interrupt Controllers
+                 (PIC) I/O ports;when this occurs,clears the INTR line.
+        3>  Goes back to step 1.
+
+      IRQ lines start from 0,therefore,the first IRQ line is usually denoted as IRQ0.
+      Intel's default vector associated with IRQn is n+32,but such mapping can be modified by issuing suitable I/O instructions
+      to the Interrupt Controller ports.
+
+      IRQ lines is selectively disabled/enabled via PIC,then that IRQ line will no longer issues interrupts.
+      Disable interrupts are not lost;the PIC sends them to the CPU as soon as they are enabled again.
+
+      !  Selectively enabling/disabling of IRQs is not the same as global masking/unmasking of maskable interrupts.
+         eflags.IF flag controls that CPU whether ignores the maskable interrupt.
+
+      !  Traditional PICs are implemented by connecting "in cascade" two 8259A-style external chips,each chip can handle up to
+         eight different IRQ input lines.because the INT output line of the slave PIC is connected to the IRQ2 pin of the master
+         PIC,the number of available IRQ lines is limited to 15.
+         e.g.
+           A{ IRQ0 ... IRQ7 }-(INT output line)-->{B.IRQ2 B{ IRQ0 IRQ1 IRQ3 ... IRQ7 }}
+
+    The Advanced Programmable Interrupt Controller(APIC) :
+      INT output line straightforward connect to INTR pin of the CPU is only valid on a single CPU platform.
