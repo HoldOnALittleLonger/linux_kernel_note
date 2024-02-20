@@ -3706,7 +3706,73 @@ Chapter 4 : Interrupts and Exceptions
          eight different IRQ input lines.because the INT output line of the slave PIC is connected to the IRQ2 pin of the master
          PIC,the number of available IRQ lines is limited to 15.
          e.g.
-           A{ IRQ0 ... IRQ7 }-(INT output line)-->{B.IRQ2 B{ IRQ0 IRQ1 IRQ3 ... IRQ7 }}
+           A{ IRQ0 ... IRQ7 }-(INT output line)-->{B.IRQ2 B{ IRQ0 IRQ1 IRQ3 ... IRQ7 }}-(INT output line)-->CPU INTR pin
 
     The Advanced Programmable Interrupt Controller(APIC) :
       INT output line straightforward connect to INTR pin of the CPU is only valid on a single CPU platform.
+      Being able to deliver interrupts to each CPU in the system is crucial for fully exploiting the parallelism of the SMP
+      architecture.
+
+      I/O Advanced Programmable Interrupt Controller(I/O APIC) introduced from Intel Pentium III.
+      80x86 microprocessors include a local APIC which has 32-bit registers,an internal clock,a local timer device,and two
+      additional IRQ lines LINT0,LINT1 reserved for APIC interrupts.
+      All local APICs are connected to an external I/O APIC,giving rise to a multi-APIC system.
+      scheme :
+        CPU0.local APIC{local IRQs : LINT0, LINT1}          CPU1.local APIC{local IRQs : LINT0, LINT1}  ...
+                |                                                   |
+            -------------Interrupt Controller Communication(ICC) bus----------
+                                        |
+                                    I/O APIC
+                                        ^
+                                        |
+                                    external IRQs(IRQs from hardware)
+
+      The I/O APIC consists of a set of 24 IRQ lines,a 24-entry Interrupt Redirection Table,programmable registers,and a 
+      message unit for sending and receiving APIC messages over the APIC bus.
+      interrupt priority is not related to pin number(8259A relating to pin number) :
+        each entry in the Redirection Table can be individually programmed to indicate the interrupt vector and priority,
+        the destination processor,and how the processor is selected.
+        the information in the Redirection Table is used to translate each external IRQ signal into a message to one or
+        more local APIC units via the APIC bus.
+
+      external IRQs distributing :
+        static distribution >
+          the IRQ signal is delivered to the local APICs listed in the corresponding Redirection Table entry,the interrupt
+          is delivered to one specific CPU,to a subset of CPUs,or to all CPUs at once(broadcast mode).
+
+        dynamic distribution >
+          the IRQ signal is delivered to the local APIC of the processor that is executing the process with the lowest
+          priority.
+
+          #  every local APIC has a programmable task priority register(TPR),which is used to compute the priority of the
+             currently running process.(it is modified when process switch occurred,kernel modifies it)
+
+          if two or more CPUs share the lowest priority,the load is distributed between them using a technique called
+          "arbitration" :
+            each CPU is assigned a different arbitration priority ranging from 0(lowest) to 15(highest) in the arbitration
+            priority register of the local APIC.
+            each time an interrupt is delivered to a CPU,its corresponding arbitration priority is automatically set to 0,
+            while the arbitration priority of any other CPU is increased.when the arbitration priority register becomes
+            greater than 15,it is set to the previous arbitration priority of the winning CPU increased by 1.
+                previous_priority := WINNING_CPU.priority
+                if ++(this.priority) > 15
+                then
+                    this.priority := ++previous_priority
+          
+          !  Pentium 4 local APIC does not have an arbitration priority register,the mechanism is hidden in the bus
+             arbitration circuitry.
+
+      the multi-APIC system allows CPUs to generate "interprocessor interrupts" :
+        when a CPU wishes to send an interrupt to another CPU,it stores the interrupt vector and the identifier of the
+        target's local APIC in the Interrupt Command Register(ICR) of its own local APIC,a message is then sent via the
+        APIC bus to the target's local APIC,which therefore issues a corresponding interrupt to its own CPU.
+
+        !  IPIs are actively used by Linux to exchange messages among CPUs.
+
+      multi-APIC for uniprocessor system :
+        it include an I/O APIC chip,which may be configured in two distinct ways :
+          1>  as a standard 8259A-style external PIC connected to the CPU.
+              the local APIC is disabled and the two LINT0 and LINT1 local IRQ lines
+              are configured,respectively,as the INTR and NMI pins.
+          2>  as a standard external I/O APIC.
+              the local APIC is enabled,and all external interrupts are received through the I/O APIC.
