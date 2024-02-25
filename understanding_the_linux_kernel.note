@@ -3903,5 +3903,101 @@ Chapter 4 : Interrupts and Exceptions
 
         #  In particular,the value of the Type field encoded in the bits 40-43 identifies the descriptor type.
         #  Linux use interrupt gate to handle interrupts,and use trap gate to handle exceptions.
-            
-        
+
+    Hardware Handling of Interrupts and Exceptions :
+      /*  Suppose Kernel has been initialized,and CPU running on protected mode  */
+
+      Before CPU executes the next instruction,it checks if an interrupt or an exception occurred while it executed the
+      previous instruction.if it is,then CPU control unit does the following :
+        1>  determines the vector i(0 <= i <= 255) associated with the interrupt or the exception.
+        2>  reads the i_th entry in IDT through idtr.
+        3>  gets the base address of the GDT from the gdtr register and looks in the GDT to read the Segment Descriptor
+            identified by the selector in the IDT entry.this descriptor specifies the base address of the segment that
+            includes the interrupt or exception handler.
+        4>  makes sure the interrupt was issued by an authorized source.
+            first
+              compares the CPL which is stored in the two least significant bits of the cs register with the DPL of the
+              Segment Descriptor included in the GDT.
+              if cs.CPL < GDT.Segd.DPL
+                    Raises a "General protection" exception     /*  interrupt handler cannot have a lower privilege than  */
+                                                                /*  the program that caused the interrupt.  */
+            second (for programmed exceptions)
+              makes a further security check :
+                compares the CPL with the DPL of the gate descriptor included in the IDT.
+              if cs.CPL > IDT.entry.DPL
+                    Raises a "General protection" exception
+              
+              !  prevent access by user applications to specific trap of interrupt gates.
+        5>  checks whether a change of privilege level is taking place -- if CPL is different from the selected
+            Segment Descriptor's DPL.(selected Segd,but cs.CPL has changed)
+            if cs.CPL != GDT.Segd.DPL
+              start using the stack that is associated with the new privilege level
+              {
+                a>  reads the tr register to access the TSS segment of the running process.
+                b>  loads the ss and esp registers with the proper values for the stack segment and stack pointer
+                    associated with the new privilege level.these values are found in the TSS.
+                c>  in the new stack,it saves the privous values of ss and esp,which define the logical address of the
+                    stack associated with the old privilege level.
+              }
+        6>  if a fault has occurred,it loads cs and eip with the logical address of the instruction that caused the 
+            exception so that is can be executed agian.
+        7>  saves the contents of eflags,cs,and eip in the stack.
+        8>  if the exception carries a hardware error code,it saves it on the stack.
+        9>  loads cs and eip,respectively,with the Segment Selector and the Offset fields of the Gate Descriptor stroed
+            in the i_th entry of the IDT.these values define the logical address of the first instruction of the 
+            interrupt or exception handler.
+
+      After the interrupt or exception is processed,the corresponding handler must relinquish control to the interrupted
+      process by using the "iret" instruction.
+      "iret" forces the CPU control unit to does :
+        1>  load the cs,eip,and eflags registers with the values saved on the stack.
+            if a hardware error code has been pushed in the stack on top of the eip contents,it must be popped
+            before executing iret.
+        2>  check whether the CPL(cs.CPL) of the handler is equal to the value contained in the two least significant bits of
+            cs(the content of cs is saved on the stack).
+            if cs.CPL == stack.cs.CPL
+              the interrupted process was running at the same privilege level as the handler,
+              "iret" concludes execution.
+            else
+              load the ss and esp registers from the stack and return to the stack associated with the old privilege level.
+              examine the contents of the ds,es,fs,and gs segment registers :
+                if any of them contains a selector that refers to a Segment Descriptor whose DPL values is lower than CPL,
+                clear the corresponding segment register.
+                /*  The CPU control unit does this to forbid User Mode programs that run with a CPL equal to 3 from using
+                 *  segment registers previously used by Kernel routines(with a DPL equal to 0).
+                 */
+
+    Nested Execution of Exception and Interrupt Handlers :
+      Kernel control paths may be arbitrarily nested;an interrupt handler may be interrupted by another interrupt handler.
+      the last instructions of a kernel control path that is taking care of an interrupt do not always put the current
+      process back into User Mode :
+        if the level of nesting is greater than 1,these instructions will put into execution the kernel control path that
+        was interrupted last,and the CPU will continue to run in Kernel Mode.
+
+      For kernel control path is able to nested,an interrupt handler must never block !
+      all the data needed to resume a nested kernel control path is stored in the Kernel Mode stack,which is tightly bound
+      to the current process.(interrupt handler shares stack to interrupted process)
+
+      An interrupt handler may preempt both other interrupt handlers and exception handlers,Conversely,an exception handler
+      never preempts an interrupt handler !
+
+      !  THE ONLY EXCEPTION THAT CAN BE TRIGGEED IN KERNEL MODE IS "Page Fault".
+      !  Interrupt handlers never perform operations that can induce page faults,and thus,potentially,a process switch.
+      !  In contrast to exceptions,interrupts issued by I/O devices do not refer to data structures specific to the 
+         current process.
+
+      Linux interleaves kernel control paths for two major reasons :
+        1>  to improve the throughput of programmable interrupt controllers and device controllers.
+            /*  device controller issues a signal on an IRQ line,
+             *  PIC transforms it into an external interrupt,
+             *  both PIC and device controller wait for CPU send an acknowledgment.
+             *  interleaves kernel control paths can let kernel send the acknowledgment while it is 
+             *  handling the previous interrupt.
+             */
+        2>  to implement an interrupt model without priority levels.
+            /*  no longer some predefined levels between interrupts are necessary.  */
+
+      !  On multiprocessor systems,several kernel control paths may execute concurrently,moreover,a kernel control
+         path associated with an exception may start executing on a CPU and, due to a process switch,migrate to
+         another CPU.
+              
