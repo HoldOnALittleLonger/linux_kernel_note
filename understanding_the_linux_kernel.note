@@ -4000,4 +4000,79 @@ Chapter 4 : Interrupts and Exceptions
       !  On multiprocessor systems,several kernel control paths may execute concurrently,moreover,a kernel control
          path associated with an exception may start executing on a CPU and, due to a process switch,migrate to
          another CPU.
-              
+
+    Initializing the Interrupt Descriptor Table :
+      before kernel enables interrupts,it must load the initial address of IDT into idtr register and initializes all
+      entries of IDT.
+      "int" instruction allows a User Mode process to issue an interrupt signal that has an arbitrary vector ranging
+      from 0 to 255,kernel must prevent illegal interrupts and exceptions simulated by User Mode process via "int".
+      /*  set DPL of gate descriptor up to 0,cs.CPL == 3 for User Mode process.  */
+
+      !  in a few cases,a User Mode process must be able to issue a programmed exception,for this,must set the
+         corresponding gate descriptor's DPL to 3.(that is as high as possible)
+
+      Interrupt,Trap,and System Gates :
+        Linux uses a slightly different breakdown and terminology from Intel when classifying the interrupt
+        descriptors included in the Interrupt Descriptor Table :
+          >  Interrupt gate
+               an Intel interrupt gate that cannot be accessed by a User Mode process.(DPL = 0)
+               all Linux interrupt handlers are activated by means of Interrupt gates,and all are
+               restricted to Kernel Mode.
+
+          >  System gate
+               an Intel trap gate that can be accessed by a User Mode process.(DPL = 3)
+               the three Linux exception handlers associated with the vectors 4,5,128 are activated by means of
+               System gates,so the three assembly language instructions "into","bound",and "int $0x80" can be
+               issued in User Mode.
+
+          >  System interrupt gate
+               an Intel interrupt gate that can be accessed by a User Mode process.(DPL = 3)
+               the exception handler associated with the vector 3 is activated by means of a System interrupt gate,
+               so the assembly language instruction "int3" can be issued in User Mode.
+
+          >  Trap gate
+               an Intel trap gate that cannot be accessed by a User Mode process.(DPL = 0)
+               most Linux exception handlers are activated by means of Trap gates.
+
+          >  Task gate
+               an Intel task gate that cannot be accessed by a User Mode process.(DPL = 0)
+               the Linux handler for the "Double fault" exception is activated by means of a Task gate.
+
+      Architecture-dependent functions(just a little) were used to manipulate IDT :
+        the gate entity is defined in <arch/x86/include/asm/desc_defs.h> !
+        <arch/x86/include/asm/desc.h>
+          /*  set_intr_gate - insert an Interrupt gate entry into IDT.
+           *  @n:             index of IDT.
+           *  @addr:          address of interrupt handler.
+           */
+          static inline void set_intr_gate(unsigned int n, void *addr);
+
+          /*  set_system_trap_gate - insert a System trap gate entry into IDT.
+           *  @n:                    index of IDT.
+           *  @addr:                 trap handler address.
+           */
+          static inline void set_system_trap_gate(unsigned int n, void *addr);
+
+          /*  set_system_intr_gate - insert a System interrupt gate entry into IDT.
+          static inline void set_system_intr_gate(unsigned int n, void *addr);
+
+          /*  set_trap_gate - insert a Trap gate entry into IDT.
+          static inline void set_trap_gate(unsigned int n, void *addr);
+
+          /*  set_task_gate - insert a Task gate entry into IDT.
+           *  @n:             index of IDT.
+           *  @gdt_entry:     the index of TSS which is contained in GDT and the function
+           *                  to be activated is inside this TSS.
+           *                  TSSD can appear only in GDT,when this gate is called,use the
+           *                  index to pick the corresponding TSSD from GDT,and access to the TSS.
+           *                  the Segment Selector inside Task gate stores the index value.
+           *  #  I FOUND OUT Linux 2.6 ONLY USE TASK GATE TO DEAL WITH "Double fault" EXCEPTION,
+           *     AND "GDT_ENTRY_DOUBLEFAULT_TSS" IS DEFINED WITH VALUE 31.
+           *     OBJECT "doublefault_tss" IS DEFINED IN <arch/x86/kernel/doublefault_32.c>,IP
+           *     REGISTER IS POINT TO "doublefault_fn"(DEFINED IN SAME FILE).
+           *     THE GATE IS PLACED IN IDT WITH INDEX 8.
+           */
+          static inline void set_task_gate(unsigned int n, unsigned int gdt_entry);
+
+        #  all gate can be accessed only in Kernel Mode is attached __KERNEL_CS as the 
+           Segment Selector.
