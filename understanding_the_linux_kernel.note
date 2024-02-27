@@ -319,7 +319,7 @@ Chapter 1 : Introducation
       POSIX standard defines about 20 different signals,2 of which are user-definable and may be used as a primitive mechanism for
       communication and synchronization among processes in UserMode.
 
-      process may ignore the signal or asynchronously execute a specified procedure(signal handler),kernel provides the default
+      process may ignore the signal or asynchronously execute a specific procedure(signal handler),kernel provides the default
       signal handler for every signal.
       the default actions are :
         terminate the process
@@ -4070,9 +4070,101 @@ Chapter 4 : Interrupts and Exceptions
            *     AND "GDT_ENTRY_DOUBLEFAULT_TSS" IS DEFINED WITH VALUE 31.
            *     OBJECT "doublefault_tss" IS DEFINED IN <arch/x86/kernel/doublefault_32.c>,IP
            *     REGISTER IS POINT TO "doublefault_fn"(DEFINED IN SAME FILE).
-           *     THE GATE IS PLACED IN IDT WITH INDEX 8.
+           *     THE GATE IS PLACED IN IDT WITH INDEX 8,AND THE SEGMENT DESCRIPTOR IS PLACED IN THE
+           *     32nd ENTRY IN GDT.
            */
           static inline void set_task_gate(unsigned int n, unsigned int gdt_entry);
 
         #  all gate can be accessed only in Kernel Mode is attached __KERNEL_CS as the 
            Segment Selector.
+
+      Preliminary Initialization of the IDT :
+        IDT is initialized and used by the BIOS routines while the computer still operates in Real Mode.
+        However,the IDT is moved to another area of RAM and initialized a second time after Linux take over
+        control.(because Linux does not use any BIOS routine)
+
+        IDT is stored in the @idt_table table,which includes 256 entries,the 6-byte @idt_descr variable stores
+        both the size of the IDT and its address and is used in the system initialization phase when the kernel
+        sets up the idtr register with the lidt assembly language instruction.
+
+        assembly language function setup_idt() is used to initializes @idt_table,the 256 entries are filled with
+        ignore_int and the corresponding interrupt gate.
+        which function is defined in <arch/x86/kernel/head_32.S> :
+          setup_idt:
+                lea ignore_int,%edx                 #  load address of ignore_int into edx
+                movl $(__KERNEL_CS << 16),%eax      #  kernel code segment
+                movw %dx,%ax                        #  move the content in dx to ax
+                movw $0x8E00,%dx                    #  interrupt gate - dpl = 0,present
+
+                lea idt_table,%edi                  #  load address of idt_table into edi
+                mov $256,%ecx                       #  set up counter
+
+          rp_sidt:                                  #  repeat setup idt
+                movl %eax,(%edi)                    #  the 4-byte content from 0--31
+                movl %edx,4(%edi)                   #  the 4-byte content from 32--63
+                addl $8,%edi                        #  iterating
+                dec %ecx
+                jne rp_sidt
+
+          ...
+
+          ignore_int:
+                cld
+                iret 
+
+        ignore_int() :
+          a null handler.
+          #ifdef  CONFIG_PRINTK
+            ignore_int saves the content of some registers in the stack ->
+            invokes printk() to print an "Unknown interrupt" system message ->
+            restores the register contents from the stack ->
+            executes an "iret" instruction to restart the interrupted program.
+
+          !  the ignore_int() handler should never be executed.if it is executed,that denotes either a 
+             hardware problem(such an I/O devices is issuing unforeseen interrupts) or a kernel problem
+             (such an interrupt or exception is not being handled properly).
+
+        kernel replaces some of the null handlers with meaningful trap and interrupt handlers at the second
+        phase to set up IDT.
+
+        !  once this is done,the IDT includes a specialized interrupt,trap,or system gate for each different
+           exception issued by the control unit and for each IRQ recognized by the interrupt controller.
+
+    Exception Handling :
+      most exceptions issued by the CPU are interpreted by Linux as error conditions.
+      for example,CPU raises a "Divide error" exception,and the corresponding exception handler sends
+      a SIGFPE signal to the process caused this exception,then it takes the necessary steps to recover or abort.
+
+      Linux exploits CPU exceptions to manage hardware resources more efficiently :
+        >  Linux use "Device not available" exception and cr0.TS flag give rise to load the floating point registers
+           of the CPU with new values.
+        >  Linux use "Page Fault" exception to defer allocating new page frames to the process until the last
+           possible moment.(that is,schduler will take a place in the case)
+           !  "Page Fault" exception handler is very complex,because this exception may or may not denote an
+              error condition.
+
+      Standard structure of steps that exception handler takes :
+        1>  save the contents of most registers in the Kernel Mode stack(coded in assembly language)
+        2>  handle the exception by means of a high-level C function.
+        3>  exit from the handler by means of the ret_from_exception() function.
+
+      trap_init() :
+        Linux use this function to setup IDT entries that refer to nonmaskable interrupts and exceptions.
+
+        <arch/x86/kernel/traps.c>
+          /*  trap_init -  the x86 architecture specific trap initialization routine.
+           *  #  this function is call to set_trap_gate(),set_intr_gate(),set_system_gate(),
+           *     set_system_intr_gate(),set_task_gate() .etc to accomplishes trap initialization.
+           *     finally,call to x86_init_irqs.trap_init() to finishes the architecture dependent
+           *     trap initializing works.
+           */
+          void __init trap_init(void);
+
+          !  "Double fault" exception handler is set up by cpu_init() function and which is called by trap_init().
+             the "Double fault" exception is handled by means of a task gate instead of a trap or system gate,
+             because it denotes a serious kernel misbehavior.thus,the exception handler that tries to print out the
+             register values does not trust the current value of the esp register.
+             when this exception occurred,CPU executes the doublefault_fn() exception handler on its own private stack
+             (specified by TSS)
+
+        
