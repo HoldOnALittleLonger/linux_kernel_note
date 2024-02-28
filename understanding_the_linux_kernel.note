@@ -4167,4 +4167,73 @@ Chapter 4 : Interrupts and Exceptions
              when this exception occurred,CPU executes the doublefault_fn() exception handler on its own private stack
              (specified by TSS)
 
+      Saving the Registers for the Exception Handler : 
+        each exception handler starts with the following assembly language instructions : (defined in <arch/x86/kernel/entry_32.S>)
+          @handler_name:
+                pushl $0                    #  pad stack with null value,if control unit is not insert a hardware error code
+                                            #  on the stack automatically when the exception occurs.
+                pushl $do_handler_name      #  address of high-level C function
+                jmp error_code              #  the assembly code of "error_code" label will call to the function "do_##name()".
+        
+        the assembly language fragment labeled as "error_code" is the same for all exception handlers except the one for 
+        the "Device not available" exception.(Linux 2.6,it is same as others)
+        the code performs the following steps : (these are the default actions in Linux 2.6 for all exception handlers)
+          1>  saves the registers that might be used by the high-level C function on the stack.
+          2>  execute "cld".
+          3>  copied the hardware error code saved in the stack at location esp+36 in edx.
+              stores the value -1 in the same stack location,this value is used to separate 0x80 exceptions
+              from other exceptions.
+          4>  loads edi with the address of the high-level "do_##name()" C function saved in the stack at the
+              location esp+32,writes the contents of es in that stack location.
+          5>  loads in the eax register the current top location of the Kernel Mode stack.
+              this address identifies the memory cell containing the last register value saved in step1.
+          6>  loads the user data Segment Selector into the ds and es registers.
+          7>  invokes the high-level C function whose address is now stored in edi.
+
+        #  the invoked function receives its arguments from the eax and edx registers rather than from the stack.
+        #  all "do_##name()" high-level handlers are call to do_trap() function,which is defined in 
+           <arch/x86/kernel/traps.c>
+
+      Entering and Leaving the Exception Handler :
+        Kernel enters an exception handler through IDT,and then the correpsonding assembly function
+        is going to invoke "do_##name()" the high-level C function,it finally call to do_trap() function.
+
+        do_trap() :
+          <arch/x86/kernel/traps.c>
+            /*  do_trap - generic exception handling interface.
+             *  @trapnr:  number of excpetion.
+             *  @signr:   the signal must send to the process which cause the exception.
+             *  @str:     information.
+             *  @regs:    registers contents.
+             *  @error_code:  error code.
+             *  @info:    signal information.
+             *  #  @regs is passed by the exception handler which is in assembly language.
+             *  #  DO_ERROR() and DO_ERROR_INFO() macros are used to define "do_##name()" the
+             *     high-level C functions.
+             */
+            static void __kprobes do_trap(int trapnr, int signr, char *str, struct pt_regs *regs,
+                                          long error_code, siginfo_t *info);
+  
+          do_trap() will does :
+            1>  retrive current process's task_struct object.
+            2>  @tsk->thread.error_code = @error_code;
+                @tsk->thread.trap_no = @trapnr;
+                if !@info
+                      force_sig(@signr, @tsk);
+                else
+                      force_sig_info(@signr, @info, @tsk);
+                the signal will be handled either in User Mode by the process's own signal handler or
+                in Kernel Mode(default action).
+            3>  it is always checks whether the exception occurred in User Mode or in Kernel Mode.
+                in the Kernel Mode,have to checks whether it was due to an invalid argument passed to
+                a system call.(different system call deal with invalid argument is difference)
+                any other exception raised in Kernel Mode is due to a kernel bug,this denote kernel
+                is misbehaving,then call to die() function to prevent data corruption and prints the 
+                contents of all CPU registers on the console(this dump is called kernel oops),
+                the current process have to be terminated by calling do_exit().
+  
+          #  when the C function that implements the exception handling terminates,the code performs a
+             "jmp" instruction to the ret_from_exception() function.(return to the interrupted control path)
+               
+        
         
