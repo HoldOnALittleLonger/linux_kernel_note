@@ -4235,5 +4235,67 @@ Chapter 4 : Interrupts and Exceptions
           #  when the C function that implements the exception handling terminates,the code performs a
              "jmp" instruction to the ret_from_exception() function.(return to the interrupted control path)
                
-        
+    Interrupt Handling :
+      Interrupt handling is different to Exception Handling,so it would make no sense to send a Unix signal to the 
+      current process.
+
+      Interrupt handling depends on the type of interrupt :
+        I/O interrupts :
+          An I/O device requires attenton;the corresponding interrupt handler must query the device to determine the
+          proper course of action.
+
+        Timer interrupts :
+          some timer,either a local APIC timer or an external timer,has issued an interrupt;this kind of interrupt
+          tells the kernel that a fixed-time interval has elapsed.
+
+        Interprocessor interrupts :
+          A CPU issued an interrupt to another CPU of a multiprocessor system.
+
+      I/O Interrupt Handling :
+        in general,an I/O interrupt handler must be flexible enough to service several devices at the same time.
+        some devices might share a vector and a IRQ line.(vector 43 for USB port and Sound Card)
+
+        Interrupt handler flexibility is achieved in two distinct ways :
+          1>  IRQ sharing
+                the interrupt handler executes several interrupt service routines(ISRs).
+                each ISR is a function related to a single device sharing the IRQ line.
+                it is not possible to know in advance which particular device issued the IRQ,each ISR is
+                executed to verify whether its device needs attention;if so,the ISR performs all the operations
+                that need to be executed when the device raises an interrupt.
+
+          2>  IRQ dynamica allocation
+                An IRQ line is associated with a device driver at the last possible moment.
+                that is IRQ line is allocated on demand(the time need to access the device).
+                in this way,the same IRQ vector may be used by several hardware devices even if they cannot
+                share the IRQ line;of course,the hardware devices cannot be used at the same time.
+
+        not all actions to be performed when an interrupt occurs have the same urgency.
+        when an interrupt is handling,the signals on the corresponding IRQ line are temporarily ignored,
+        the interrupted process stay in the TASK_RUNNING state,a system freeze is possible to occur.
+
+        Long noncritical operations should be deferred,blocking procedure must to be prevented.
+
+        Actions for interrupt on Linux:
+          1>  Critical
+                actions such as acknowledging an interrupt to the PIC,reprogramming the PIC or the device controller,
+                or updating data structures accessed by both the device and the processor.
+                such actions must be performed as soon as possible(these can be executed quickly and are critical).
+                critical actions are executed within the interrupt handler immediately,with maskable interrupts disabled.
+
+          2>  Noncritical
+                actions such as updating data structures that are accessed only by the processor.
+                these actions can also finish quickly,so they are executed by the interrupt handler immediately,with
+                the interrupts enabled.
+
+          3>  Noncritical deferrable
+                actions such as copying a buffer's contents into the address space of a process.
+                these may be delayed for a long time interval without affecting the kernel operations;
+                the interested process will just keep waiting for the data.
+
+        Four basic actions all I/O interrupt handlers do :
+          1>  save the IRQ value and the register's contents on the Kernel Mode stack.
+          2>  send an acknowledgment to the PIC that is servicing the IRQ line,thus allowing it to issue
+              further interrupts.
+          3>  execute the interrupt service routines(ISRs) associated with all the devices that share the IRQ.
+          4>  terminate by jumping to the ret_from_intr() address. 
         
