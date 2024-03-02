@@ -4361,7 +4361,8 @@ Chapter 4 : Interrupts and Exceptions
         <kernel/irq/handle.c>
           /*  irq_desc - the irq_desc structure array used to establishes relationship
            *             between IRQ vector and IRQ descriptor.
-           *  @NR_IRQS:  255(range of vector from 0 -- 255)
+           *  @NR_IRQS:  number of IRQs in the system,architecture dependent,
+           *             if undefined,then it is defined with 64.
            *  #  the @handler_irq field for per-irq_desc is setup to "handle_bad_irq",
            *     and @status field is setup to "IRQ_DISABLED".
            */
@@ -4397,9 +4398,9 @@ Chapter 4 : Interrupts and Exceptions
           |        |   
           |        |   
           V        V
-          7        8     (IRQ0 <=> vector 7, IRQ1 <=> vector 8)
+          37       82    (IRQ0 <=> vector 37, IRQ1 <=> vector 82)
           |        |
-          irqd_7   irqd_13
+          irqd_37   irqd_82
           |           |
           ISR9     =======
                    |     |
@@ -4407,6 +4408,8 @@ Chapter 4 : Interrupts and Exceptions
 
           #  the mapping between IRQ line number and the vector is able to be altered via issue an
              I/O instruction to PIC.
+          #  the vector assignable in the scope [32, 238] is because some nonmaskable interrupts and exceptions
+             have the fixed vector.
         
         Status of an IRQ line :
           IRQ_INPROGRESS                a handler for the IRQ is being executed
@@ -4421,6 +4424,119 @@ Chapter 4 : Interrupts and Exceptions
           IRQ_LEVEL                     not used on the 80x86 architecture(IRQ level triggered)
           IRQ_MASKED                    not used(IRQ masked - should not be seen again)
           IRQ_PER_CPU                   not used on the 80x86 architectur(IRQ is per-cpu)
+
+          @depth field and IRQ_DISABLED specify whether the IRQ line is enabled or disabled.
+          <linux/interrupt.h>
+            /*  disable_irq - disable IRQ line,wait until all interrupt handlers for IRQ_irq
+             *                have completed before running.
+             *  @irq:         the IRQ line number.
+             */
+            extern void disable_irq(unsigned int irq);
+
+            /*  disable_irq_nosync - asynchronous version.  */
+            extern void disable_irq_nosync(unsigned int irq);
+
+            #  these two functions are let @depth increase,if @depth == 0,the functions disable theIRQ line
+               and set its IRQ_DISABLED flag(this is give rise before @depth increase). 
+
+            /*  enable_irq - enable a IRQ line.
+             *  #  this function decrease @depth,if @depth == 0,then enable the IRQ line and clean IRQ_DISABLED flag.
+             */
+            extern void enable_irq(unsigned int irq);
+
+          @status of each element in irq_desc array is initialized to IRQ_DISABLED during system initializing,this is
+          happens in "init_IRQ()" it is defined in <arch/x86/kernel/irqinit.c>(this function also initializes IDT).
+
+        Linux supports several PIC,so kernel designer have used object-oriented approach to encapsulate PIC object.
+        In older kernel,it is named "hw_interrupt_type",but in Linux 2.6,it is named "irq_chip".
+        <linux/irq.h>
+          /*  struct irq_chip - hardware interrup chip descriptor.
+           *  @name:            name for /proc/interrupts .
+           *  @startup:         start up the interrupt.
+           *  @shutdown:        shut down the interrupt.
+           *  @enable:          enable the interrupt.
+           *  @disable:         disable the interrupt.
+           *  @ack:             start of a new interrupt.
+           *  ...
+           *  @typename:        obsoleted by name,kept as migration helper. 
+           */
+          struct irq_chip {
+                const char *name;
+                unsigned int (*startup)(unsigned int irq);
+                void (*shutdown)(unsigned int irq);
+                void (*enable)(unsigned int irq);
+                void (*disable)(unsigned int irq);
+                void (*ack)(unsigned int irq);
+                ...
+                const char *typename;
+          };  /*  each irq_desc.chip is points to a irq_chip object.  */
+          /*  if @startup is nullptr,then @startup = @enable,
+           *  if @shutdown is nullptr,then @shutdown = @disable
+           */
+
+        Multiple devices can share a single IRQ,so kernel maintains "irqaction" structure for a
+        specific hardware device and a specific interrupt.
+        <linux/interrupt.h>
+          typedef irqreturn_t (*irq_handler_t)(int, void *);
+
+          /*  struct irqaction - per interrupt action descriptor.
+           *  @handler:          interrupt handler function.
+           *  @flags:            flags(IRQF_*).
+           *  @name:             name of the device.
+           *  @dev_id:           cookie to identify the device.
+           *  @next:             next irqaction for shared interrupts.
+           *  @irq:              interrupt number.
+           *  @dir:              pointer to the /proc/irq/NN/name entry.
+           *  @thread_fn:        interrupt handler function for threaded interrupts.
+           *  @thread:           thread pointer for threaded interrupts.
+           *  @thread_flags:     flags related to @thread.
+           *  #  Linux use this descriptor to represents a ISR.
+           *     the devices sharing the single IRQ line,every interrupt handler
+           *     for the device is encapsulate in an "irqaction" object.
+           */
+          struct irqaction {
+                irq_handler_t handler;
+                unsigned long flags;
+                const char *name;
+                void *dev_id;
+                struct irqaction *next;
+                int irq;
+                struct proc_dir_entry *dir;
+                irq_handler_t thread_fn;
+                struct task_struct *thread;
+                unsigned long thread_flags;
+          };
+
+          some values for irqaction.flags :
+            IRQF_DISABLED           keep irqs disabled when calling the action handler
+            IRQF_SHARED             allow sharing the irq among several devices
+            IRQF_SAMPLE_RANDOM      irq is used to feed the random generator
+
+        Kernel use a structure named "irq_cpustat_t" to keep track of what each CPU is currently doing,
+        and an array named "irq_stat" save "irq_cpustat_t" structure object the size is consistent to NR_CPUS.
+        <arch/x86/include/asm/hardirq.h>
+          /*  struct irq_cpustat_t - structure used by kernel to keep track of CPU in the system.
+           *  @__softirq_pending:    whether there is a softirq is pending.
+           *  @__nmi_count:          number of occurrences of NMI interrupts.
+           *  @irq0_irqs:            nmi watchdog.
+           *  @apci_timer_irqs:      number of occurrences of local APIC timer interrupts.
+           *  ...
+           */
+          typedef struct {
+                unsigned int __softirq_pending;
+                unsigned int __nmi_count;
+                unsigned int irq0_irqs;
+                unsigned int apic_timer_irqs;  /*  #ifdef CONFIG_X86_LOCAL_APIC  */
+                ...
+          } ____cacheline_aligned irq_cpustat_t;
+
+        <kernel/softirq.c>
+        #ifndef __ARCH_IRQ_STAT
+          /*  irq_stat - irq_cpustat_t array for per-cpu.  */
+          irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;
+          EXPORT_SYMBOL(irq_stat);
+        #endif
+          
 
          
 
