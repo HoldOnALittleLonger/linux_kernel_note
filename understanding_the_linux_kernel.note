@@ -4382,11 +4382,14 @@ Chapter 4 : Interrupts and Exceptions
          */
 
         sample figure :
-          IRQ0     IRQ1  (external device IRQ lines,physical circuit)
+          (dev1)   (dev2)
+          IRQ0     IRQ0 IRQ1  (external devices' IRQ lines,physical circuit)
+          |        |    |
+          |        ======
           |        |
           V        V
-          PIC      PIC   (hardware Programmable Interrupt Controller)
-          |        |
+          PIC      PIC        (hardware Programmable Interrupt Controller)
+          |        |          (INT output line)
           ===I/O APIC==== 
                |
                V
@@ -4398,13 +4401,13 @@ Chapter 4 : Interrupts and Exceptions
           |        |   
           |        |   
           V        V
-          37       82    (IRQ0 <=> vector 37, IRQ1 <=> vector 82)
+          37       82    (dev1.IRQ0 <=> vector 82, dev2.IRQ0 <=> vector 82, dev2.IRQ1 <=> vector 37)
           |        |
           irqd_37   irqd_82
           |           |
-          ISR9     =======
+          ISR9     =======      (ISR9 handles vector = 37 from dev2)
                    |     |
-                  ISR4   IRS7
+                  ISR4   IRS7   (ISR4 handles vector = 82 from dev1, ISR7 handles vector = 82 from dev2)
 
           #  the mapping between IRQ line number and the vector is able to be altered via issue an
              I/O instruction to PIC.
