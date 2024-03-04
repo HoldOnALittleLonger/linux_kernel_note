@@ -1823,7 +1823,7 @@ Chapter 3 : Processes
 
     Process descriptors handling :
       Processes are dynamic entities,Linux packs two different data structures in a single per-process memory area :
-	    >  thread_info
+	    >  thread_info                      /*  the structure is defined in <arch/x86/include/asm/thread_info.h>  */
 	    >  the Kernel Mode process stack
 
 	  the length of this memory area is usually 8kB(2 pages),kernel stores the 8kB memory area in two consecutive page
@@ -4539,6 +4539,73 @@ Chapter 4 : Interrupts and Exceptions
           irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;
           EXPORT_SYMBOL(irq_stat);
         #endif
+
+      IRQ distribution in multiprocessor systems :
+        when a hardware device raises an IRQ signal,the multi-APIC system selects one of the CPUs
+        and delivers the signal to the corresponding local APIC,which in turn interrupts its CPU,no other
+        CPUs are notified of the event.
+
+        during system bootstrap,the booting CPU executes the "static void __init setup_IO_APIC_irqs(void)"
+        which is defined in <arch/x86/kernel/apic/io_apic.c>,this function initializes the I/O APIC chip,
+        the Interrupt Redirection Table of the chip is filled(24-entry).
+        
+        during system bootstrap,after I/O APIC chip had initialized,all CPUs execute the
+        "void __cpu_init setup_local_APIC(void)" which is defined in <arch/x86/kernel/apic/apic.c>,
+        this function initializes the local APICs.the task priority register(TPR) of each chip is 
+        initialized to a fixed value,the CPU is willing to handle every kind of IRQ signal,regardless of 
+        its priority,and the linux kernel never modifies the value after its initialization.
+
+        #  all of these works are done by the hardware.
+           but in some cases,the IRQs is distributed in a unfair way to the CPUs by hardware.
+           Linux 2.6 makes use of a special kernel thread called kirqd to correct,if necessary,the 
+           automatic assignment of IRQs to CPUs.
+
+        <arch/x86/kernel/apic/io_apic.c>
+          /*  set_ioapic_affinity_irq - set affinity for a specific irq.
+           *  @irq:                     irq vector.
+           *  @mask:                    the CPUs that can receive the IRQ.
+           *  #  system administrator is able to change the irq affinity through write a 
+           *     new CPU bitmap mask into the "/proc/irq/@vector/smp_affinity" file.
+           */
+          static int set_ioapic_affinity_irq(unsigned int irq, const struct cpumask *mask);
+
+        #  kirqd periodically executes the "do_irq_balance()" function,which keep track of the
+           number of interrupt occurrences received by every CPU.
+           if imbalance has detected,then "move" IRQ from one CPU to another least loaded CPU,
+           or rotates all IRQs among all existing CPUs.
+
+      Multiple Kernel Mode stacks :
+        task_struct.stack -> thread_union := { thread_info, stack }(4kB or 8kB)
+        task_struct.thread_info => points to the thread_info object associated to current task_struct
+
+        if the size of the thread_union union is 8kB,the Kernel Mode stack of the current process
+        is used for every type of kernel control path :
+          exceptions, interrupts, deferrable functions
+
+        if the size of the thread_union union is 4kB,the kernel makes use of three types of Kernel Mode
+        stacks :
+          >  the exception stack is used when handling exceptions(including system call).
+             different process has different thread_union,and the stack is contained in it,thus
+             kernel makes use of a different exception stack for each process in the system.
+
+          >  the hard IRQ stack is used when handling interrupts.
+             there is one hard IRQ stack for each CPU in the system,and each stack is contained in a
+             single page frame.
+
+          >  the soft IRQ stack is used when handling deferrable functions.
+             there is one soft IRQ stack for each CPU in the system,and each stack is contained in a 
+             single page frame.
+
+        #  the per-cpu data @hardirq_stack is type of "union irq_ctx",the union is defined in
+           <arch/x86/kernel/irq_32.c>
+             union irq_ctx {
+                    struct thread_info tinfo;               /*  higher address  */
+                    u32 stack[THREAD_SIZE / sizeof(u32)];   /*  lower address  */
+             } __attribute__((aligned(PAGE_SIZE)));
+           and per-cpu data @softirq_stack also is type of "union irq_ctx".
+           @hardirq_stack is used for hard IRQ,and @softirq is used for deferrable functions.
+           stack grows towards lower address.
+
           
 
          
