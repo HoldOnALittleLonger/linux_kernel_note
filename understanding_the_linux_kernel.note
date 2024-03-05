@@ -4606,7 +4606,82 @@ Chapter 4 : Interrupts and Exceptions
            @hardirq_stack is used for hard IRQ,and @softirq is used for deferrable functions.
            stack grows towards lower address.
 
+      Saving the registers for the interrupt handler :
+        saving registers is the first task of the interrupt handler.
+        the address of the interrupt handler for IRQn is initially stored in the @interrupt[n] entry and
+        then copied into the interrupt gate included in the proper IDT entry.
+
+        the @interrupt array is build through assembly language instructions and which is defined in
+        <arch/x86/kernel/entry_32.S>.
+        the array contains NR_IRQS elements(Linux 2.6,NR_VECTORS = 256,FIRST_EXTERNAL_VECTOR = 32,so NR_IRQS = 256 - 32).
+        the element at index @n in the array stores the address of the following two assembly language instructions :
+          pushl $n-256
+          jmp common_interrupt
+
+          /*  Linux 2.6 constructs such entries via a more complex way :
+           *    ENTRY(interrupt)
+           *      ...
+           *    ENTRY(irq_entries_start)
+           *      ...
+           *      vector=FIRST_EXTERNAL_VECTOR
+           *      .rept (NR_VECTORS-FIRST_EXTERNAL_VECTOR+6)/7  #  int(result) = 32
+           *        .balign 32      #  position counter forwards to next address @p | 32
+           *        .rept 7         #  repeat sequence of code line beween next ".endr" 7 times
+           *          ...
+           *          pushl $(~vector+0x80)     #  vector number
+           *          .if ((vector-FIRST_EXTERNAL_VECTOR)%7) <> 6
+           *            jmp 2f      #  x86-opcode-map : 2f: DAS (i64)
+           *          .endif
+           *          .previous     #  continues processing of the previous section.
+           *            .long 1b      #  x86-opcode-map : 1b : SBB Gv,Ev
+           *          .text         #  .text subsection
+           *            vector=vector+1     #  update vector for next entry
+           *          ...
+           *        .endr
+           *      2:      jmp common_interrupt    #  jump to common_interrupt program
+           *      .endr
+           *   END(irq_entries_start)
+           *   .previous
+           *   END(interrupt)
+           *   #  pack 7 stubs into a single 32-byte chunk,and the pointer points to the handler
+           *      for the chunk is attached right after it("jmp common_interrupt").
+           */
+
+        Linux use positive number to identify a system call,so the negative number is used to identify
+        an interrupt.
+
+        common_interrupt:
+          addl $-0x80,(%esp)
+          SAVE_ALL
+          TRACE_IRQS_OFF
+          movl %esp,%eax
+          call do_IRQ
+          jmp ret_from_intr
+        ENDPROC(common_interrupt)   #  a macro function is defined in <linux/linkage.h>,
+                                    #  it will have expended to 
+                                    #    .type common_interrupt,@function
+                                    #    END(common_interrupt) =>
+                                    #      .size common_interrupt,.-common_interrupt
+          SAVE_ALL :
+            an assembly language macro.
+
+            saves the contents of all registers that the interrupt handler maybe use into stack.
+
+            movl $(__USER_DS),%edx  #  user data segment
+            movl %edx,%ds
+            movl %edx,%es
+            movl $(__KERNEL_PERCPU),%edx
+            movl %edx,%fs
+            SET_KERNEL_GS %edx      #  movl $(__KERNEL_STACK_CANARY),%edx
+                                    #  movl %edx,%gs
+
+            !  eflags,cs,eip,ss,and esp would not be saved,which are already saved automatically by the
+               control unit.
+
+          after SAVE_ALL accomplished,the stack be like :
+            [contents of registers]     <=  esp
+            [interrupt vector]
+            [former contents]
+            /*  [eip] if @common_interrupt is executed through "call" instruction,but it is not  */
+            ...
           
-
-         
-
