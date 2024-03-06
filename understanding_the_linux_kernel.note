@@ -4684,4 +4684,83 @@ Chapter 4 : Interrupts and Exceptions
             [former contents]
             /*  [eip] if @common_interrupt is executed through "call" instruction,but it is not  */
             ...
+
+      do_IRQ() function :
+        <arch/x86/include/asm/irq.h> <arch/x86/kernel/irq.c>
+          /*  do_IRQ - do interrupt request,@common_interrupt call to this function.
+           *  @regs:   pointer points to pt_regs object,the structure saveing the
+           *           contents of registers.
+           *  return:  always return 1.
+           *  #  because this function is called by @common_interrupt,thus,the content of eax
+           *     is the content of esp,which is pointing the saved contents of registers by
+           *     @SAVE_ALL.
+           *     the top element on the stack is content of ebx,and the first member in pt_regs
+           *     is named @bx with type of unsigned long.
+           *     the member @orig_ax saved the vector of current irq,because its content is the 
+           *     content of esp before @SAVE_ALL had called.
+           */
+          extern unsigned int __irq_entry do_IRQ(struct pt_regs *regs);
+
+        the high-level IRQ handler enter point :
+          1>  save the old registers in @old_regs.
+
+          2>  get @vector from @orig_ax.
+
+          3>  get @irq from a per-cpu data which is an array named @vector_irq,the elements in it
+              is the @irq,and index is @vector.
+              @vector_irq is initialized by "__setup_vector_irq()",it use a "for" cycle to initializes
+              this array for the a specific cpu.
+              macro "for_each_irq_desc" is defined in <linux/irqnr.h>.
+              @irq is start from 0 to NR_IRQS,but @vector maybe not,because the value of @vector as
+              an index for @vector_irq is got from desc->chip_data,which is type of void pointer,and
+              it will points to the device PIC cfg data.(through PIC,the vector is mutable)
+              #  the vector is able to be used by devices is in the range [32, 238].(local APIC enabled)
+
+          4>  call to "irq_enter()" start tracing.
+              a counter representing the number of nested interrupt handles was increased.
+              the counter is stored in the @preempt_count filed of the thread_info structure of 
+              current process.
+
+          5>  call to "handle_irq(@irq, @regs)" which is defined in <arch/x86/kernel/irq_32.c>.
+
+          6>  if function "handle_irq()" was failed to retrive irq descriptor via @irq,then returns
+              "false",in this case,"ack_APIC_irq()" was called to acknowledge the @irq(it is not
+              be handled,because no irq descriptor was find out).
+              error message is printed.
           
+          7>  call to "irq_exit()" stop tracing.
+              decrease the interrupt counter and checks whether deferrable kernel functions are waiting
+              to be executed.
+
+          8>  restore registers.
+
+          9>  return control to @common_interrupt,and "ret_from_intr()" will be called.
+
+          #  if "handle_irq()" is succed to handles,the @irq must been acknowledged.
+          #  "handle_irq()" checks whether on an interrupt stack now,if current stack is a IRQ stack,
+             then keep using this IRQ stack,and call to desc->handle_irq(@irq, @desc);
+             otherwise,switch to the IRQ stack for current CPU and then exchange ebx and esp,call to
+             desc->handle_irq(@irq, @desc),exchange ebx and esp again after "handle_irq()" is completed.
+             
+             /*  it is on an interrupt stack now,that is,a hardirq handler is interrupted.  */
+             /*  the current task is stored in @irqctx->tinfo.task
+              *  the previous stack is stored in @irqctx->tinfo.previous_esp
+              *  and the softirq bits in @preempt_count was copied,thus,the softirq checks work in
+              *  the hardirq context
+              */
+
+          #  there is some difference for x86_64 platform about "handle_irq()" function.
+             on x86_64,"handle_irq()" will calls to "generic_handle_irq_desc()" function which
+             is defined in <linux/irq.h> as a static inline function.
+             that function checks whether desc->handle_irq is NULL,if it is,then call to "__do_IRQ()"
+             function;otherwise call to desc->handle_irq.
+          #  the function "__do_IRQ()" is the original all in one high-level IRQ handler.
+             but this function is deprecated.
+             this function is existed only CONFIG_GENERIC_HARDIRQS_NO__DO_IRQ is off.                
+
+        /*  The actions to take while desc->handle_irq is NULL :
+         *    x86_32:  do nothing except to acknowledge PIC.
+         *    x86_64:  call to __do_IRQ().
+         */
+              
+
