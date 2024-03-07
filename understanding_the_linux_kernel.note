@@ -4619,32 +4619,69 @@ Chapter 4 : Interrupts and Exceptions
           jmp common_interrupt
 
           /*  Linux 2.6 constructs such entries via a more complex way :
+           *  <linux/linkage.h>
+           *    #define ENTRY(name)  \
+           *        .global name;
+           *        ALIGN;
+           *        name:
+           *
+           *    #ifndef END
+           *    #define END(name)    \
+           *        .size name, .-name
+           *    #endif
+           *
+           *    ----------------------
+           *
+           *  <arch/x86/kernel/entry_32.S>
+           *    .section .init.rodata,"a"
            *    ENTRY(interrupt)
-           *      ...
+           *    .text
+           *        ...             #  now in .init.text subsection
            *    ENTRY(irq_entries_start)
            *      ...
-           *      vector=FIRST_EXTERNAL_VECTOR
+           *      vector=FIRST_EXTERNAL_VECTOR      #  vector = FIRST_EXTERNAL_VECTOR = 32
            *      .rept (NR_VECTORS-FIRST_EXTERNAL_VECTOR+6)/7  #  int(result) = 32
            *        .balign 32      #  position counter forwards to next address @p | 32
            *        .rept 7         #  repeat sequence of code line beween next ".endr" 7 times
            *          ...
-           *          pushl $(~vector+0x80)     #  vector number
-           *          .if ((vector-FIRST_EXTERNAL_VECTOR)%7) <> 6
-           *            jmp 2f      #  x86-opcode-map : 2f: DAS (i64)
+           *    1:    pushl $(~vector+0x80)     #  vector number
+           *          .if ((vector-FIRST_EXTERNAL_VECTOR)%7) <> 6   #  if (vector-32)%7 != 6 ?
+           *            jmp 2f      #  '2' is a label,and suffix 'f' means 'f'orward search '2'
+           *                        #  immediate value 2 => $2
+           *                        #  address 2 => 0x02
+           *                        #  near jump
            *          .endif
            *          .previous     #  continues processing of the previous section.
-           *            .long 1b      #  x86-opcode-map : 1b : SBB Gv,Ev
+           *            .long 1b    #  'b'ackward search '1','1' is a label.
+           *                        #  now in .init.rodata subsection
            *          .text         #  .text subsection
            *            vector=vector+1     #  update vector for next entry
+           *                                #  now in .init.text subsection
            *          ...
            *        .endr
-           *      2:      jmp common_interrupt    #  jump to common_interrupt program
+           *    2:      jmp common_interrupt    #  jump to common_interrupt program
            *      .endr
            *   END(irq_entries_start)
-           *   .previous
+           *   .previous            #  now in .init.text subsection
            *   END(interrupt)
            *   #  pack 7 stubs into a single 32-byte chunk,and the pointer points to the handler
            *      for the chunk is attached right after it("jmp common_interrupt").
+           *   #  .init.rodata has an array :
+           *        [index0] := label 1  (an address of an opcode)  #  now @vector = 32
+           *        [index1] := label 1  #  the opcode been compiled and @vector is updated.    
+           *        ...                  #  the total number of elements in this array is 224.
+           *                             #  elements in vector range 0--31 has been initialized by
+           *                             #  trap_init().
+           *   #  .init.text :
+           *        irq_entries_start:  #  a symbol
+           *          pushl $(~vector+0x80)     #  the first stub in the 32-byte chunk
+           *          jmp 2f                    #  the first stub in the 32-byte chunk
+           *          ...                       #  repeat 5 times
+           *          pushl $(~vector+0x80)     #  the seventh stub in the 32-byte chunk
+           *          jmp common_interrupt      #  the secenth stub in the 32-byte chunk
+           *                                    #  ! AND 2f IS THE ADDRESS OF THIS OPCODE
+           *        #  all 224 stubs.the exception special stubs had been initialized by trap_init()
+           #        #  only external interrupts are placed there.
            */
 
         Linux use positive number to identify a system call,so the negative number is used to identify
