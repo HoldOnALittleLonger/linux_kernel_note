@@ -4496,9 +4496,9 @@ Chapter 4 : Interrupts and Exceptions
            *  @thread_fn:        interrupt handler function for threaded interrupts.
            *  @thread:           thread pointer for threaded interrupts.
            *  @thread_flags:     flags related to @thread.
-           *  #  Linux use this descriptor to represents a ISR.
+           *  #  Linux use this descriptor to represents an ISR.
            *     the devices sharing the single IRQ line,every interrupt handler
-           *     for the device is encapsulate in an "irqaction" object.
+           *     for the device is encapsulated in an "irqaction" object.
            */
           struct irqaction {
                 irq_handler_t handler;
@@ -4749,7 +4749,7 @@ Chapter 4 : Interrupts and Exceptions
           3>  get @irq from a per-cpu data which is an array named @vector_irq,the elements in it
               is the @irq,and index is @vector.
               @vector_irq is initialized by "__setup_vector_irq()",it use a "for" cycle to initializes
-              this array for the a specific cpu.
+              this array for a specific cpu.
               macro "for_each_irq_desc" is defined in <linux/irqnr.h>.
               @irq is start from 0 to NR_IRQS,but @vector maybe not,because the value of @vector as
               an index for @vector_irq is got from desc->chip_data,which is type of void pointer,and
@@ -4856,11 +4856,11 @@ Chapter 4 : Interrupts and Exceptions
         #  "handle_IRQ_event()" is run with local cpu irq disabled,that is "__do_IRQ()" is run with local cpu irq
            disabled.
            the CPU control unit automatically clears eflags.IF because the interrupt handler is invoked through an
-           IDT's interrupt gate.
+           IDT's interrupt gate.(IF indicates if CPU receives maskable interrupt)
            but after "handle_IRQ_event()" finished,the local cpu irq will be enabled again.
 
         #  why not service the third or the fourth?
-           because the acknowledge is deferred before __do_IRQ() exit.
+           because the acknowledge is deferred before __do_IRQ() exit.(no ack() was called while ISR running)
            so the local APIC of current CPU would not accept further interrupts.(I/O APIC)
            although further occurrences of this type of interrupt may be accepted by other CPU.
         #  everytime "handle_IRQ_event()" returned,the function "note_interrupt()" is called if @noirqdebug is false.
@@ -4928,6 +4928,170 @@ Chapter 4 : Interrupts and Exceptions
               *    Disable interrups are not lost;the PIC sends them to the CPU as soon as they are
               *    enabled again.
               */
+
+      Interrupt Service Routines :
+        the actions relate to an interrupt the handler have to takes named ISRs,and these actions are executed
+        by the function "handle_IRQ_event()".ISR just specific to one type of device.
+
+        <linux/irqreturn.h>
+          enum irqreturn {
+                IRQ_NONE,           /*  interrupt was not from this device  */
+                IRQ_HANDLED,        /*  interrupt was handled by this device  */
+                IRQ_WAKE_THREAD     /*  handler requests to wake the handler thread  */
+          };
+          typedef enum irqreturn irqreturn_t;
+
+          /*  IRQ_RETVAL - if the interrupt is handled  */
+          #define IRQ_RETVAL(X)  ((x) != IRQ_NONE)
+
+        <linux/irq.h>
+          typedef void (*irq_flow_handler_t)(unsgned int irq, struct irq_desc *desc);
+          
+          /*  handle_IRQ_event - the primary worker deal with a specific interrupt.
+           *                     this function call to the actions associated to the IRQ line,
+           *                     until one of ISR handled it.
+           *  @irq:              IRQ number.
+           *  @action:           ISRs.
+           *  return:            a value is type of enum irqreturn.
+           */
+          extern irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action);
+
+          the works "handle_IRQ_event()" does :
+            1>  if IRQ_DISABLED in @action is not set,then call to "local_irq_enable_in_hardirq()" to
+                enable @irq.thus,new interrupt is able to be raised on this IRQ line.
+                ("sti" assembly instruction.and if an action for an interrupt must disabled maskable
+                 interrupts before start handling,that is the action is critical.) 
+            
+            2>  enter a loop,iterator is @action,until @action is NULL.
+
+            3>  start trace irq handling through "trace_irq_handler_entry(@irq, @action)",
+                call to @action->handler(@irq, @action->dev_id),
+                stop trace irq handling through "trace_irq_handler_exit(@irq, @action, ret)".
+
+            4>  switch-cases :
+                  ret = IRQ_WAKE_THREAD >
+                    ret := IRQ_HANDLED
+                    wake_up_process(action->thread)  /*  action->thread_fn must be not NULL,
+                                                      *  IRQF_DIED is not set in @action->thread_flags.
+                                                      */
+
+                  ret = IRQ_HANDLED >
+                    local var @status |= action->flags
+
+                  default >
+                    none
+
+            5>
+                local var @retval |= ret         /*  this variable will be return value and initialized to
+                                                  *  IRQ_NONE at first.
+                                                  *  there is the only place in the function @retval is changed.
+                                                  */
+                update @action to next ISR
+
+            6>  exit loop
+
+            7>  if IRQF_SAMPLE_RANDOM is set in @status,@irq will be used to feed random number generator.
+
+            8>  call to "local_irq_disable()" to restore the state of local IRQ line,if it was not diabled
+                early,this function does nothing.("cli" assembly instruction)
+                return @retval.
+
+          #  Attention :
+                value of IRQ_NONE is zero.
+                and,even there is an ISR handled current interrupt in the loop,the loop is still continues
+                unitl @action is NULL.
+                thus,if the interrupt is serviced,just @retval is not able to reveal how many ISRs was called.
+
+          #  register informations had stored on the stack by @SAVE_ALL assembly macro function,and "do_IRQ()"
+             writes the address about the top of stack that is where esp points to into a percpu data which
+             is named @irq_regs.
+             so call to ISR do not need to transmit register contents.
+
+          #  suppose,ISR1 requests IRQ line is disabled,but ISR2 requests IRQ line is enabled,then ISR2 will
+             be called with IRQ line disabled,because that loop do not check whether local IRQ line have to
+             be enabled or disabled.
+                  
+      Dynamic Allocation of IRQ Lines :
+        except to reserved vectors for specific devices,the remaining ones are dynamically handled.
+        there is,a way in which the same IRQ line can be used by several hardware devices even if they do
+        not allow IRQ sharing.
+        !  THE TRICK IS TO SERIALIZE THE ACTIVATION OF THE HARDWARE DEVICES SO THAT JUST ONE OWNS THE
+           IRQ LINE AT A TIME.
+
+        <linux/interrupt.h>
+        typedef irqreturn_t (*irq_handler_t)(int, void *);
+
+        #ifdef CONFIG_GENERIC_HARDIRQS
+          extern int __must_check request_threaded_irq(unsigned int irq, irq_handler_t handler, 
+                                                       irq_handler_t thread_fn, unsigned long flags,
+                                                       const char *name, void *dev);
+          static inline int __must_check
+          request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags, const char *name, void *dev);
+        #else
+          extern int __must_check request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
+                                              const char *name, void *dev);
+          extern int __must_check request_threaded_irq(unsigned int irq, irq_handler_t handler, 
+                                                       irq_handler_t thread_fn, unsigned long flags,
+                                                       const char *name, void *dev);
+        #endif
+        /*  request_irq - request to register an ISR on an IRQ line.
+         *  @irq:         IRQ number.
+         *  @handler:     handler.
+         *  @flags:       flags.
+         *  @name:        device specified information used in "/proc/irq" and "/proc/interrupts".
+         *  @dev:         device specified data.
+         *  return:       0 or error code.
+         */ 
+
+        /*  request_threaded_irq - request to register an ISR with threaded environment.
+         *  @irq:                  IRQ number.
+         *  @handler:              handler.
+         *  @thread_fn:            thread function.
+         *  @flags:                irqaction flags.
+         *  @name:                 device specified information.
+         *  @dev:                  device specified data.
+         *  return:                0 or error code.
+         */
+
+        #  to insert an irqaction descriptor in the proper list,the kernel invokes the "setup_irq()" function,
+           passing to it the parameters @irq IRQ number and an address about the new irqaction object.
+           if there is device used @irq previously,then check whether IRQF_SHARED is set.if it is not setup,
+           then register ISR on @irq will be refused.
+           @new_irqaction is added into irq_desc[@irq]->action list.
+           !  if no other device is sharing the same IRQ,the function("setup_irq()") clears the
+              IRQ_DISABLED,IRQ_AUTODETECT,IRQ_WAITING,IRQ_INPROGRESS flags in the interrupt descriptor 
+              corresponding to this @new_irqaction.
+
+        !  IN THE CASE THAT CONFIG_GENERIC_HARDIRQS IS NOT DEFINED,FUNCTION "request_irq()" IS UNDEFINED,BUT
+           "request_threaded_irq()" IS DEFINED AND EXPORTED.
+           IN THE CASE THAT CONFIG_GENERIC_HARDIRQS IS DEFINED,FUNCTION "request_irq()" JUST A WRAPPER WHICH
+           CALL TO "request_threaded_irq()" WITH NULL @thread_fn.
+
+        flags for ISR :
+          IRQF_DISABLED         keep irqs disabled when calling the action handler
+          IRQF_SAMPLE_RANDOM    feed random number generator
+          IRQF_SHARED           allow sharing the irq among several devices
+          IRQF_PROBE_SHARED     set by callers when they expect sharing mismatches to occur
+          IRQF_TIMER            mark this interrupt as timer interrupt
+          IRQF_PERCPU           interrupt is percpu
+          IRQF_NOBALANCING      exclude this interrupt from irq balancing
+          IRQF_IRQPOLL          interrupt is used for polling
+                                (only the interrupt that is registered first in an shared interrupt is
+                                 considered for performance reasons)
+          IRQF_ONESHOT          interrupt is not reenabled after the hardirq handler finished.
+                                used by threaded interrupts which need to keep the irq line disabled
+                                until the threaded handler has been run
+
+          /*  free_irq - free a registered IRQ line.
+           *  @irq:      the IRQ line.
+           *  @dev:      identifier of the ISR in action list.(irq_desc[@irq]->action)
+           *  #  if the ISR is the last interrupt service routine in the action list,
+           *     then disable the IRQ line.(shut it down)
+           */
+          extern void free_irq(unsigned int irq, void *dev);
+
+        !  DO NOT CALL TO "request_irq()" IN AN INTERRUPT CONTEXT,BECAUSE OF IT MIGHT ENTER SLEEP.
+                   
         
         
 
