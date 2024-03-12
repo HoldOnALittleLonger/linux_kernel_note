@@ -5091,9 +5091,143 @@ Chapter 4 : Interrupts and Exceptions
           extern void free_irq(unsigned int irq, void *dev);
 
         !  DO NOT CALL TO "request_irq()" IN AN INTERRUPT CONTEXT,BECAUSE OF IT MIGHT ENTER SLEEP.
-                   
+
+    Interprocessor Interrupt Handling :
+      Interprocessor interrupts allow a CPU to send interrupt signals to any other CPU in the system.
+      IPI is delivered not through an IRQ line,but directly as a message on the bus that connects the
+      local APIC of all CPUs.
+
+      Linux,IPI on multiprocessor system : (three kinds)
+        CALL_FUNCTION_VECTOR(vector 0xfb)
+          sent to all CPUs but the sender,forcing those CPUs to run a function passed by the sender.
+          the corresponding interrupt handler is named "call_function_interrupt()".
+          usually,this interrupt is sent to all CPUs except the CPU executing the calling function by
+          means of the "smp_call_function()" facility function.
+          /*  such function maybe stop the CPUs or force CPUs to set the contents of the
+           *  Memory Type Range Registers(MTRRs).
+           *  MTTRs : additional registers to easily customize cache operations.
+           *          Linux may use them to disable the hardware cache for the address mapping the 
+           *          frame buffer of a PCI/AGP graphic card while maintaining the "write combining"
+           *          mode of operation : the paging unit combines write transfers into large chunks
+           *          before copying them into the frame buffer.
+           */
+
+        RESCHEDULE_VECTOR(vector 0xfc)
+          when a CPU receives this type of interrupt,the corresponding handler - named "reschedule_interrupt()" -
+          limits itself to acknowledging the interrupt.
+          rescheduling is done automatically when returning from the interrupt.
         
+        INVALIDATE_TLB_VECTOR(vector 0xfd)
+          send to all CPUs but the sender,forcing them to invalidate their Translation Lookaside Buffers.
+          the corresponding handler,named "invalidate_interrupt()",flushes some TLB entries of the processor.
+
+        /*  The assembly language macro "BUILD_INTERRUPT3(name, nr, fn)" is defined in
+         *  <arch/x86/kernel/entry_32.S>,which is similar to "common_interrupt".(vector is still a negative number)
+         *  The C language macro "BUILD_INTERRUPT(name, nr)" is defined in <arch/x86/kernel/entry_32.S>,which
+         *  is used to define an interprocessor interrupt,actually,it is "BUILD_INTERRUPT3(name, nr, smp_##name)".
+         *    e.g.  
+         *      <arch/x86/include/asm/entry_arch.h>
+         *      BUILD_INTERRUPT(call_function_interrupt, CALL_FUNCTION_VECTOR)
+         *      BUILD_INTERRUPT(irq_move_cleanup_interrupt, IRQ_MOVE_CLEANUP_VECTOR)
+         *      BUILD_INTERRUPT3(invalidate_interrupt0, INVALIDATE_TLB_VECTOR_START + 0)
+         */
+
+        source file <arch/x86/kernel/smp.c> defined some interprocessor interrupt handlers :
+          e.g.
+            /*  smp_reschedule_interrupt - handler for the IPI with vector RESCHEDULE_VECTOR.
+             *  @regs:                     registers' contents saved on the stack via "SAVE_ALL".
+             *                             @regs is the esp points to the top of stack.
+             *  #  this function does nothing but acknowledge IPI,
+             *     rescheduling is automatically done when returning from interrupt.
+             */
+            void smp_reschedule_interrupt(struct pt_regs *regs);
         
+            /*  smp_call_function_interrupt - handler for the IPI with vector CALL_FUNCTION_VECTOR.
+             *  @regs:                        registers' contents saved by "SAVE_ALL",@regs is the 
+             *                                esp points to the top of stack.
+             *  #  this function actually call to "generic_call_function_interrupt()" after it
+             *     acknowledged the IPI.
+             *     function "generic_call_function_interrupt()" is defined in <kernel/smp.c>.
+             */
+            void smp_call_function_interrupt(struct pt_regs *regs);
+            
+            /*  figure about smp_call_function_interrupt :
+             *  smp_call_function_interrupt =>
+             *  generic_smp_call_function_interrupt {
+             *          traverse call_function list (defined in <kernel/smp.c>)
+             *          for each entry is type of call_single_data (defined in <linux/smp.h>)
+             *          retrive its container is type of call_function_data (defined in <kernel/smp.c>)
+             *          call to @data->csd.func(@data->csd.info)
+             *          if @data->refs == 0
+             *              delete current entry from list
+             *      ####   
+             *              struct call_function_data {
+             *                struct call_single_data csd;
+             *                atomic_t                refs;
+             *                cpumask_var_t           cpumask;
+             *              };  /*  one @csd corresponding to one @cfd  */
+             *
+             *              call_function.queue -> csd1 -> csd2 -> ... -> call_function.queue
+             *                                      |       |
+             *                                      V       V
+             *                                     cfd     cfd
+             *  }
+             */
 
 
+            !!  the following IPIs are existed only CONFIG_SMP is defined :
+                  call_function_interrupt       =>  CALL_FUNCTION_VECTOR
+                  reschedule_interrupt          =>  RESCHEDULE_VECTOR
+                  irq_move_cleanup_interrupt    =>  IRQ_MOVE_CLEANUP_VECTOR
+                  reboot_interrupt              =>  REBOOT_VECTOR
+                  invalidate_interrupt{0..7}    =>  INVALIDATE_TLB_VECTOR_START + {0..7}
 
+                  /*  the corresponding "smp_##name()" functions are defined either <arch/x86/kernel/smp.c>
+                   *  or <kernel/smp.c>.
+                   *  TLB relative function is defined in <arch/x86/mm/tlb.c>.
+                   */
+
+      IPI operating functions :
+        <arch/x86/include/asm/apic.h>
+          /*  struct apic - the generic APIC sub-arch data struct.in other word,the object is type of
+           *                struct apic represents the I/O APIC.
+           *  @send_IPI_mask:           send IPI with @vector to the CPUs determined by @mask.
+           *  @send_IPI_allbutself:     send IPI with @vector to all CPUs except sender.
+           *  @send_IPI_all:            send IPI with @vector to all CPUs include sender.
+           *  @send_IPI_self:           send IPI with @vector to @self.
+           */
+          struct apic {
+                ...
+                void (*send_IPI_mask)(const struct cpumask *mask, int vector);
+                ...
+                void (*send_IPI_allbutself)(int vector);
+                void (*send_IPI_all)(int vector);
+                void (*send_IPI_self)(int vector);
+                ...
+          };
+
+          extern struct apic *apic;     /*  global apic object pointer  */
+
+          /*  the corresponding function pointers will be initialized by kernel across to the CPU model.
+           *  different CPU has different apic object.
+           */
+
+          /*  Linux 2.6 DOES NOT CONTAIN THE WRAPPERS FOR THESE FUNCTIONS,IN ORDER TO SEND IPI,HAVE TO USE THE
+           *  GLOBAL OBJECT @apic IS TYPE OF "struct apic *",FOR EXAMPLE,"acpi->send_IPI_all(CALL_FUNCTION_VECTOR)".
+           *  Linux SUPPORTS TO SEVERAL TYPES OF APIC,SO THE MEMBERS OF THE OBJECT MAYBE DIFFERENT.
+           *  x86 DEFAULT APIC    : apic_default       <arch/x86/kernel/apic/probe_32.c>
+           *  x86_64 DEFAULT APIC : apic_flat          <arch/x86/kernel/apic/apic_flat_64.c>
+           */
+
+          /*  call function interrupt outer interface :
+           *  <kernel/smp.c>,
+           *    smp_call_function - run a function on all other CPUs.
+           *    @func:              the function to be executed.
+           *    @info:              private data of @func.
+           *    @wait:              T => wait until other CPUs completed function executing
+           *                        F => does not waiting
+           *    return:             always 0.
+           *    #  can not call this function with disabled interrupts or from a hardirq handler or
+            *      from a bottom half handler.
+           *    int smp_call_function(void (*func)(void *), void *info, int wait);
+           */
