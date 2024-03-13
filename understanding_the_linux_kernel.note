@@ -4529,14 +4529,14 @@ Chapter 4 : Interrupts and Exceptions
            *  ...
            */
           typedef struct {
-                unsigned int __softirq_pending;
+                unsigned int __softirq_pending;  /*  per-CPU 32-bit mask describing the pending softirqs  */
                 unsigned int __nmi_count;
                 unsigned int irq0_irqs;
                 unsigned int apic_timer_irqs;  /*  #ifdef CONFIG_X86_LOCAL_APIC  */
                 ...
           } ____cacheline_aligned irq_cpustat_t;
 
-        <kernel/softirq.c>
+        <kernel/softirq.c>  <linux/irq_cpustat.h>
         #ifndef __ARCH_IRQ_STAT
           /*  irq_stat - irq_cpustat_t array for per-cpu.  */
           irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;
@@ -5228,6 +5228,132 @@ Chapter 4 : Interrupts and Exceptions
            *                        F => does not waiting
            *    return:             always 0.
            *    #  can not call this function with disabled interrupts or from a hardirq handler or
-            *      from a bottom half handler.
+           *      from a bottom half handler.
            *    int smp_call_function(void (*func)(void *), void *info, int wait);
            */
+
+    Softirqs and Tasklets :
+      non-critical tasks can be deferred for a long period of time,if necessary.
+      ISRs are serialized,and often there should be no occurrence of an interrupt until the corresponding
+      interrupt handler has terminated.
+      deferrable tasks can execute with all interrupt enabled.
+
+      Linux 2.6 non-urgent interruptible kernel functions :
+        /*  deferrable functions  */
+        /*  Intel manual called programmed exception as "softirq"  */
+
+        softirqs
+          statically allocated
+          can run concurrently on several CPUs,even if they are of the same type(reentrant,the data
+          structures that softirqs hold must be protected by spin lock)
+
+        tasklets
+          dynamically allocated
+          the same type of tasklet cannot be executed by two CPUs at the same time(however,tasklets of
+          different types can be executed concurrently on several CPUs)
+
+        /*  softirqs and tasklets are strictly correlated,because tasklets are implemented on top of 
+         *  softirqs.
+         */
+
+      Interrupt context :
+        the kernel is currently executing either an interrupt handler or a deferrable function.
+
+      The general operations can be performed on deferrable functions :
+        Initialization
+          defines a new deferrable function
+          this is usually done when the kernel initializes iteself or a module is loaded
+
+        Activation
+          marks a deferrable function as "pending"
+          it is to be run the next time the kernel schedules a round of executions of deferrable functions
+          activation can be done at any time(even while handling interrupts)
+
+        Masking
+          selectively disables a deferrable function 
+          it will not be executed by the kernel even if activated
+        
+        Execution
+          executes a pending deferrable function together with all other pending deferrable functions of
+          the same type
+          execution is performed at well-specified times
+
+        /*  a deferrable function that has been activated by a given CPU must be executed on the same CPU  */
+
+      Softirq :
+        ten kinds of softirqs > <linux/interrupt.h>
+          HI_SOFTIRQ                handles high priority tasklets
+          TIMER_SOFTIRQ             tasklets related to timer interrupts
+          NET_TX_SOFTIRQ            transmits packets to network cards
+          NET_RX_SOFTIRQ            recevies packets from network cards
+          BLOCK_SOFTIRQ             block device softirq
+          BLOCK_IOPOLL_SOFTIRQ      block device I/O poll softirq
+          TASKLET_SOFTIRQ           handles regular tasklets
+          SCHED_SOFTIRQ             scheduler softirq
+          HRTIMER_SOFTIRQ           high-resolution timer
+          RCU_SOFTIRQ               rcu lock
+
+          NR_SOFTIRQS               /*  end of enumberated types  */
+                                    /*  HI_SOFTIRQ = 0  */
+
+        /*  Before Linux 2.6,the Bottom Half mechanism BH is used to handle non-critical works,
+         *  the total number of BHs is 32.
+         *  Since Linux 2.6,BH had abandoned,softirqs as a intead,and the maximum number of softirqs
+         *  also is 32.all device drivers which used BH should convert it to tasklet.
+         */
+
+        data structures used for softirqs >
+          <linux/interrupt.h>
+            /*  struct softirq_action - softirq action wrapper.
+             *  @action:                the deferrable function will be executed.
+             */
+            struct softirq_action {
+                    void (*action)(struct softirq_action *);
+                    /*  Linux 2.6 DID NOT DEFINE SUCH FIELD WHICH USED TO SAVE THE ARGUMENT OF
+                     *  THE @action DEFERRABLE FUNCTION.
+                     */
+            };
+
+          <kernel/softirq.c>
+            /*  softirq_vec - an array contains all types of softirqs.
+             *                the enumberated types defined in <linux/interrupt.h>
+             *                as the vector for this array.
+             */
+            static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
+
+          thread_info.preempt_count :
+            [0, 7]        preemption counter      /*  how many times preemption is explicitly disabled  */
+            [8, 15]       softirq counter         /*  how many levels deep the disabling of deferrable functions is  */
+            [16, 27]      hardirq counter         /*  specifies the number of nested interrupt handlers on the local CPU  */
+            [28]          PREEMPT_ACTIVE flag     /*  allow preemption or refuse preemption  */
+          
+            /*  some bits in @preempt_count are used to keep track of kernel preemption and of nesting of kernel
+             *  control paths.
+             *  softirq counter = 0 => deferrable functions are enabled
+             *  hardirq counter => irq_enter() increase it and irq_exit() decrease it
+             */
+          
+            usefult macro function to determine where the kernel path is now :
+              <linux/hardirq.h>
+                #define in_irq()  (hardirq_count())       /*  Is kernel running interrupt handler?  */
+                #define in_softirq()  (softirq_count())   /*  Is kernel running deferrable function?  */
+                #define in_interrupt()  (irq_count())     /*  Is kernel running interrupt handler or deferrable function?  */
+  
+                /*  if kernel is not make use of Kernel Mode stack
+                 *    preempt_count get from current.thread_info
+                 *  else
+                 *    preempt_count get from irq_ctx union assocaited with the local CPU
+                 */
+
+            irq_cpustat_t.__softirq_pending :
+              the field @__softirq_pending is a per-CPU 32-bit mask describing the pending softirqs.
+              
+              <linux/irq_cpustat.h>
+                #define local_softirq_pending()  \
+                        __IRQ_STAT(smp_processor_id(), __softirq_pending)
+
+
+
+          
+
+          
