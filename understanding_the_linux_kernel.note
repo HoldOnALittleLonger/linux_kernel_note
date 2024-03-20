@@ -5352,8 +5352,48 @@ Chapter 4 : Interrupts and Exceptions
                 #define local_softirq_pending()  \
                         __IRQ_STAT(smp_processor_id(), __softirq_pending)
 
+        Handling softirqs :
+          linux softirq has defined two primitives for operating softirq mechanism.
+            OPEN        -       install a softirq deferrable function.
+            RAISE       -       raise a installed softirq.
+                                /*  structure softirq_action is not chained,so there is only
+                                 *  one deferrable function for one type of softirq at the
+                                 *  same time.
+                                 */
 
+          <linux/interrupt.h>
+            /*  open_softirq - install a softirq deferrable function @action at the
+             *                 position @softirq_vec[@nr].
+             *  @nr:           softirq vector.
+             *  @action:       deferrable function.
+             */
+            extern void open_softirq(int nr, void (*action)(struct softirq_action *));
 
-          
+            /*  raise_softirq - raise a softirq have vector @nr.
+             *  @nr:            softirq vector.
+             *  #  this function will save the local IRQ flags(eflags.IF) and then disable
+             *     local IRQ(through assembly language instruction "cli").
+             *     call to "raise_softirq_irqoff()" which must run with irqs disabled,
+             *     next,"__raise_softirq_irqoff()" will be called,which set the bit associated 
+             *     to @nr in the pending softirqs on current CPU.check if current context
+             *     is not interrupt context,if it is,wake up ksoftirqd.
+             *     before "raise_softirq()" returns,"local_irq_restore()" is called for restore
+             *     interrupt flags to the previous saved.
+             */
+            extern void raise_softirq(unsigned int nr);
+            extern void raise_softirq_irqoff(unsigned int nr);
 
-          
+          checks for active(pending) softirqs should be performed periodically,but without inducing too much
+          overhead,they are performed in a few points of the kernel code :
+            >  when the kernel invokes the "local_bh_enable()" function to enable softirqs on the local CPU.
+               /*  bh => bottom half,had removed from Linux kernel  */
+            >  when the "do_IRQ()" function finishes handling an I/O interrupt and invokes the "irq_exit()" macro.
+            >  if the system uses an I/O APIC,when the "smp_apic_timer_interrupt()" function finishes handling
+               a local timer interrupt.
+            >  in multiprocessor systems,when a CPU finishes handling a function triggered by a CALL_FUNCTION_VECTOR
+               interprocessor interrupt(IPI).
+            >  when one of the special "ksoftirqd/n" kernel threads is awakended.
+               /*  on SMP,each CPU in the system has a kernel thread named "ksoftirqd" which deal with the
+                *  softirq handling.
+                *  Linux kernel make a balance between softirqs and User Mode processes through the task scheduler.
+                */
