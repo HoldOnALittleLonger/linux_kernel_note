@@ -5333,7 +5333,7 @@ Chapter 4 : Interrupts and Exceptions
              *  hardirq counter => irq_enter() increase it and irq_exit() decrease it
              */
           
-            usefult macro function to determine where the kernel path is now :
+            useful macro function to determine where the kernel path is now :
               <linux/hardirq.h>
                 #define in_irq()  (hardirq_count())       /*  Is kernel running interrupt handler?  */
                 #define in_softirq()  (softirq_count())   /*  Is kernel running deferrable function?  */
@@ -5378,7 +5378,7 @@ Chapter 4 : Interrupts and Exceptions
              *     to @nr in the pending softirqs on current CPU.check if current context
              *     is not interrupt context,if it is,wake up ksoftirqd.
              *     before "raise_softirq()" returns,"local_irq_restore()" is called for restore
-             *     interrupt flags to the previous saved.
+             *     interrupt flags to the previously saved.
              */
             extern void raise_softirq(unsigned int nr);
             extern void raise_softirq_irqoff(unsigned int nr);
@@ -5397,3 +5397,75 @@ Chapter 4 : Interrupts and Exceptions
                 *  softirq handling.
                 *  Linux kernel make a balance between softirqs and User Mode processes through the task scheduler.
                 */
+
+          the do_softirq() function :
+            <linux/interrupt.h> 
+              /*  do_softirq - function deal with soft interrupt.
+               *               defined in <kernel/softirq.c>
+               */
+              asmlinkage void do_softirq(void);
+
+              the following actions this function will takes:
+                1>  check whether in an interrupt context now,if it is,then return.
+                    deferrable function can not be executed in an interrupt context.
+                2>  call to local_irq_save(@flags) to saves the contents of eflags register to local
+                    variable @flags.
+                    /*  function local_irq_save() will disable local interrupt.  */
+                3>  call to local_softirq_pending() to get the pending softirqs and saves them in
+                    local variable @pending.
+                4>  if there is a softirq pending,then call to __do_softirq(),which will does the
+                    primary works.
+                    /*  local interrupt still be disabled at the time control enter __do_softirq().  */
+                5>  call to local_irq_restore(@flags) to restores the status of eflags.
+                    /*  function local_irq_restore() restores eflags.if eflags.IF flag was not setted previously,
+                     *  it will be unsetted after local_irq_restore() finished.
+                     */
+
+          the __do_softirq() function :
+            <linux/interrupt.h>
+              /*  __do_softirq - the main routine for softirq handling.
+               *                 it is defined in <kernel/softirq.c>
+               */
+              asmlinkage void __do_softirq(void);
+
+              /*  GCC feature:
+               *    __builtin_return_address - GCC built-in function.
+               *                               it returns the return address(eip) of the current function,or
+               *                               of one of its callers.
+               *    @level:                    it is number of frames to scan up the call stack.0 yields
+               *                               the return address of the current function,and so forth.
+               *    void *__builtin_return_address(unsigned int level);
+               */
+
+              the following actions this function will takes:
+                1>  retrive pending local softirqs.
+                2>  account system vtime via account_system_vtime(current).
+                3>  call to __local_bh_disable((unsigned long)__builtin_return_address(0)) to updates preempt_count()
+                    with SOFTIRQ_OFFSET.
+                    /*  preempt_count() => current_thread_info()->preempt_count
+                     *  @ip parameter of __local_bh_disable() is used to tracing kernel control path.
+                     *  before updating,eflags.IF will be cleared,and eflags will be restored after updated.
+                     */
+                4>  set_softirq_pending(0),clean the softirq pending bitmap.
+                    enable local irq.
+                    /*  do_softirq() disabled local interrupt before __do_softirq() was called.  */
+                5>  let local variable @h points to @softirq_vec array.
+                6>  traverse @pending until @pending == 0 (bits traversing).
+                7>  if (@pending & 1)
+                      prepare account and tracing;
+                      call to h->action(h);
+                    h++;
+                    pending >>= 1;
+                8>  disable local irq.
+                9>  check again if new softirq was raised.
+                10> if @pending != 0 and @max_restart != 0
+                      restart to 4>
+                    if @pending != 0 and @max_restart == 0
+                      can not restart,wake up ksoftirqd
+                11> stop tracing,update system vtime,call to __local_bh_enable().
+                12> return control to do_softirq().
+
+                /*  before action 4> the function lockdep_softirq_enter() is called,current->softirq_context++,
+                 *  before action 12> the function lockdep_softirq_exit() is called,current->softirq_context++.
+                 *  these two functions are defined in <linux/irqflags.h>
+                 */
