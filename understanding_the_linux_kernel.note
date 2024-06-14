@@ -5469,3 +5469,60 @@ Chapter 4 : Interrupts and Exceptions
                  *  before action 12> the function lockdep_softirq_exit() is called,current->softirq_context++.
                  *  these two functions are defined in <linux/irqflags.h>
                  */
+
+        The ksoftirqd kernel threads :
+          the kernel ksoftirqd is represent a solution for a critical trade-off problem.
+          the detail of it is defined in <kernel/softirq.c>.
+
+          !  softirq functions may reactive themselves,in fact,both the networking softirqs and the
+             tasklet softirqs do this,moreover,external events,such as packet flooding on a network card
+             may active softirqs at very high frequence.
+
+          <kernel/softirq.c>
+            /*  per-cpu data for per-cpu kernel thread [ksoftirqd]  */
+            static DEFINE_PER_CPU(struct task_struct *, ksoftirqd);
+
+            /*  wakeup_softirqd - wakeup the ksoftirqd kernel thread of local CPU.
+             *  #  no indefinitely loop in this function to avoid userspace starvation.
+             *     do_softirq() call to this function to deal with the new coming softirqs.
+             */
+            void wakeup_softirqd(void);
+
+            /*  run_ksoftirqd - the main function to run for the kernel thread [ksoftirqd].
+             *  @__bind_cpu:    the cpu associated to the [ksoftirqd],if the cpu is offline,
+             *                  the corresponding [ksoftirqd] should to die.
+             *  #  the main works this function does:
+             *       >  set task state to TASK_INTERRUPTIBLE.
+             *       >  enter a loop until kthread_should_stop() returns true.
+             *       >  in the loop,set task state to TASK_RUNNING,disable kernel preempt and check local softirqs
+             *          via local_softirq_pending().
+             *       >  if any local softirqs are pending,call to do_softirq(),then enable preempt and call to
+             *          cond_resched(),this function will call to schedule().(flag TIF_NEED_RESCHED of the current 
+             *          thread_info set)
+             *       >  if none of local softirqs are pending,then enable preempt and set task state to TASK_INTERRUPTIBLE,
+             *          next call to schedule() to yield CPU time.
+             */
+            static int run_ksoftirqd(void *__bind_cpu);
+
+            /*  spawn_ksoftirqd - init function which spawn the [ksoftirqd] kernel thread 
+             *                    for current cpu.
+             *  #  this function will be called at the time that is kernel initialization.
+             *     it will call to cpu_callback()<kernel/softirq.c> to creates a kernel thread
+             *     which is about to runs run_ksoftirqd() function.
+             *     it call to cpu_callback() twice,the second of invocation is to wakeup [ksoftirqd].
+             */
+            static __init spawn_ksoftirqd(void) early_initcall(spawn_ksoftirqd);
+
+          the potential for a continuous high-volume flow of softirqs creates a problem that is solved by
+          introducing kernel threads.without them,developers are essentially faced with two alternative
+          strategies:
+            1>  ignoring new softirqs that occur while do_softirq() is running.
+                the new coming softirqs will be deferred to next timer interrupt,this is can not be 
+                acceptable for network system.
+            2>  continuously rechecking for pending softirqs.
+                the do_softirq() function could keep checking the pending softirqs and would terminate
+                only when none of them is pending.
+                userspace stravation will occur.(if a high-frequence flow of packets is received by a network card,
+                or a softirq function keeps activating itself)
+
+            !   [ksoftirqd] has low priority,the userspace programs will have a change to run.
