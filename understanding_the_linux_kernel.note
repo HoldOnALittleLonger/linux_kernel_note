@@ -5526,3 +5526,142 @@ Chapter 4 : Interrupts and Exceptions
                 or a softirq function keeps activating itself)
 
             !   [ksoftirqd] has low priority,the userspace programs will have a change to run.
+
+        Tasklets :
+          tasklets are the preferred way to implement deferrable functions in I/O drivers.
+          tasklet is implemented through HI_SOFTIRQ or TASKLET_SOFTIRQ,several tasklets may be associated
+          with the same softirq,each tasklet carrying its own function.
+          do_softirq() deal with tasklet is type of HI_SOFTIRQ before the tasklet is type of TASKLET_SOFTIRQ.
+
+          <linux/interrupt.h>
+            /*  tasklet_struct - the structure represents a kernel tasklet.
+             *  @next:           pointer to next tasklet.
+             *  @state:          status of this tasklet.
+             *                   value :
+             *                     TASKLET_STATE_SCHED - pending
+             *                     TASKLET_STATE_RUN   - running
+             *  @count:          lock counter.
+             *  @func:           function pointer to the function this tasklet carrying.
+             *  @date:           date to the @func.
+             */
+            struct tasklet_struct {
+                    struct tasklet_struct *next;
+                    unsigned long state;
+                    atomic_t count;
+                    void (*func)(unsigned long);
+                    unsigned long data;
+            };
+
+          <kernel/softirq.c>
+            /*  tasklet_head - the structure represents a tasklet link-list.
+             *  @head:         the head.
+             *  @tail:         the tail(pointer to pointer).
+             */
+            struct tasklet_head {
+                    struct tasklet_struct *head;
+                    struct tasklet_struct **tail;
+            };
+
+            /*  --- per-cpu data ---  */
+
+            /*  for TASKLET_SOFTIRQ  */
+            static DEFINE_PER_CPU(struct tasklet_head, tasklet_vec);
+            /*  for HI_SOFTIRQ       */
+            static DEFINE_PER_CPU(struct tasklet_head, tasklet_hi_vec);
+            
+          <linux/interrupt.h>
+            /*  tasklet_init - initializes a tasklet_struct.
+             *  @t:            pointer to the tasklet_struct structure.
+             *  @func:         the function this tasklet_struct carrys.
+             *  @data:         the data to @func.
+             */
+            extern void tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned long data);
+
+            /*  tasklet_disable_nosync - disable a tasklet without synchronize.
+             *  @t:                      the tasklet_struct object.
+             *  #  this function atomic increase the data member tasklet_struct.count.
+             *     for smp,the function smp_mb_after_atomic_inc() will be called to synchronize to another cpu.
+             */
+            static inline void tasklet_disable_nosync(struct tasklet_struct *t);
+
+            /*  tasklet_disable - synchrounous version.
+             *  @t:               the tasklet_struct object.
+             *  #  this function just call to tasklet_disable_nosync() and then call to tasklet_unlock_wait(@t)
+             *     to wait the tasklet gets end if it is running on some cpu.
+             */
+            static inline void tasklet_disable(struct tasklet_struct *t);
+
+            /*  tasklet_enable - enable a disabled tasklet.
+             *  @t:              the tasklet_struct object which had been disabled.
+             *  #  this function atomic decrease the data member tasklet_struct.count .
+             */
+            static inline void tasklet_enable(struct tasklet_struct *t);
+
+            /*  tasklet_schedule - schedule a tasklet with type of TASKLET_SOFTIRQ.
+             *  @t:                the tasklet it should be scheduled.
+             *  #  this function call to the __tasklet_schedule()<kernel/softirq.c>,
+             *     before the calling,the @t->state will be setted to TASKLET_STATE_SCHED.
+             */
+            static inline void tasklet_schedule(struct tasklet_struct *t);
+
+            /*  tasklet_hi_schedule - schedule a tasklet with type of HI_SOFTIRQ.
+             *  @t:                   the tasklet it should be scheduled.
+             *  #  this function call to the __tasklet_hi_schedule()<kernel/softirq.c>,
+             *     before the calling,the @t->state will be setted to TASKLET_STATE_SCHED.
+             */
+            static inline void tasklet_hi_schedule(struct tasklet_struct *t);
+
+            !  if @t->state == TASKLET_STATE_SCHED
+               then
+                 tasklet_schedule() and tasklet_hi_schedule() return without something have been done.
+               else
+                 call to the internal functions defined in <kernel/softirq.c>
+
+            __tasklet_schedule() and __tasklet_hi_schedule() :
+              these two functions almost do the same works:
+                1>  store local irq flags.
+                2>  @t->next = NULL.
+                3>  push @t to the tasklet_head link-list.
+                4>  call to raise_softirq_irqoff().
+                5>  restore local irq flags.
+
+              the difference:
+                __tasklet_schedule() push @t to the tail of local @tasklet_vec link-list.
+                __tasklet_schedule() call raise_softirq_irqoff() with TASKLET_SOFTIRQ.
+                __tasklet_hi_schedule() push @t to the tail of local @tasklet_hi_vec link-list.
+                __tasklet_hi_schedule() call raise_softirq_irqoff() with HI_SOFTIRQ.
+
+          <kernel/softirq.c>
+            /*  tasklet_action - action function for TASKLET_SOFTIRQ type.
+             *                   it is installed through open_softirq() by softirq_init().
+             *  @a:              the softirq action structure.
+             */
+            static void tasklet_action(struct softirq_action *a);
+
+            /*  tasklet_hi_action - action function for HI_SOFTIRQ type.
+             *                      it is installed through open_softirq() by softirq_init().
+             *  @a:                 the softirq action structure.
+             */
+            static void tasklet_hi_action(struct softirq_action *a);
+
+            the works these two functions do:
+              1>  disable local irq and retrive head of tasklet list.
+              2>  empty the tasklet list.
+              3>  enable local irq and enter a while-loop.
+              4>  traverse the list to deal with each tasklet if it had not been disabled,
+                  each tasklet only be actived once if it is not reactives itself.
+                  if @t has been running on another cpu or it has been disabled,then it will
+                  be push back to the tail of the tasklet list,raise_softirq_irqoff() will be
+                  called before next loop.
+              5>  traversed all tasklets in the list,function returns.
+                  the new tasklet list will be deferred to the next time(it maybe contains
+                  the running or disabled tasklets).
+
+            !  while processing the tasklet,action function have to lock it(SMP) through tasklet_trylock() and
+               unlock it after processed through tasklet_unlock().
+               the two functions set tasklet_struct.state = TASKLET_STATE_RUN or unset it.
+               /*  TASKLET_STATE_SCHED must be set before action by other kernel control path,
+                *  otherwise,the bug occurred  */
+
+          !  unless the tasklet function reactivates itself,every tasklet activation triggers at most one execution
+             of the tasklet function.
