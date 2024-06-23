@@ -488,7 +488,7 @@ Chapter 2 : Memory Addressing
     	cs register has another important function :
     	  it includes a 2-bit field that specifies the Current Privilege Level(CPL) of the CPU.
     	  value 0 denotes the highest privilege level,value 3 denotes the lowest one.
-    	  (Linux only use 0(kernel mode) and 3(user mode))
+    	  (Linux only use 0(kernel mode RING0) and 3(user mode RING3))
 
           Segment Descriptors : 
             Global Descriptor Table(GDT)
@@ -5848,3 +5848,89 @@ Chapter 4 : Interrupts and Exceptions
 
             !  [kblockd] kernel thread deal with the works on the @kblockd_workqueue work queue,
                the works from block device layer.
+
+    Returning from interrupts and Exceptions :
+      resume execution of some program,several issues must be considered beforing doing it :
+        >  Number of kernel control paths being concurrently executed
+             if these just one,the CPU must switch back to User Mode
+        >  Pending process switch requests
+             if there is any request,the kernel must perform process scheduling,otherwise,control
+             is returned to the current process(the interrupted process)
+        >  Pending signals
+             if a signal is sent to the current process,it must be handled
+        >  Single-step mode
+             if a debugger is tracing the execution of the current process,single-step mode must be
+             restored before switching back to User Mode
+        >  Virtual-8086 mode
+             if the CPU is in virtual-8086 mode,the current process is executing a legacy Real Mode program,
+             thus it must be handled in a special way
+
+      flags used to keep track of pending switch requests,of pending signals,and of single step execution :
+        thread_info.flags >
+          TIF_SYSCALL_TRACE         syscalls are being traced
+          TIF_NOTIFY_RESUME         not used in the 80x86 platform
+          TIF_SIGPENDING            the process has pending signals
+          TIF_NEED_RESCHED          scheduling must be performed
+          TIF_SINGLESTEP            restore single step execution on return to User Mode
+          TIF_IRET                  force return from system call via "iret" rather than "sysexit"
+          TIF_SYSCALL_AUDIT         system calls are being audited
+          TIF_POLLING_NRFLAG        the idle process is polling the TIF_NEED_RESCHED flag
+          TIF_MEMDIE                the process is being destroyed to reclaim memory
+
+        /*  these flags are defined in <arch/x86/include/asm/thread_info.h>  */
+
+     ret_from_intr and ret_from_exception :
+       they are two entry points of a piece of kernel code.
+       the general flow >
+         ret_from_intr:
+                 if <nested kernel control paths?>
+                         if <virtual 8086 mode?>
+                                 goto resume_userspace
+                         goto resume_kernel  /*  eflags.VM = 0 and CPL < 3(USER_RPL)  */
+                 goto resume_userspace
+         resume_kernel:
+                 cli
+                 if <kernel preemption enabled?>
+                         goto need_resched
+                 goto restore_all
+         need_resched:
+                 if <need reschedule?>
+                         if <resuming a kernel control path with IF = 0?>
+                                 goto restore_all
+                         preempt_schedule_irq()
+                         goto need_resched
+         restore_all:
+                 restore hardware context
+         resume_userspace:
+                 cli
+                 if <is there work to be done(rescheduling,signals,single step)?>
+                         goto work_pending
+                 goto  restore_all
+         work_pending:
+                 if <need to reschedule?>
+                         goto work_resched
+                 goto work_notifysig
+         work_resched:
+                 schedule()
+                 goto resume_userspace
+         work_notifysig:
+                 if <virtual 8086 mode?>
+                         save_v86_state()
+                         do_notify_resume()
+                         goto restore_all
+                 do_notify_resume()
+                 goto restore_all
+         ret_from_exception:
+                 cli
+                 goto ret_from_intr
+
+         /*  some function invoking might not returns,so "goto" means that function will switch
+          *  to the next kernel control path.
+          */
+         /*  difference between ret_from_exception and ret_from intr when kernel preemption compilation
+          *  option was selected :
+          *    local interrupts(IF) are immediately disabled when returning from exceptions.
+          */          
+
+       !!  the assembly code of ret_from_intr and ret_from_exception is defined in <arch/x86/kernel/entry_32.S>
+                                
