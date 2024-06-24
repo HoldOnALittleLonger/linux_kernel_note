@@ -5879,58 +5879,139 @@ Chapter 4 : Interrupts and Exceptions
 
         /*  these flags are defined in <arch/x86/include/asm/thread_info.h>  */
 
-     ret_from_intr and ret_from_exception :
-       they are two entry points of a piece of kernel code.
-       the general flow >
-         ret_from_intr:
-                 if <nested kernel control paths?>
-                         if <virtual 8086 mode?>
-                                 goto resume_userspace
-                         goto resume_kernel  /*  eflags.VM = 0 and CPL < 3(USER_RPL)  */
-                 goto resume_userspace
-         resume_kernel:
-                 cli
-                 if <kernel preemption enabled?>
-                         goto need_resched
-                 goto restore_all
-         need_resched:
-                 if <need reschedule?>
-                         if <resuming a kernel control path with IF = 0?>
-                                 goto restore_all
-                         preempt_schedule_irq()
-                         goto need_resched
-         restore_all:
-                 restore hardware context
-         resume_userspace:
-                 cli
-                 if <is there work to be done(rescheduling,signals,single step)?>
-                         goto work_pending
-                 goto  restore_all
-         work_pending:
-                 if <need to reschedule?>
-                         goto work_resched
-                 goto work_notifysig
-         work_resched:
-                 schedule()
-                 goto resume_userspace
-         work_notifysig:
-                 if <virtual 8086 mode?>
-                         save_v86_state()
-                         do_notify_resume()
-                         goto restore_all
-                 do_notify_resume()
-                 goto restore_all
-         ret_from_exception:
-                 cli
-                 goto ret_from_intr
+      ret_from_intr and ret_from_exception :
+        they are two entry points of a piece of kernel code.
+        the general flow >
+          ret_from_intr:
+                  if <nested kernel control paths?>
+                          if <virtual 8086 mode?>
+                                  goto resume_userspace
+                          goto resume_kernel  /*  eflags.VM = 0 and CPL < 3(USER_RPL)  */
+                  goto resume_userspace
+          resume_kernel:
+                  cli
+                  if <kernel preemption enabled?>
+                          goto need_resched
+                  goto restore_all
+          need_resched:
+                  if <need reschedule?>
+                          if <resuming a kernel control path with IF = 0?>
+                                  goto restore_all
+                          preempt_schedule_irq()
+                          goto need_resched
+          restore_all:
+                  restore hardware context
+          resume_userspace:
+                  cli
+                  if <is there work to be done(rescheduling,signals,single step)?>
+                          goto work_pending
+                  goto  restore_all
+          work_pending:
+                  if <need to reschedule?>
+                          goto work_resched
+                  goto work_notifysig
+          work_resched:
+                  schedule()
+                  goto resume_userspace
+          work_notifysig:
+                  if <virtual 8086 mode?>
+                          save_v86_state()
+                          do_notify_resume()
+                          goto restore_all
+                  do_notify_resume()
+                  goto restore_all
+          ret_from_exception:
+                  cli
+                  goto ret_from_intr
+ 
+          /*  some function invoking might not returns,so "goto" means that function will switch
+           *  to the next kernel control path.
+           */
+          /*  difference between ret_from_exception and ret_from intr when kernel preemption compilation
+           *  option was selected :
+           *    local interrupts(IF) are immediately disabled when returning from exceptions.
+           */          
+ 
+        !!  the assembly code of ret_from_intr and ret_from_exception is defined in <arch/x86/kernel/entry_32.S>
+ 
+      resuming a kernel control path :
+        resume_kernel:  /*  preemption support  */
+          >  disables local interrupt
+          >  if current->thread_info.preempt_count == 0
+                     jmp need_resched
+             else
+                     jmp restore_all
+          /*  preempt_count == 0 means preemption enabled  */
 
-         /*  some function invoking might not returns,so "goto" means that function will switch
-          *  to the next kernel control path.
-          */
-         /*  difference between ret_from_exception and ret_from intr when kernel preemption compilation
-          *  option was selected :
-          *    local interrupts(IF) are immediately disabled when returning from exceptions.
-          */          
+      checking for kernel preemption :
+        need_resched:  /*  when the piece of code is executed,none of the unfinished kernel control path is an
+                        *  interrupt handler,otherwise,the preempt_count field would be greater than zero.
+                        */
+          >  retrive thread_info.flags
+          >  if TIF_NEED_RESCHED != 1
+                     jmp restore_all
+             elif eflags.IF != 1
+                     jmp restore_all
+          >  call to preempt_schedule_irq
+             /*  this function sets the PREEMPT_ACTIVE flag in the preempt_count field,enables the local interrupts,
+              *  invokes schedule() to select another process to run.
+              *  when the former process will resume,preempt_schedule_irq() clears the PREEMPT_ACTIVE flag,and disables
+              *  local interrupts.
+              */
+          >  jmp need_resched  /*  if the TIF_NEED_RESCHED flag of the current process is set,preempt_schedule_irq()
+                                *  will be called again,thus,schedule() also be called again.
+                                */
+      
+      resuming a User Mode program :
+        resume_userspace:
+          >  disbale local interrupts
+          >  ends irq tracing
+          >  retrive thread_info.flags
+          >  if TIF_WORK_MASK & thread_info.flags
+                     jmp work_pending  /*  there has some works to be done before int/exception return  */
+             else
+                     jmp restore_all
 
-       !!  the assembly code of ret_from_intr and ret_from_exception is defined in <arch/x86/kernel/entry_32.S>
+        /*  work mask : TIF_SYSCALL_TRACE TIF_SYSCALL_AUDIT TIF_SINGLESTEP  */
+
+      checking for rescheduling :
+        work_pending:
+          >  if thread_info.flags.TIF_NEED_RESCHED
+                     jmp work_notifysig
+
+        work_resched:
+          >  call schedule
+          >  disable local interrupts
+          >  ends irq tracing
+          >  retrive thread_info.flags
+          >  if thread_info.flags & TIF_WORK_MASK
+                     if thread_info.flags & TIF_NEED_RESCHED
+                             jmp work_resched
+             jmp restore_all
+
+      handling pending signals,virtual-8086 mode,and single stepping :
+        work_notifysig:
+          >  if eflags.VM == 1
+                     jmp work_notify_x86
+          >  call do_notify_resume
+          >  jmp resume_userspace_sig
+
+        work_notify_x86:
+          >  save ti_flags /*  thread_info.flags  */
+          >  call save_v86_state
+          >  restore ti_flags
+          >  call do_notify_resume
+          >  jmp resume_userspace_sig
+
+        /*  do_notify_resume() take care of pending signals and single stepping.  */
+        /*  #ifdef CONFIG_VM86
+         *  #define resume_userspace_sig  check_userspace
+         *  #else
+         *  #define resume_userspace_sig  resume_userspace
+         */
+
+      !  current->thread_info is stored in the process's kernel stack.
+        
+        
+      
                                 
