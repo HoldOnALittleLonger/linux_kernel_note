@@ -2676,7 +2676,7 @@ Chapter 3 : Processes
 		       pushl %%ebp			#  save base stack pointer
 		       movl	 %%esp, %[prev_sp]	#  save  stack pointer
 		       movl	 %[next_sp], %%esp	#  restore stack pointer
-		       movl	 $1f, %[prev_ip]	#  save ip
+		       movl	 $1f, %[prev_ip]	#  save ip(the resume point of current)
 		       pushl %[next_ip]		#  push ip into stack for ret instruction
 		       __switch_canary		#  macro defined in <asm/system.h>
 		       jmp   __switch_to		#  jump to __switch_to() function
@@ -5957,6 +5957,7 @@ Chapter 4 : Interrupts and Exceptions
               *  invokes schedule() to select another process to run.
               *  when the former process will resume,preempt_schedule_irq() clears the PREEMPT_ACTIVE flag,and disables
               *  local interrupts.
+              *  preempt_schedule_irq() is defined in <kernel/sched.c>
               */
           >  jmp need_resched  /*  if the TIF_NEED_RESCHED flag of the current process is set,preempt_schedule_irq()
                                 *  will be called again,thus,schedule() also be called again.
@@ -6011,7 +6012,117 @@ Chapter 4 : Interrupts and Exceptions
          */
 
       !  current->thread_info is stored in the process's kernel stack.
-        
-        
+
+
+Chapter 5 : Kernel Synchronization
+    How the Kernel Services Requests :
+      two types of requests >
+        1>  requests from processes
+        2>  requests from devices
+    
+      the policy adopted by the kernel is the following >
+        1>  if a dev-req comes while the kernel is idle,the kernel starts servicing.
+        2>  if a dev-req comes while the kernel is servicing a process,the kernel
+            stops servicing the process and start servicing the device.
+        3>  if a dev-req comes while the kernel is servicing another device,the kernel
+            stops servicing the first device and starts servicing the second one.
+            when it finish servicing the new device,it resumes servicing the former one. 
+        4>  one of the devices may induce the kernel to leave the process being currently
+            services.
+            after servicing the last request of the devices,the kernel may decide to drop
+            temporarily the previous process and to pick up a new one.
+            
+        1--3>  Nested Execution of Exception and Interrupt Handlers
+        4>     Kernel Preemption
+
+      !  if CPU is not executing the code in the Kernel Mode,consider it is idle,or consider
+         the kernel is idle and ready to service devices.
+      !  dev-req correspond to interrupts(timer,keyboard,...)
+         proc-req correspond to system calls or exception raised by User Mode processes
+
+    Kernel Preemption : (Kernel Option : CONFIG_PREEMPT)
+      Process Switch >
+        >  a planned process switch :
+             both in preemptive and nonpreemptive kernels,a process running in Kernel Mode can
+             voluntarily relinquish the CPU(i.e. sleeping...)
+           forced process switch :
+             synchronous events cause a process switching,for instance,an interrupt handler that
+             awakes a higher priority process.
+             (react to such case,preemptive kernel is differs from nonpreemptive kernel)
+  
+        >  all process switches are performed by the switch_to macro.
+           in both preemptive and nonpreemptive kernels,a process switch occurs when a process has
+           finished some thread of kernel activity and the scheduler is invoked.
+           however,in nonpreemptive kernels,the current process cannot be replaced unless it is about
+           to switch to User Mode.
       
-                                
+      !  the main characteristic of a preemptive kernel is that a process running in Kernel Mode can
+         be replaced by another process while in the middle of a kernel function.
+
+      !  nonpreemptive kernel forbids "forced process switch".
+         /*  "forced process switch" also will happens when the process's time quantum expires.  */
+
+      !  reason for making a kernel preemptive :
+           reduce the "dispatch latency" of the User Mode processes.
+           "dispatch latency" :
+             the delay between the time processes become runnable and the time they actually begin running.
+      
+      kernel preemption is disabled when thread_info.preempt_count > 0,the following cases that preempt_count
+      is greater than zero :
+        1>  the kernel is executing an interrupt service routine
+        2>  the deferrable functions are disabled(always true when the kernel is executing a softirq or tasklet)
+        3>  the kernel preemption has been explicitly disabled by setting the preemption counter to a positive 
+            value
+
+        !  thus,the kernel can be preempted only when it is executing an exception handler(in particular a system call)
+           and the kernel preemption has not been explicitly disabled.
+           /*  eflags.IF must be set up,otherwise,kernel preemption is not performed.  */
+
+      macros defined in <linux/preempt.h> to accessing and manipulating preempt_count :
+        <linux/preempt.h>
+          /*  preempt_count - returns the value of preempt_count.  */
+          #define preempt_count()  (current_thread_info()->preempt_count)
+
+          /*  preempt_disable - disable kernel preemption.  */
+          #define preempt_disable() \
+                  do { \
+                          inc_preempt_count(); \
+                          barrier();           \
+                  } while (0)
+
+          /*  preempt_enable - enable kernel preeption.
+           *                   if thread_info.flags & TIF_NEED_RESCHED is T,
+           *                   call to preempt_schedule().
+           */
+          #define preempt_enable() \
+                  do { \
+                          preempt_enable_no_resched(); \  /*  *_no_resched means no scheduler calling.  */
+                          barrier();                   \
+                          preempt_check_resched();     \
+                  } while (0)
+
+          /*  preempt_schedule() is declared in <linux/preempt.h> and defined in <kernel/sched.c>
+           *    if preempt_count > 0 OR irq disabled
+           *            do nothing,and return
+           *    else
+           *            do-while loop until need_resched() returns zero
+           *                    set PREEMPT_ACTIVE
+           *                    call schedule()
+           *                    unset PREEMPT_ACTIVE
+           *                    barrier(),wait synchronization
+           */
+
+      macros defined in <linux/smp.h> associated to preempt_count :
+        <linux/smp.h>
+          /*  get_cpu - get cpu id with kernel preemption disabled.  */
+          #define get_cpu()  ({ preempt_disable(); smp_processor_id(); })
+
+          /*  put_cpu - put cpu,that is enable kernel preemption.  */
+          #define put_cpu()  preempt_enable()
+
+        /*  Linux 2.6,no macro "put_cpu_no_resched()" was defined.  */
+
+      !!  kernel preemption may happen either when a kernel control path is terminated,or when an exception
+          handler reenables kernel preemption by means of preempt_enable().
+          kernel preemption may happens when deferrable functions are enabled(preempt_count.softirq_count == 0).
+      !!
