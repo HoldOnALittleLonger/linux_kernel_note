@@ -5238,6 +5238,8 @@ Chapter 4 : Interrupts and Exceptions
       interrupt handler has terminated.
       deferrable tasks can execute with all interrupt enabled.
 
+      !  Softirqs and tasklets cannot be interleaved on a givent CPU.
+
       Linux 2.6 non-urgent interruptible kernel functions :
         /*  deferrable functions  */
         /*  Intel manual called programmed exception as "softirq"  */
@@ -6126,3 +6128,36 @@ Chapter 5 : Kernel Synchronization
           handler reenables kernel preemption by means of preempt_enable().
           kernel preemption may happens when deferrable functions are enabled(preempt_count.softirq_count == 0).
       !!
+
+    When Synchronization Is Necessary :
+      A critical region is a section of code that must be completely executed by the kernel control path that
+      enters it before another kernel control path can enter it.
+      interleaving kernel control path,the critical regions may occur in exception handlers,or interrupt handlers,
+      or deferrable functions,kernel threads.
+      once a critical region has been identified,it must be suitably protected to ensure that any time at most
+      one kernel control path is inside that region.
+      /*  a single CPU system,a critical region the kernel threads will enter it,just disable interrupt as well;
+       *  a single CPU system,a critical region the system call service routines will enter it,just disable
+       *  kernel preemption as well.
+       *  THINGS IS MORE COMPLICATED ON SMP!(interrupt handler,exception handler,softirq...)
+       */
+
+    When Synchronization Is Not Necessary :
+      1>  Interrupt handlers and tasklets need not be coded as reentrant functions.
+          /*  THAT IS,after CPU received a IRQ,the correspond IRQ line will be disabled by driver until
+           *  the interrupt handler finishes execution;
+           *  and the same type tasklets cannot be executed by two or more CPUs simultaneously.
+           */
+      2>  Per-CPU variable accessed by softirqs and tasklets only do not require synchronization.
+          /*  Different CPU has different Per-CPU variable.
+           *  Softirq can run concurrently on several CPUs,so each Per-CPU variable is not same.
+           *  tasklets have same type can not run on two or more CPUs at same time;if there are
+           *  two tasklets with different types,they can run on two CPUs at same time,but the
+           *  Per-CPU variable is not same.
+           *  If Per-CPU variable is accessed by kernel threads(preemptible),then it must be
+           *  protected by some synchronizing-mechanisms. 
+           */
+
+      3>  A data structure accessed by only one kind of tasklet does not require synchronization.
+          /*  same type tasklets can not run simultaneously on two or more CPUs.  */
+
