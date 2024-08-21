@@ -6161,3 +6161,157 @@ Chapter 5 : Kernel Synchronization
       3>  A data structure accessed by only one kind of tasklet does not require synchronization.
           /*  same type tasklets can not run simultaneously on two or more CPUs.  */
 
+    !  the best synchronization technique consists in designing the kernel so as to avoid the need for
+       synchronization in the first place.
+
+    Synchronization Primitives :
+      Linux kernel synchronization techniques :
+        1>  Pre-CPU variables (all CPUs)
+            duplicate a data structure among the CPUs
+
+        2>  Atomic operation (all CPUs)
+            atomic read-modify-write instruction to a counter
+            
+        3>  Memory barrier (local CPU or all CPUs)
+            avoid instruction reordering
+
+        4>  Spin lock (all CPUs)
+            lock with busy wait
+
+        5>  Semaphore (all CPUs)
+            lock with blocking wait(sleep)
+
+        6>  Seqlocks (all CPUs)
+            lock based on an access counter
+
+        7>  Local interrupt disabling (local CPU)
+            forbid interrupt handling on a single CPU
+
+        8>  Local softirq disabling (local CPU)
+            forbid deferrable function handling on a single CPU
+
+        9>  Read-Copy-Update(RCU) (all CPUs)
+            lock-free access to shared data structures through pointers
+
+      Per-CPU Variables :
+        the simplest and most efficient synchronization technique.
+        basically,a per-CPU variable is an array of data structures,one element
+        per each CPU in the system.
+        a CPU only be allowed to operates its own element,there is no race condition.
+        but per-CPU variables can be used only in particular cases--basically,when
+        it makes sense to logically split the data across the CPUs of the system.
+
+        !  per-CPU variable aligned in main memory so that each data structures falls
+           on a different line of the hardware cache,concurrent accesses to the per-CPU
+           array do not result in cache line snooping and invalidation.
+
+        !  per-CPU variable provides protection against concurrent accesses from several
+           CPUs,but can not protects accesses from asynchronous functions,in theses cases,
+           additional synchronization technique is required.
+
+        !  per-CPU variable must be accessed while kernel preemption is disabled.
+
+        per-CPU variables operating primitives :
+          <linux/percpu-defs.h>
+
+            /*  __PCPU_ATTRS - set up percpu attributes for current cpu.
+             *  #  This macro would extends to assembly language.
+             */
+            #define __PCPU_ATTRS(sec)  \
+                    __percpu_attributes__((section(PER_CPU_BASE_SECTION sec)))  \
+                    PER_CPU_ATTRIBUTES
+  
+            /*  section for the DECLARE and for the DEFINE must match  */
+  
+            #if !defined(ARCH_NEED_WEAK_PER_CPU) && !defined(CONFIG_DEBUG_FORCE_WEAK_PER_CPU)
+
+            /*  normal per-CPU definitions  */
+            /*  DECLARE_PER_CPU_SECTION - declare a section for percpu data.
+             *                            the section had been defined on other place.
+             */
+            #define DECLARE_PER_CPU_SECTION(type, name, sec)  \
+                    extern __PCPU_ATTRS(sec) __typeof__(type) name
+  
+            /*  DEFINE_PER_CPU_SECTION - define a section for percpu data.  */
+            #define DEFINE_PER_CPU_SECTION(type, name, sec)  \
+                    __PCPU_ATTRS(sec) PER_CPU_DEF_ATTRIBUTES \
+                    __typeof__(type) name
+                    /*  assembly data object in the section ".data" or ".data.percpu",
+                     *  type is __typeof__(type),
+                     *  symbol is @name.
+                     */
+  
+            /*  DECLARE_PER_CPU - declare a per-CPU variable @name with type is @type.  */
+            #define DECLARE_PER_CPU(type, name)  \
+                    DECLARE_PER_CPU_SECTION(type, name, "")
+  
+            /*  DEFINE_PER_CPU - define a per-CPU variable @name with type is @type.  */
+            #define DEFINE_PER_CPU(type, name)   \
+                    DEFINE_PER_CPU_SECTION(type, name, "")
+  
+            #endif
+
+          <asm-generic/percpu.h>
+            #ifdef CONFIG_SMP
+            #define PER_CPU_BASE_SECTION  ".data.percpu"
+
+            /*  per_cpu - select an element in per-CPU array @var for @cpu.  */
+            #define per_cpu(var, cpu)  \
+              (*SHIFT_PERCPU_PTR(&(var), per_cpu_offset(cpu)))
+
+            /*  __get_cpu_var - select the local CPU's element of the per-CPU array @var.  */
+            #define __get_cpu_var(var)  \
+              (*SHIFT_PERCPU_PTR(&(var), my_cpu_offset))
+
+            #else
+            #define PER_CPU_BASE_SECTION  ".data"
+
+            /*  NONSMP versions  */
+            #define per_cpu(var, cpu)  (*((void)(cpu), &(var)))
+            #define __get_cpu_var(var)  (var)
+
+            #endif
+
+          <linux/percpu.h>
+            /*  get_cpu_var - get @var from current CPU with preemption disabling.  */
+            #define get_cpu_var(var)  (*({  \
+                    preempt_disable();       \
+                    &__get_cpu_var(var); }))
+
+            /*  put_cpu_var - put @var to current CPU and enable preemption.
+             *  #  It is not really write-back value to @var in current CPU,just
+             *     enable preemption.
+             */
+            #define put_cpu_var(var)  do {  \
+                    (void)&(var);           \
+                    preempt_enable();       \
+                    } while(0)
+
+            extern void __percpu *__alloc_percpu(size_t size, size_t align);
+            /*  alloc_percpu - alloc a per-CPU variable.
+             *  @type:         the type of the per-CPU variable.
+             *  return:        pointer points to the per-CPU variable.
+             */
+            #define alloc_percpu(type)  \
+                    (typeof(type) __percpu *)__alloc_percpu(sizeof(type), __alignof__(type)))
+
+            /*  free_percpu - destroy a per-CPU variable pointer got previously from alloc_percpu().
+             *  @__pdata:     the pointer to be destroyed.
+             */
+            extern void free_percpu(void __percpu *__pdata);
+
+            #ifdef CONFIG_SMP
+
+            /*  per_cpu_ptr - return a pointer is typeof(ptr),the address is equal to 
+             *                A := ptr + __per_cpu_offset[cpu].
+             *                __per_cpu_offset is an array of unsigned long and size is
+             *                equal to "sizeof(unsigned long) * NR_CPUS".
+             */
+            #define per_cpu_ptr(ptr, cpu)  SHIFT_PERCPU_PTR((ptr), per_cpu_offset((cpu)))
+
+            #else
+
+            #define per_cpu_ptr(ptr, cpu)  ({ (void)(cpu); (ptr); })
+
+            #endif
+        
