@@ -6196,7 +6196,10 @@ Chapter 5 : Kernel Synchronization
       Per-CPU Variables :
         the simplest and most efficient synchronization technique.
         basically,a per-CPU variable is an array of data structures,one element
-        per each CPU in the system.
+        per each CPU in the system.(__per_cpu_offset[NR_CPUS] used to save the
+        offset values for per-CPU variable,each offset value corresponding to
+        a CPU in the system.)
+
         a CPU only be allowed to operates its own element,there is no race condition.
         but per-CPU variables can be used only in particular cases--basically,when
         it makes sense to logically split the data across the CPUs of the system.
@@ -6239,6 +6242,7 @@ Chapter 5 : Kernel Synchronization
                     /*  assembly data object in the section ".data" or ".data.percpu",
                      *  type is __typeof__(type),
                      *  symbol is @name.
+                     *  ".data" and ".data.percpu" means switch to the corresponding section.
                      */
   
             /*  DECLARE_PER_CPU - declare a per-CPU variable @name with type is @type.  */
@@ -6255,11 +6259,17 @@ Chapter 5 : Kernel Synchronization
             #ifdef CONFIG_SMP
             #define PER_CPU_BASE_SECTION  ".data.percpu"
 
-            /*  per_cpu - select an element in per-CPU array @var for @cpu.  */
+            /*  per_cpu - get the per-CPU variable for local CPU.
+             *            SHIFT_PERCPU_PTR() will vertify @var at first,then
+             *            call to RELOC_HIDE(&var, __per_cpu_offset[cpu]),
+             *            which returns "&var + @offset",the address is the
+             *            per-CPU variable instance for the certain cpu @cpu.
+             *            finally,derefer to the address for get the per-CPU variable.
+             */
             #define per_cpu(var, cpu)  \
               (*SHIFT_PERCPU_PTR(&(var), per_cpu_offset(cpu)))
 
-            /*  __get_cpu_var - select the local CPU's element of the per-CPU array @var.  */
+            /*  __get_cpu_var - select the per-CPU variable @var in local CPU.  */
             #define __get_cpu_var(var)  \
               (*SHIFT_PERCPU_PTR(&(var), my_cpu_offset))
 
@@ -6281,11 +6291,17 @@ Chapter 5 : Kernel Synchronization
             /*  put_cpu_var - put @var to current CPU and enable preemption.
              *  #  It is not really write-back value to @var in current CPU,just
              *     enable preemption.
+             *     write a per-CPU variable :
+             *       assume there is a per-CPU variable is named "pCPUv" which is type of int,
+             *       in local CPU.
+             *       per_cpu(pCPUv, my_cpu_offset) = 16;  //  okay,macro extending => *Pointer = 16
              */
             #define put_cpu_var(var)  do {  \
                     (void)&(var);           \
                     preempt_enable();       \
                     } while(0)
+
+            /*  get_cpu() and put_cpu() respectively disable preemption and enable preemption.  */
 
             extern void __percpu *__alloc_percpu(size_t size, size_t align);
             /*  alloc_percpu - alloc a per-CPU variable.
@@ -6306,6 +6322,9 @@ Chapter 5 : Kernel Synchronization
              *                A := ptr + __per_cpu_offset[cpu].
              *                __per_cpu_offset is an array of unsigned long and size is
              *                equal to "sizeof(unsigned long) * NR_CPUS".
+             *  !!  per_cpu_offset() is the offset that has to be added to a percpu variable
+             *      to get to the instance for a certain processor.
+             *  !!  __per_cpu_offset[NR_CPUS] is defined in <arch/x86/kernel/setup_percpu.c>.
              */
             #define per_cpu_ptr(ptr, cpu)  SHIFT_PERCPU_PTR((ptr), per_cpu_offset((cpu)))
 
