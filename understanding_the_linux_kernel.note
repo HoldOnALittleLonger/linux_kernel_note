@@ -6333,4 +6333,66 @@ Chapter 5 : Kernel Synchronization
             #define per_cpu_ptr(ptr, cpu)  ({ (void)(cpu); (ptr); })
 
             #endif
-        
+
+      Atomic Operations : 
+        race condition in "read-modify-write" :
+          p1 read 0x7fffffff32 in 4 bytes -> p1 modify the value readed from the memory unit -> write back
+          result to 0x7fffffff32 in 4 bytes.
+          p2 do the some things.
+          !  But p1 and p2 process interleaving.
+             p1 read -> p2 read -> p2 modify -> p1 modify -> p1 write back -> p2 write back
+             now incorrect value is in 0x7fffffff32.
+
+        memory arbiter : a hardware circuit that serializes accesses to the RAM chips.
+
+        atomic operation : such "read-modify-write" operations can not be interrupted by other kernel control path.
+
+        80x86 atomic operation mechanisms :
+          1>  assembly language instructions that make zero or one aligned memory access are atomic.
+              /*  an unaligned memory access is not atomic.  */
+          2>  read-modify-write assembly language instructions(such as inc or dec),
+              no other processor is granted to takes the memory bus if there is processor has been readed before write.
+              memory bus stealing never happens in a uniprocessor system.
+          3>  assembly language instructions whose opcode is prefixed by a rep byte(0xf2,0xf3,which forces the control
+              unit to repeat the same instruction several times) are not atomic.
+              the control unit checks for pending interrupts before executing a new iteration.
+              /*  register ecx as the counter  */
+
+        atomic_t type :
+          linux kernel provides a special atomic_t type(an atomically accessible counter) and some functions and macros
+          that act on atomic_t variables and are implemented as single,atomic assembly language instructions.
+          On multiprocessor systems,each such instruction is prefixed by a "lock" byte.
+          /*  POSIX provides sig_atomic_t type,operations on it is guaranteed no interuppts in middle.
+           *  introduced in header <signal.h>
+           */
+
+          atomic operations :
+            <asm-generic/atomic.h>  /*  architecture independ  */
+            /*  <arch/x86/include/asm/atomic.h>  architecture depend  */
+
+              atomic_read(v)                ->       return *v
+              atomic_set(v, i)              ->       *v = @i
+              atomic_add(i, v)              ->       *v += @i
+              atomic_sub(i, v)              ->       *v -= @i
+              atomic_sub_and_test(i, v)     ->       return (*v -= @i) ? 0 -> 1
+              atomic_inc(v)                 ->       ++*v
+              atomic_dec(v)                 ->       --*v
+              atomic_dec_and_test(v)        ->       return (--*v) ? 0 -> 1
+              atomic_inc_and_test(v)        ->       return (++*v) ? 0 -> 1
+              atomic_add_negative(i, v)     ->       return ((*v += @i) < 0) ? 1 -> 0
+              atomic_inc_return(v)          ->       return ++*v
+              atomic_dec_return(v)          ->       return --*v
+              atomic_add_return(i, v)       ->       return *v += @i
+              atomic_sub_return(i, v)       ->       return *v -= @i
+
+              atomic_clear_mask(mask, addr) ->       clear all bits of *addr specified by @mask
+              atomic_set_mask(mask, addr)   ->       set all bits of *addr specified by @mask
+
+            <arch/x86/include/asm/bitops.h>
+              test_bit(nr, addr)            ->       return the value of the @nr_th bit of *addr
+              set_bit(nr, addr)             ->       set the @nr_th bit of *addr
+              clear_bit(nr, addr)           ->       clear the @nr_th bit of *addr
+              change_bit(nr, addr)          ->       invert the @nr_th bit of *addr
+              test_and_set_bit(nr, addr)    ->       set the @nr_th bit of *addr and return its old value
+              test_and_clear_bit(nr, addr)  ->       clear the @nr_th bit of *addr and return its old value
+              test_and_change_bit(nr, addr) ->       invert the @nr_th bit of *addr and return its old value
