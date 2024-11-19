@@ -6364,6 +6364,7 @@ Chapter 5 : Kernel Synchronization
           On multiprocessor systems,each such instruction is prefixed by a "lock" byte.
           /*  POSIX provides sig_atomic_t type,operations on it is guaranteed no interuppts in middle.
            *  introduced in header <signal.h>
+           *  normally,operation on int type and pointer type all is atomic.
            */
 
           atomic operations :
@@ -6396,3 +6397,89 @@ Chapter 5 : Kernel Synchronization
               test_and_set_bit(nr, addr)    ->       set the @nr_th bit of *addr and return its old value
               test_and_clear_bit(nr, addr)  ->       clear the @nr_th bit of *addr and return its old value
               test_and_change_bit(nr, addr) ->       invert the @nr_th bit of *addr and return its old value
+
+      Optimization and Memory Barriers :
+        optimizing compiler may reorder assembly language instructions,and modern CPU may process
+        instructions parallely(depend on CPU architecture) thus memory access order may be changed,
+        these must be avoided when dealing with synchronization.
+
+        optimization barrier primitive ensures that the assembly language instructions corresponding
+        to C statements placed before the primitive are not mixed by the compiler with the instructions
+        corresponding to the C statements after the primitive.
+
+        Linux barrier() macro :
+          <linux/compiler-gcc.h>
+            /*  keyword 'memory' forces the compiler to assume that all memory locations in RAM have been
+             *  changed by the assembly language instruction.
+             *  thus,the compiler cannot optimize the code by using the values of memory locations stored
+             *  in CPU registers before the "__asm__" instruction.
+             *  Note : optimization barrier do not forbid CPU mix the assembly language instructions.
+             *         this is only take affect to assembly language source code.
+             *         this is memory barrier.
+             */
+            #define barrier()  __asm__ __volatile__("": : :"memory")
+
+          e.g.
+            int x = 3;
+            int y = x * 2;
+            int z = 0;
+
+            z = z + x * 2 + y;
+            fprintf(stdout, "%d", z);
+            /*  the instructions before barrier() will be finished before the statement "z = 6;"
+             *  start.
+             */
+
+            barrier();
+
+            z = 6;
+            /*  suppose,int is not atomic,and compiler place "z = 6;" front to "z = z + x * 2 + y;",
+             *  that is 
+             *    z = 6;
+             *    fprintf(stdout, "%d", z);  /*  print 6,but we expect 12  */
+             *    z = z + x * 2 + y;
+             */
+    
+        80x86,the assembly language instructions are said to be "serizalizting" :
+          1>  all instructions that operate on I/O ports.
+          2>  all instructions prefixed by the "lock" byte.
+          3>  all instructions that write into control registers,system registers,or
+              debug registers.(cli, sti, eflags.IF)
+          4>  the 'lfence', 'sfence', 'mfence' assembly language instructions.
+                   RMB       WMB       WRMB
+          5>  a few special assembly language instructions;among them,the 'iret' instruction
+              that terminates an interrupt or exception handler.
+
+        Linux memory barrier macros :
+          <arch/x86/include/asm/system.h>  /*  architecture depends  */
+          /*  <asm-generic/system.h>           architecture independs  */
+
+          /*  the following are X86_64 macros,X86_32 macros also are defined in the same file.
+           *  e.g.
+           *    #define mb()  alternative("lock; addl $0,0(%%esp)", "mfence", X86_FEATURE_XMM2)
+           */
+
+          /*  mb - memory barrier for MP and UP.  */
+          #define mb()      asm volatile("mfence":::"memory")
+        
+          /*  rmb - read memory barrier for MP and UP.  */
+          #define rmb()     asm volatile("lfence":::"memory")
+
+          /*  wmb - write memory barrier for MP and UP.
+           *  # some intel microprocessors never reorder write memory access,so this macro may
+           *    instead of "barrier()",but it is keep compiler do not reorder instructions.
+           */
+          #define wmb()     asm volatile("sfence":::"memory")
+
+          /*  smp_mb - CONFIG_SMP,otherwise "barrier()".  */
+          #define smp_mb()  mb()
+
+          /*  smp_rmb - CONFIG_X86_PPRO_FENCE,otherwise "barrier()".  */
+          #define smp_rmb() rmb()
+
+          /*  smp_wmb - CONFIG_X86_OOSTORE,otherwise "barrier()".  */
+          #define smp_wmb() wmb()
+
+          /*  the macros prefixed "smp_" only take affect on multiprocessor system.
+           *  no such prefix are take affect on multiprocessor system and uniprocessor system.
+           */
