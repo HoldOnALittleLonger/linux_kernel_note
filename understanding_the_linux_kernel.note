@@ -6483,3 +6483,77 @@ Chapter 5 : Kernel Synchronization
           /*  the macros prefixed "smp_" only take affect on multiprocessor system.
            *  no such prefix are take affect on multiprocessor system and uniprocessor system.
            */
+
+      Spin Lock :
+        spin locks are a special kind of lock designed to work in a multiprocessor environment.
+        if a spin lock had been holden by another kernel control path,then current kernel control path
+        who is waiting for the lock will repeatedly executing a tight instruction loop,until the lock
+        is released.
+
+        !  the instruction loop of spin locks represents a "busy wait".the waiting kernel control path
+           keeps running on the CPU,even if it has nothing to do besides waste time.
+           some works resource in kernel space may be locked a fraction of a millisecond only,spin lock
+           would be far more time-conmusing to release the CPU and reacquire it later.
+
+        !  kernel preemption is disabled in every critical region protected by spin locks.
+           kernel preemption is still enabled in "busy wait" phase.
+
+        <linux/spinlock_types.h>
+          /*  raw_spinlock_t - raw spinlock type.
+           *  @raw_lock:       it is the architecture depends spinlock structure,
+           *                   which is defined in <arch/x86/include/asm/spinlock_types.h>,
+           *                   typedef struct arch_spinlock arch_spinlock_t
+           *                   it has member @slock is type of unsigned int(0 locked,@v > 0 unlocked).
+           *  @break_lock:     flag signaling that a process is busy waiting for the lock.
+           */
+          typedef struct raw_spinlock {
+                  arch_spinlock_t raw_lock;
+          #ifdef CONFIG_GENERIC_LOCKBREAK
+                  unsigned int break_lock;
+          #endif
+                  ...
+          } raw_spinlock_t;
+
+          typedef struct spinlock {
+                  union {
+                          struct raw_spinlock rlock;
+                  };
+          } spinlock_t;
+
+        <linux/spinlock.h>
+          /*  spin_lock_init - initializer.
+           *  @_lock:          a pointer to spinlock_t.
+           */
+          #define spin_lock_init(_lock)     \
+          do {                              \
+                  spinlock_check(_lock);    \
+                  raw_spin_lock_init(&(_lock)->rlock);  \
+          } while (0)
+
+          /*  spin_lock - lock a spinlock.
+           *  @lock:      a pointer point to spinlock_t object.
+           */
+          static inline void spin_lock(spinlock_t *lock);
+
+          /*  spin_unlock - unlock.  */
+          static inline void spin_unlock(spinlock_t *lock);
+
+          /*  spin_unlock_wait - wait until spinlock gets unlocked.
+           *                     it just query whether the spinlock
+           *                     gets unlocked.
+           *  #  arch_spin_unlock_wait() will be called,
+           *     which enter a null cycle until the spinlock is released.
+           */
+          static inline void spin_unlock_wait(spinlock_t *lock);
+
+          /*  spin_is_locked - it is locked?  */
+          static inline void spin_is_locked(spinlock_t *lock);
+
+          /*  spin_trylock - try to get spinlock.
+           *                 if failed,do not enter a cycle,just return to caller.
+           */
+          static inline void spin_trylock(spinlock_t *lock);
+
+          /*  all the functions above call to the corresponding raw_spin_*() functions,and them
+           *  will call to architecture depended spinlock api.
+           */
