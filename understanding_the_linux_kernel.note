@@ -6555,5 +6555,65 @@ Chapter 5 : Kernel Synchronization
           static inline void spin_trylock(spinlock_t *lock);
 
           /*  all the functions above call to the corresponding raw_spin_*() functions,and them
-           *  will call to architecture depended spinlock api.
+           *  will call to _raw_spin_*() APIs,these APIs are declared in <linux/spinlock_api_smp.h>,
+           *  they call to the primary functions with prefix "__raw_spin_".
+           *  if CONFIG_INLINE_SPINLOCK was defined,then the primary functions are defined in the same
+           *  header of _raw_spin_*(),otherwise,use the function definition in <kernel/spinlock.c> to
+           *  instead.
+           *  macron BUILD_LOCK_OPS(op, locktype) was defined in <kernel/spinlock.c>,this macro generate
+           *  lockfunc such "__raw_##op##_lock(locktype##_t *lock)".
            */
+
+        The spin_lock macro with kernel preemption :
+          when try to get a spinlock,the caller must call to spin_lock() function.
+          which call to raw_spin_lock(),next the _raw_spin_lock() is called,finally,__raw_spin_lock() would
+          be called.
+
+          /*  kernel control path is not allowed to be preempted when it holds a spinlock.  */
+
+          the following actions that __raw_spin_lock() takes :
+            1>  enter a infinite for-cycle.
+            2>  disable kernel preemption.
+            3>  call to do_raw_spin_trylock(),thus,the architecture depended function arch_spin_lock()
+                would be called,which is defined in <arch/x86/include/asm/spinlock.h> as a inline function.
+            4>  if succeed to get the spinlock,break the cycle and return,otherwise,enable kernel preemption
+                and get to the next.
+            5>  set @lock->break_lock := 1,enter a nested cycle.
+            6>  while !raw_spin_can_lock AND (lock)->break_lock
+                        arch_spin_relax(&lock->raw_lock)
+                /*  raw_spin_can_lock() checks whether the lock is able to be holden.
+                 *  lock->break_lock = 1 means a kernel control path is waiting on the lock,but kernel
+                 *  is allowed to be preempted.
+                 *  arch_spin_relax() is equal to cpu_relax().
+                 */
+                
+                if the lock can be holded,then break while-cycle and try to get the lock again.(jump to 2>)
+
+        The spin_lock macro without kernel preemption(uniprocessor) :
+          if no kernel preemption is configured,and no spinlock debug is configured too,
+          then,the raw_spinlock_t is a NULL structure.
+          for uniprocessor system,macro _raw_spin_lock() is macro __LOCK(),which just a compiler attribute
+          "__context__(expression, in_context, out_context)".
+
+          the __LOCK() just disable kernel preemption as well,it extended to :
+            <linux/spinlock_api_up.h>
+              /*  __LOCK - disable kernel preemption,check if lock is equal to 1(compiler checking).
+               *  #  if kernel is not configured with preemption,then preempt_disable() do nothing,
+               *     otherwise,the preempt count would increase and barrier() would be called.
+               *  #  __acquire(x) is defined in <linux/compiler.h>,which is "__conext__(x,1)",
+               *     conversely,__release(x) is defined in the same file,which is "__context__(x,-1)".
+               */
+              #define __LOCK(lock)  \
+                do { preempt_disable(); __acquire(lock); (void)(lock); } while (0)
+
+            /*  no CONFIG_PREEMPT on smp,it is same to CONFIG_PRREMPT configured on smp,but
+             *  preempt_disable() and preempt_enable() do nothing as well.
+             *  !  UP SPINLOCK DEFINITION IS DIFF TO SMP SPINLOCK DEFINITION.
+             */
+
+        The spin_unlock macro :
+          it add 1 to spinlock_t object for release it(0->locked,1->unlocked),and then enable kernel preempt.
+          /*  "lock" byte is not used,because write-only access always atomically executed by the current
+           *  80x86 microprocessors.
+           */
+            
