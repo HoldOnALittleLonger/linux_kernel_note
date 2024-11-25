@@ -6375,12 +6375,12 @@ Chapter 5 : Kernel Synchronization
               atomic_set(v, i)              ->       *v = @i
               atomic_add(i, v)              ->       *v += @i
               atomic_sub(i, v)              ->       *v -= @i
-              atomic_sub_and_test(i, v)     ->       return (*v -= @i) ? 0 -> 1
+              atomic_sub_and_test(i, v)     ->       return (*v -= @i) ? 0 : 1
               atomic_inc(v)                 ->       ++*v
               atomic_dec(v)                 ->       --*v
-              atomic_dec_and_test(v)        ->       return (--*v) ? 0 -> 1
-              atomic_inc_and_test(v)        ->       return (++*v) ? 0 -> 1
-              atomic_add_negative(i, v)     ->       return ((*v += @i) < 0) ? 1 -> 0
+              atomic_dec_and_test(v)        ->       return (--*v) ? 0 : 1
+              atomic_inc_and_test(v)        ->       return (++*v) ? 0 : 1
+              atomic_add_negative(i, v)     ->       return ((*v += @i) < 0) ? 1 : 0
               atomic_inc_return(v)          ->       return ++*v
               atomic_dec_return(v)          ->       return --*v
               atomic_add_return(i, v)       ->       return *v += @i
@@ -6616,4 +6616,151 @@ Chapter 5 : Kernel Synchronization
           /*  "lock" byte is not used,because write-only access always atomically executed by the current
            *  80x86 microprocessors.
            */
+
+      Read/Write Spin Locks :
+        rw spin lock,it is a lock allow more than one readers hold it for reading at same time;only one writer
+        is allowed to holds it for writing at same time.
+
+        <arch/x86/include/asm/rwlock.h>
+          /*  RW_LOCK_BIAS - indicates the initializing state.no reader and no writer.  */
+          #define RW_LOCK_BIAS        0x01000000
+
+        <linux/rwlock_types.h>
+          /*  rwlock_t - linux rw spin lock type.
+           *  @raw_lock: architecture depends rw spin lock type.it is defined in
+           *             <arch/x86/include/asm/spinlock_types.h>,
+           *             it has a member @lock is type of unsigned int.
+           *  @break_lock: whether there is a kernel control path waiting for the rw spin lock currently.
+           *  #  @lock is encoded to includes two pieces of information :
+           *       1>  bits [0, 23] -> the number of kernel control paths currently reading.
+           *       2>  bit 24 -> unlock flag.1 -> unlocked, 0 -> locked.
+           */
+          typedef struct {
+                  arch_rwlock_t raw_lock;
+          #ifdef CONFIG_GENERIC_LOCKBREAK
+                  unsigned int break_lock;
+          #endif
+                  ...
+          } rwlock_t;
+
+          /*  rwlock_init - initialize a rwlock_t object *@lock.
+           *  @lock:        pointer points to an object is type of rw_lock_t.
+           *  #  this version is no CONFIG_DEBUG_SPINLOCK defined.
+           *  #  raw_lock.lock := RW_LOCK_BIAS
+           *     break_lock := 0
+           */
+          #define rwlock_init(lock)        \
+                  do { *(lock) = __RW_LOCK_UNLOCKED(lock); } while (0)
+
+        Getting and releasing a lock for reading :
+          <linux/rwlock.h>
+            /*  read_lock - lock a rw spin lock for reading.
+             *  @lock:      pointer points to an object is type of rwlock_t.
+             */
+            #define read_lock(lock)        _raw_read_lock(lock)
+
+            /*  read_unlock - unlock a locked rwlock is for reading.
+             *  @lock:        pointer points to an object is type  of rwlock_t which had been
+             *                locked for reading.
+             *  #  call list:
+             *       _raw_read_unlock() -> __raw_read_unlock() {
+             *                                     rwlock_release();
+             *                                     do_raw_read_unlock();
+             *                                     preempt_enable();
+             *                             }
+             */
+            #define read_unlock(lock)      _raw_read_unlock(lock)
+
+            /*  do_raw_read_trylock - try to get rwlock for reading.
+             *  @rwlock:              pointer points to an object is type of rwlock_t.
+             */
+            #define do_raw_read_trylock(rwlock)        arch_read_trylock(&(rwlock)->raw_lock)
+
+          <linux/rwlock_api_smp.h>
+            /*  _raw_read_lock - internal rountine for get rwlock to reading.
+             *  @lock:           rwlock_t pointer,can not be NULL.
+             *  #  this functions is defined in <kernel/spinlock.c>,if no
+             *     CONFIG_INLINE_READ_LOCK defined.in the case,this function
+             *     calls to __raw_read_lock(),which is build by macro BUILD_LOCK_OPS().
+             *     thus,__raw_read_lock() is similar to __raw_spin_lock(),
+             *     do_raw_read_trylock() would be called for get the rwlock.
+             */
+            void __lockfunc _raw_read_lock(rwlock_t *lock)        __acquires(lock);
+
+          <arch/x86/include/asm/spinlock.h>
+            /*  arch_read_trylock - architecture depended trylock for rwlock to reading.
+             *  @lock:              pointer points to an object is type of arch_rwlock_t.
+             *  return:             1 -> got lock,0 -> failed.
+             */
+            static inline int arch_read_tyrlock(arch_rwlock_t *lock);
+
+            /*  this function used atomic operations on @lock :
+             *    1>  convert @lock to atomatic_t *,because the structure just one member arch_rwlock_t.lock,
+             *        so there is no padding in the structure,and the member is placed in the head of structure.
+             *    2>  call to atomic_dec_return(@lock),it does --*v .
+             *    3>  if ret value @v >= 0,then it is succeed to hold the lock for reading.
+             *        the value maybe 0x01000000 - 1 = 0x00ffffff,or 0x00ffffff - 1 ...
+             *        !  if a negative value is returend(0x00000000 - 1),that means there is a writer holding
+             *           the rwlock,then call to atomic_inc() to restore the value of @lock.
+             *    4>  if no writing is holding this lock,return 1,otherwise,increase @v and then return 0.
+             *    !!  EVEN arch_rwlock_t.lock IS TYPE OF unsigned int,BUT atomatic_t IS TYPE OF int,THUS NO
+             *        INCORRECT RESULT WILL APPEAR.
+             */
+
+          !!  it is also forbid holding rwlock to sleep,thus kernel preempt will be disabled after got the lock.
+              rwlock locking action is busy waiting,too.
+          !!  uniprocessor version of _raw_read_lock() is defined in <linux/spinlock_api_up.h>,it is a macro would
+              be insteaded by "__LOCK(lock)".
+          !!  Linux-2.6.34.1,BUILD_LOCK_OPS() macro builds preemption-friendly version for spin lock functions.
+              thus,even kernel preemption is not selected,__raw_read_lock() stay defined by this macro.(no
+              CONFIG_INLINE_READ_LOCK)
+              <<understanding the linux kernel>> indicates if no kernel preemption is configured,read_lock() macro
+              would be expanded to some assembly language code.
+              /*  ENTRY(__read_lock_failed) stay existed in <arch/x86/lib/rwlock_64.S>,and arch_read_lock() will
+               *  jump to the entry if failed to got rwlock for reading.actually,arch_read_lock() is composed in
+               *  some assembly language code,not in C language code.
+               */
+
+        Getting and releasing a lock for writing :
+          it is similar to getting and releaing a lock for reading.
+          <linux/rwlock.h>
+            /*  write_lock - get rwlock for writing.
+             *  @lock:       pointer points to an object is type of rwlock_t.
+             *  #  call list:
+             *       _raw_write_lock() -> __raw_write_lock() -> do_raw_write_trylock() -> arch_write_trylock()
+             */
+            #define write_lock(lock)        _raw_write_lock(lock)
+
+            /*  write_unlock - unlock a locked rwlock is for writing.
+             *  @lock:         pointer points to an object is type of rwlock_t which had been locked for
+             *                 writing.
+             *  #  call list:
+             *       _raw_write_unlock() -> __raw_write_unlock() {
+             *                                      rwlock_release();
+             *                                      do_raw_write_unlock();
+             *                                      preempt_enable();
+             *                              }
+            #define write_unlock(lock)      _raw_write_unlock(lock)
+
+          <arch/x86/include/asm/spinlock.h>
+            /*  arch_write_trylock - architecture depended trylock for rwlock to writing.
+             *  @lock:               pointer points an object is type of arch_rwlock_t.
+             *  return:              1 -> succeed,0 -> failed.
+             *  #  this function is similar to arch_read_trylock(),but it call to
+             *     atomic_sub_and_test(RW_LOCK_BIAS, @lock) and atomic_add(RW_LOCK_BIAS, @lock) to
+             *     instead atomic_dec_return(),atomic_add(),respectively.
+             *     if @lock = RW_LOCK_BIAS(0x01000000)
+             *       atomic_sub_and_test() return 1  /*  (*v -= @i) ? 0 : 1  */
+             *       that means no kernel control path is holding this rwlock now
+             *     else
+             *       ret value = 0
+             *       then,atomic_add() restore @lock
+             *       /*  x := @lock - RW_LOCK_BIAS
+             *        *  @lock := x + RW_LOCK_BIAS
+             *        */
+             */
+            static inline int arch_write_trylock(arch_rwlock_t *lock);
+
+
+
             
