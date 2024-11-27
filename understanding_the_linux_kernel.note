@@ -6761,6 +6761,240 @@ Chapter 5 : Kernel Synchronization
              */
             static inline int arch_write_trylock(arch_rwlock_t *lock);
 
+      Seqlocks :
+        sequence lock is similar to rw spin lock,but writer has higher priority than readers.
+        of course,only one writer is activing at the same time,and reader may have to reads the 
+        share data structure several times for get the valid copy.
 
+        <linux/seqlock.h>
+          /*  seqlock_t - a structure type represent seqlock.
+           *  @sequence:  sequence value,only writer is allowed to change it.
+           *              even number -> no writer is activing
+           *              odd number  -> a writer is activing
+           *  @lock:      spin lock as the basic lock for seqlock.
+           */
+          typedef struct {
+                  unsigned sequence;
+                  spinlock_t lock;
+          } seqlock_t;
 
+          /*  SEQLOCK_UNLOCKED - initialize value for the seqlock.
+           *                     it equals to {0, __SPIN_LOCK_UNLOCKED(old_style_seqlock_init)}.
+           */
+          #define SEQLOCK_UNLOCKED        __SEQLOCK_UNLOCKED(old_style_seqlock_init)
+
+          /*  seqlock_init - macro for initialize a seqlock @x.
+           *                 the state of @x after this macro completed is same as
+           *                 *@x = SEQLOCK_UNLOCKED
+           *  @x:            pointer of seqlock.
+           */
+          #define seqlock_init(x)
+
+          /*  write_seqlock - lock function for writer on seqlock.
+           *  @sl:            pointer of seqlock.
+           *  #  this function increase @sl->sequence and lock @sl->lock .
+           */
+          static inline void write_seqlock(seqlock_t *sl);
+
+          /*  write_sequnlock - unlock function for writer on seqlock.
+           *  @sl:              pointer of seqlock.
+           *  #  this function increase @sl->sequence and unlock @sl->lock .
+           */
+          static inline void write_sequnlock(seqlock_t *sl);
+
+          /*  because the basic lock is spin lock,thus when writer lock a seqlock,the kernel
+           *  preempt is automatically disabled,and automatically enabled when the writer
+           *  unlock the seqlock.
+           *  stack order : lock spin lock -> ++sequence (lock)
+           *                ++sequence     -> unlock spin lock (unlock)
+           */
+
+          /*  read_seqbegin - seqlock routine for reader begin to access the share data structure
+           *                  which is protected by a seqlock.
+           *  @sl:            pointer of seqlock.
+           *  return:         @sl->sequence and it is a even number.
+           *  #  this function should be called only once when reader enter a critical region
+           *     to access the shared data.
+           */
+          static __always_inline unsigned read_seqbegin(const seqlock_t *sl);
+
+          /*  read_seqretry - seqlock routine for reader to check if @sl->sequence == @start.
+           *  @sl:            pointer of seqlock.
+           *  @start:         a value which should get from read_seqbegin().
+           *  return:         @sl->sequence != @start
+           *  #  this function is used check whether a writer is writing the shared data.
+           *     if @sl->sequence == @start(from read_seqbegin(),a even number),that means no writer
+           *     is activing.
+           *     else,a writer is activing and the copy readed previously is not completed,reader
+           *     should read it again.
+           */
+          static __always_inline int read_seqretry(const seqlock_t *sl, unsigned start);
+
+          e.g.
+            =>  seqlock_t *seqlock
+            unsigned int ret = 0;
+            do {
+                    ret = read_seqbegin(seqlock);  /*  ret must be a even number,otherwise,
+                                                    *  read_seqbegin() will waiting until the writer
+                                                    *  leaved.
+                                                    */
+                    /*  critical region,read the copy of shared data  */
+                    ...
+            } while (read_seqretry(seqlock, ret));
+                    /*  if @ret != @seqlock->sequence
+                     *          a writer changed the shared data
+                     *          OR
+                     *          a writer is activing
+                     *  each case,reader have to read shared data again.
+                     */
+
+        seqcount_t :
+          sequence mechanism for the code has its own mutex to protects the critical region.
+
+          <linux/seqlock.h>
+            /*  seqcount_t - version of sequence only.  */
+            typedef struct {
+                    unsigned int sequence;
+            } seqcount_t;
+
+          operations :
+            read_seqcount_begin()
+            read_seqcount_retry()
+            write_seqcount_begin()
+            write_seqcount_end()
+
+            /*  obviously,suffix for write functions is "begin" or "end",because no lock in seqcount_t.  */
+
+        rules for seqlock usage :
+          1>  the structure does not include pointers that are modified by the writers and
+              dereferenced by the readers.
+          2>  the code in the critical regions of the readers does not have side effects.
+              (otherwise,multiple reads would have different effects from a single read)
+          3>  the critical regions of the readers should be short and writers should seldom acquire the seqlock.
+              (read_seqbegin() is busy wait)
+
+      Read-Copy Update (RCU) :
+        RCU is lock free,allows many readers and many writers to proceed concurrently.
+        it is designed to protect data structures that are mostly accessed for reading by several CPUs.
+
+        the key for RCU :
+          1>  only data structures that are dynamically allocated and referenced by means of pointers
+              can be protected by RCU.
+          2>  no kernel control path can sleep inside a critical region protected by RCU!!
+
+        <linux/rcupdate.h>
+          /*  rcu_head - rcu structure,usually embedded inside the data structure to be freed.
+           *  @next:     next update requests in a list.
+           *  @func:     actual update function to call after the grace period.
+           */
+          struct rcu_head {
+                  struct rcu_head *next;
+                  void (*func)(struct rcu_head *head);
+          };
+
+          /*  rcu_read_lock - mark the beginning of an RCU read-side critical section.  */
+          static inline void rcu_read_lock(void);
+
+          /*  rcu_read_unlock - mark the end of an RCU read-side critical section.  */
+          static inline void rcu_read_unlock(void);
+
+          !!  RCU mechanism do very little for read-side to prevent race conditions,write-side work a bit more.
+          !!  no rcu_write_lock() is there,because there is no way for writers to lock out RCU readers,
+              but writers must coordinate with each other.(use spinlock or other protection mechanism)
+              RCU does not care how the writers keep out of each others' way.
+
+          /*  call_rcu - queue an RCU callback for invocation after a grace period.
+           *  @head:     structure to be used for queueing the RCU updates.
+           *  @func:     actual update function to be invoked after the grace period.
+           *  #  callback maybe deferred until all read-side critical sections exited,
+           *     and read-side critical section is allowed be nested.
+           */
+          extern void call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *head));
+
+        <kernel/rcutree_plugin.h>
+          /*  synchronize_rcu - wait until a grace period has elapsed.
+           *  #  function return maybe deferred until all read-side critical sections exited.
+           *  #  EXPORT_SYMBOL_GPL(synchronize_rcu)
+           */
+          void synchronize_rcu(void);
+
+        RCU principle :
+          reader :
+            read RCU data,it maybe old data or new data.
+
+          writer :
+            read RCU data -> make a copy -> modify copy -> write back.
+            /*  writer back:
+             *    use the new copy's address to instead the old address of the data structure
+             *    it protected by RCU.(modify a pointer,operation on pointer is atomic)
+             */
+
+          usually,rcu_head is embedded in a data structure which is protected by RCU mechanism.
+          each reader or writer sees either the old copy or the new one,no corruption in the
+          data structure may occur.
+
+          the old copy of the data structure cannot be freed right away when the writer updates
+          the pointer.the old copy can be freed only afer all (potential) readers on the CPUs
+          have executed the rcu_read_unlock() macro(exit read-side critical section).
+          the kernel requires every potential reader to execute that macro before :
+            1>  the CPU performs a process switch
+            2>  the CPU starts executing in User Mode
+            3>  the CPU executes the idle loop
+            /*  in each of these cases,we say that the CPU has gone through a quiescent state.  */
+
+          call_rcu() stores the @func in @head->func,and inserts @head in a per-CPU list of callbacks.
+          when all CPUs have gone through a quiescent state,a local tasklet--whose descriptor is stored
+          in the @rcu_tasklet per-CPU variable--executes all callbacks in the list.
+          /*  kernel checks whether the local CPU has gone through a quiescent state,periodically.  */
+
+        e.g.
+          struct INTStruct {
+                  int x;
+                  struct rcu_head rcu;
+          };
+
+          INTStruct *pints = NULL;
+
+          init:
+            pints = kmalloc(sizeof(struct INTStruct, GFP_KERNEL);
+            pints->x = 0;
+            pints->rcu.next = NULL;
+            pints->rcu.func = NULL;
+
+          reader:
+            rcu_read_lock();    /*  begin of RCU read-side section  */
+            ...
+            rcu_read_unlock();  /*  end of RCU read-side section  */
+
+          writer:
+            void pints_update_func(struct rcu_head *head)
+            {
+                    struct INTStruct *tmp = pints;
+
+                    /*  if more than one writer will modify @pints concurrently,
+                     *  there should have a synchronous mechanism to protect the
+                     *  shared data structure. i.e. linux spin lock
+                     */
+
+                    pints = container_of(head, struct INTStruct, rcu);
+                    kfree(tmp);  /*  free the old data structure  */
+            }
+
+            struct INTStruct *copy = kmalloc(sizeof(struct INTStruct), GFP_KERNEL);
+            if (PTR_ERR(copy))
+              panic("RCU make copy was failed.");
+
+            /*  make a copy  */
+            rcu_read_lock();
+
+            copy->x = pints->x;
+            copy->rcu = pints->rcu;
+
+            rcu_read_unlock();
+
+            copy->x += 8;  /*  modify copy  */
+
+            call_rcu(&copy->rcu, pints_update_func);  /*  queue an RCU callback  */
+
+            
             
