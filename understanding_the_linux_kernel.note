@@ -6996,5 +6996,219 @@ Chapter 5 : Kernel Synchronization
 
             call_rcu(&copy->rcu, pints_update_func);  /*  queue an RCU callback  */
 
+      Semaphores :
+        Linux offers two kinds of semaphores :
+          1>  Kernel semaphore,used by kernel control paths.
+          2>  SystemV semaphore,used by User Mode processes.
+          /*  3>  POSIX semaphore,used by User Mode processes.  */
+
+        kernel semaphore is similar to spin lock,kernel semaphore does not allow a kernel control path
+        to proceed unless the lock is open.
+        kernel semaphores can be acquired only by functions that are allowed to sleep,that is kernel 
+        control path would be blocked to wait for busy resource until it is released.
+
+        <linux/semaphore.h>
+          /*  semaphore - a structure represents the kernel semaphore.
+           *  @lock:      kernel spin lock,concurrently writing protecting for kernel semaphore.
+           *  @count:     @count > 0 => protected resource is free
+           *              @count = 0 => semaphore busy,that is the resource is acquired by other.
+           *                            "but no process is waiting for it"-(understanding linux kernel)
+           *              "@count < 0 => resource is unavailable,and at least one process is waiting
+           *                            for the resource"-(understanding linux kernel)
+           *              #  but the type of @count is unsigned int,thus no negative value is possible
+           *                 to exist(Linux 2.6.34.1)
+           *              the initialized @count indicates how many processes are able to use the
+           *              resource at the same time.
+           *              because it is not recommend to access kernel semaphore members directly,
+           *              thus,the initialized value of @count have to be determined when designing.
+           *              #  creator is able to modify @count after initialized that is do not care
+           *                 the suggestion or call up() once or more than once(@wait_list must be NULL).
+           *                 IT IS NOT RECOMMEND,IT IS WORST,BECAUSE KERNEL DOES NOT PROVIDE SUCH
+           *                 APIs TO CHANGE THE MAXIMUM NUMBER OF PROCESSES THAT ARE ALLOWED TO
+           *                 ACCESS THE PROTECTED RESOURCE AT THE SAME TIME!!SUCH THING IS DETERMINED
+           *                 AT DESIGNING.
+           *  @wait_list: the sleeping processes on the kernel semaphore.
+           *              if this list is NULL,that means no task is waiting for the semaphore.
+           *  #  Must prevent access the member of this structure directly.
+           *  #  if initialize a kernel semaphore with value 1,it will works as if a mutex.
+           */
+          struct semaphore {
+                  spinlock_t lock;
+                  unsigned int count;
+                  struct list_head wait_list;
+          };
             
+          /*  DECLARE_MUTEX - declare and initialize a semaphore @name with value 1,it will works as if a
+           *                  mutex.(@name.@count := 1)
+           */
+          #define DECLARE_MUTEX(name)        struct semaphore name = __SEMAPHORE_INITIALIZER(name, 1)
+
+          /*  sema_init - initialize a kernel semaphore.
+           *  @sem:       kernel semaphore pointer.
+           *  @val:       the value.(@sem->@count := @val)
+           */
+          static inline void sema_init (struct semaphore *sem, int val);
+
+          /*  init_MUTEX - initialize a mutex.  */
+          #define init_MUTEX(sem)        sema_init(sem, 1)
+
+          /*  init_MUTEX_LOCKED - initialize a mutex and lock it,at this time,
+           *                      @sem->lock is unlocked,just @sem->count == 0(busy).
+           */
+          #define init_MUTEX_LOCKED(sem) sema_init(sem, 0)
+
+        Getting and releasing semaphores :
+          <linux/semaphore.h>
+            /*  down - acquires the semaphore pointed by @sem.
+             *  @sem:  kernel semaphore pointer.
+             *  #  this function locks @sem->lock before checks @sem->count.
+             *     if @sem->count > 0
+             *       --(@sem->count)
+             *     else
+             *       call __down(@sem)
+             *  #  if resource is unavailable,this function will put the task to sleep until
+             *     the semaphore is released.
+             *     this is,if semaphore is available,down() returns immediately with the side-effect
+             *     "--(@sem->count)";otherwise,task is suspended until semaphore is available,in this
+             *     case,"--(@sem->count)" would not occurs.of course,if a waiter is waiting for the
+             *     semaphore,a up() calling would not process ++(@sem->count).
+             *     another word,one leave and one enter,it is useless to restore value of semaphore.
+             *  #  this function is deprecated.
+             */
+            extern void down(struct semaphore *sem);
+
+            /*  down_trylock - try to acquire kernel semaphore without waiting.
+             *  @sem:          kernel semaphore pointer.
+             *  rerurn:        succeed to acquire -> 0
+             *                 failed to acquire  -> 1
+             */
+            extern int __must_check down_trylock(struct semaphore *sem);
+
+            /*  down_interruptible - acquire kernel semaphore,but set @current->state to
+             *                       TASK_INTERRUPTIBLE.
+             *  @sem:                kernel semaphore pointer.
+             *  return:              0 OR -EINTR
+             */
+            extern int __must_check down_interruptible(struct semaphore *sem);
+
+            /*  down_killable - acquire kernel semaphore,but set @current->state to
+             *                  TASK_KILLABLE.
+             *  @sem:           kernel semaphore pointer.
+             *  return:         0 OR -EINR(interrupted by a fatal signal)
+             */
+            extern int __must_check down_killable(struct semaphore *sem);
+
+            /*  down_timeout - acquire kernel semaphore,but have a timer to indicates
+             *                 the maximum time to waiting for.
+             *                 @current->state will be seted with TASK_UNINTERRUPTIBLE.
+             *  @sem:          kernel semaphore pointer.
+             *  @jiffies:      system timer jiffy.
+             *                 schedule_timeout(@jiffies) would be called in assist routine.
+             *  return:        0 OR -ETIME
+             */
+            extern int __must_check down_timeout(struct semaphore *sem, long jiffies);
+
+            /*  up - releases the semaphore pointed by @sem.
+             *  @sem:  kernel semaphore pointer.
+             *  #  this function locks @sem->lock before checks @sem->count.
+             *     if NULL(@sem->wait_list)
+             *       ++(@sem->count)
+             *     else
+             *       call __up(@sem)
+             *       in this case,the value of @sem->count will not increase,wake up the first 
+             *       waiter in the waiting list to instead.
+             */
+            extern void up(struct semaphore *sem);
+
+          <kernel/semaphore.c>
+            /*  semaphore_waiter - structure represents a waiter on a specified kernel semaphore.
+             *  @list:             linux list,every semaphore_waiter will be linked to a list
+             *                     which is specified by @semaphore.list .
+             *  @task:             struct task_struct *,the waiting process.
+             *  @up:               indicate that whether a process which holding the protected resource
+             *                     did up() calling.(that means someone released the kernel semaphore)
+             */
+            struct semaphore_waiter {
+                    struct list_head list;
+                    struct task_struct *task;
+                    int up;
+            };
+
+            /*  __down_common - generic __down function.
+             *  @sem:           the kernel semaphore.
+             *  @state:         the task state expected to be seted when scheduling.
+             *  @timeout:       timeout in jiffies.
+             *  return:         0 OR -EINTR OR -ETIME
+             *  #  other __down*() call to this function with different task state.
+             *  #  this function create a semaphore_waiter{list, @current, 0},
+             *     then list_add_tail @waiter into @sem->wait_list via @waiter->list.
+             *     enter infinite for-cycle {
+             *             if task is interrupted by signal,return -EINTR
+             *             if expired,return -ETIME
+             *             set task state with @state
+             *             unlock @sem->lock
+             *             call to schedule_timeout()
+             *             lock @sem->lock
+             *             if @waiter-> up == 1, return 0
+             *     }
+             *     !! before return,waiter would be removed from @sem->wait_list.
+             */
+            static inline int __sched __down_common(struct semaphore *sem, long state, long timeout);
+
+            /*  __up - up function for the case one or more process is waiting for semaphore.
+             *  @sem:  kernel semaphore pointer.
+             *  #  this function retrieve the first waiter in @sem->wait_list,
+             *     then set @waiter->up = 1,next wake up the task(@waiter->task).
+             */
+            static noinline void __sched __up(struct seamphore *sem);
+
+          e.g.
+            global namespace:
+              DECLARE_MUTEX(ksem);
+
+            kcp1:
+              repeat:
+                      if (!down_interruptible(&ksem)) {
+                              ...
+                              up(&ksem);
+                      }
+                      else
+                              goto repeat;
+              ...
+
+            kcp2:
+              if (!down_trylock(&ksem)) {
+                      ...
+                      up(&ksem);
+              }
+              else
+                      printk(KERN_INFO "trylock kernel semaphore failed.");
+              ...
+
+          e.g.
+            global namespace:
+              struct semaphore ksem;
+              sema_init(&ksem, 3);  /*  maximum processes number  */
+
+            kpc1:  acquire ksem  /*  ksem.count -= 1 == 2  */
+            kpc2:  acquire ksem  /*  ksem.count -= 1 == 1  */
+            kpc3:  acquire ksem  /*  ksem.count -= 1 == 0  */
+            kpc4:  acquire ksem => ksem.count <= 0 => __down(&ksem);
+
+            ...
+
+            kpc2:  release ksem => wake up kpc4  /*  ksem.count == 0  */
+            kpc4:  waken up  /*  ksem.count == 0  */
+
+            ...
+
+            kpc1:  release ksem => no waiters => ++ksem.count  /*  ksem.count == 1  */
+            kpc3:  release ksem => no waiters => ++ksem.count  /*  ksem.count == 2  */
+            kpc4:  release ksem => no waiters => ++ksem.count  /*  ksem.count == 3  */
+
+        !!  because semaphore is protected by kernel spin lock,thus kernel preemption is disabled
+            when operating semaphore object(locked),kernel preemption is enabled after smeaphore
+            is unlocked(operating over).
+
             
+        
