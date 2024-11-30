@@ -7009,7 +7009,9 @@ Chapter 5 : Kernel Synchronization
 
         <linux/semaphore.h>
           /*  semaphore - a structure represents the kernel semaphore.
-           *  @lock:      kernel spin lock,concurrently writing protecting for kernel semaphore.
+           *  @lock:      kernel spin lock,concurrently writing protection for kernel semaphore.
+           *              when sempahore APIs accessing to this structure,@lock will be locked and
+           *              local interrupt request would be disabled until unlocked.
            *  @count:     @count > 0 => protected resource is free
            *              @count = 0 => semaphore busy,that is the resource is acquired by other.
            *                            "but no process is waiting for it"-(understanding linux kernel)
@@ -7210,5 +7212,231 @@ Chapter 5 : Kernel Synchronization
             when operating semaphore object(locked),kernel preemption is enabled after smeaphore
             is unlocked(operating over).
 
+      RW Semaphores :
+        rw kernel semaphore is similar to kernel semaphore,but the operations are split to two kinds
+        are read and write.
+
+        <linux/rwsem-spinlock.h>
+          /*  rw_semaphore - represent a kernel rw semaphore.
+           *  @activity:     indicator.(default initialized to 0)
+           *                 = 0 -> there are no active readers or writers
+           *                 > 0 -> the number of active readers
+           *                 = -1 -> one active writer
+           *  @wait_lock:    rw_semaphore protector.
+           *  @wait_list:    list of waiters.
+           *  #  generic implement,the architecture-dependent implement is included in header
+           *     <arch/x86/include/asm/rwsem.h> .
+           */
+          struct rw_semaphore {
+                  __s32 activity;
+                  spinlock_t wait_lock;
+                  struct list_head wait_list;
+          };
+
+          /*  DECLARE_RWSEM - declare and initialize a local rw_semaphore object named with @name.  */
+          #define DECLARE_RWSEM(name)  struct rw_semaphore name = __RWSEM_INITIALIZER(name)
+
+          /*  init_rwsem - initialize a declared rw semaphore.
+           *  @sem:        pointer of rw_semaphore.
+           *  #  this function does same as DECLARE_RWSEM() macro.
+           */
+          #define init_rwsem(sem)
+
+        rw_semaphore only allows a kernel control path holding a write lock at same time,but allows
+        more than one kernel control paths to holding read lock.
+        the default state of rw_semaphore is 0,means no readers and writers.
+        if implementation is select to architecture-dependent(no CONFIG_RWSEM_GENERIC_SPINLOCK selected),
+        then some macro definition would be used to represents the state what a rw_semaphore it is.
+        for example :
+          <arch/x86/include/asm/rwsem.h>
+            RWSEM_ACTIVE_MASK  0xffffffffL(x86_64)  (0x0000ffffL x86)
+            RWSEM_UNLOCKED_VALUE  0x00000000L
+            RWSEM_ACTIVE_BIAS  0x00000001L
+            RWSEM_WAITING_BIAS  (-RWSEM_ACTIVE_MASK - 1)
+            RWSEM_ACTIVE_READ_BIAS  RWSEM_ACTIVE_BIAS
+            RWSEM_ACTIVE_WRITE_BIAS  (RWSEM_WAITING_BIAS + RWSEM_ACTIVE_BIAS)
+
+          /*  kernel rw semaphore is implemented as an library feature,thus the source code files
+           *  under "top-level/lib"(i.e. rwsem.c),the artechiture-dependent source code files under 
+           *  "arch/x86/lib"(i.e. rwsem_64.S).
+           */
+
+        it follow the strict FIFO rule,everytime wake-up always wake the first waiter up in the
+        waiting list.
+        up action is split two kinds that are up-read and up-write.
+        after up-write,if the first waiter is waiting for read,then all read-waiter up to next
+        write-waiter would be woken up,otherwise,the first waiter is waiting for write,then only
+        it would be woken up in the waiting list.
+
+        Operations :
+          <linux/rwsem.h>
+            /*  down_*() functions will put task to sleep,after the blocked task had woken up,
+             *  the lock it acquired must be succeed,because,the blocking tasks enter
+             *  TASK_UNINTERRUPTIBLE state,thus no signal is able to interrupt them.
+             */
+            extern void down_write(struct rw_semaphore *sem);
+            extern void down_read(struct rw_semaphore *sem);
+
+            extern void up_write(struct rw_semaphore *sem);
+            extern void up_read(struct rw_semaphore *sem);
+
+            /*  *trylock() functions try to acquire lock without blocking.
+             *  return:  1 -> successful
+             *           0 -> contention
+             */
+            extern int down_write_trylock(struct rw_semaphore *sem);
+            extern int down_read_trylock(struct rw_semaphore *sem);
+
+            /*  downgrade_write - downgrade a read semaphore which have holden by the task
+             *                    to a write semaphore.if there is another reader is activing,
+             *                    then block task until the last reader leaved.
+             *  @sem:             rw_semaphore pointer.
+             */
+            extern void downgrade_write(struct rw_semaphore *sem);
+
+        !!  rwsems is disallow to recurse(lock a rwsem multiple times),but it is allow that
+            multiple locks of the same lock class might be taken,if the order of the locks 
+            is always the same(prevent dead-lock).
+            this feature is require CONFIG_DEBUG_LOCK_ALLOC,lockdep would be used for
+            implement it,the associated APIs are suffix to *_nest .
+
+      Completion :
+        <<understanding linux kernel>> described that kernel synchronize mechanism "Completion"
+        is imported for reslove kernel semaphore concurrently operating,but in Linux 2.6.34.1,
+        the same kernel semaphore is disallow to be concurrently operated,kernel preemption and
+        local interrupt request all are disabled when hold the spin lock embedded in the
+        structure.thus the down() and up() running on different processes on different CPU would
+        not bring dangling pointer problem.
+        /*  process1-CPU0 destoryed kernel semaphore when process2-CPU1 is calling up() function.  */
+
+        kernel Completion mechanism is based on wait queue and introduced for task wait for a
+        condition is completed.
+        only one task would be woken up after a condition is completed.in other words,only one
+        kernel control path is allowed to enter critical region.
+
+        !!  for wait queue see "How Processes Are Organized" .
+
+        <linux/complete.h>
+          /*  completion - structure represents a condition indicator.
+           *  @done:       if the condition is completed.
+           *               1 -> it is completed
+           *               0 -> it is not completed
+           *  @wait:       the tasks waiting for the condition.
+           *  #  wait_queue_head_t contains a kernel spin lock and a kernel list as its own member.
+           *     the items linked under wait_queue_head_t.task_list are wait instance each is 
+           *     represents by structure wait_queue_t.
+           */
+          struct completion {
+                  unsigned int done;
+                  wait_queue_head_t wait;
+          };
+
+          /*  DECLARE_COMPLETION - declare and initialize a completion object.
+           *                       initialized with {0, __WAIT_QUEUE_HEAD_INITIALIZER(@work.wait)} .
+           */
+          #define DECLARE_COMPLETION(work)  struct completion work = COMPLITION_INITIALIZER(work);
+
+          /*  DECLARE_COMPLETION_ONSTACK - declare and initialize a completion object on kernel stack.  */
+          #define DECLARE_COMPLETION_ONSTACK(work)  \
+                  struct completion work = COMPLETION_INITIALIZER_ONSTACK(work)
+
+          /*  init_completion - initialize a completion.
+           *  @x:               pointer of the declared completion.
+           *  #  does same thing as DECLARE_COMPLETION().
+           */
+          staic inline void init_completion(struct completion *x);
+
+          /*  INIT_COMPLETION - reinitialize a completion.it is important after complete_all() is used.
+           *  @x:               completion object,not a pointer.
+           *  #  this macro does not modify wait list,just reset condition as well.
+           */
+          #define INIT_COMPLETION(x)  ((x).done = 0)
+
+          /*  complete - signals a single thread waiting on this completion.
+           *  @x:        completion pointer.
+           *  #  this function hold spin lock with local interrupt request disabled,
+           *     then does @x->done++,next call to __wake_up_common() with exclusive == 1.
+           *     exclusive-wakeup : wake up one exclusive task and all non-exclusive tasks.
+           */
+          extern void complete(struct completion *x);
+
+          /*  complete_all - signals all threads waiting on this completion.
+           *  @x:            completion pointer.
+           *  #  this function is similar to completion(),but it call to __wake_up_common() with
+           *     exclusive == 0.
+           *     non-exclusive-wakeup : wake everting up. 
+           */
+          extern void complete_all(struct completion *);
+
+          /*  !!
+           *  generally,the wait APIs add all non-exclusive threads to the head of wait queue,
+           *  and add all exclusive threads to the tail of wait queue.
+           *  but the wait queue of Completion mechanism only exclusive threads are queued.
+           *  thus,do not mix Completion with wait queue APIs,just use Completion APIs only as well.
+           *  !!
+           */
+
+          /*  wait_for_completion - let @current wait on @x and set task state to
+           *                        TASK_UNINTERRUPTIBLE.
+           *  @x:                   completion pointer.
+           *  #  after queued completion waiting,@current will be put to sleep,another
+           *     task would be selected by scheduler.
+           */
+          extern void wait_for_completion(struct completion *x);
+
+          /*  TASK_INTERRUPTIBLE
+           *  return:  1 -> condition completed
+           *           -ERESTARTSYS -> interrupted by signal
+           */
+          extern int wait_for_completion_interruptible(struct completion *x);
+
+          /*  TASK_KILLABLE
+           *  return:  1 -> condition completed
+           *           -ERESTARTSYS -> interrupted by signal
+           */
+          extern int wait_for_completion_killable(struct completion *x);
+
+          /*  TASK_UNINTERRUPTIBLE
+           *  @timeout:  time in jiffies.
+           *  return:  1 -> condition completed
+           *           0 -> timer expired
+           */
+          extern unsigned long wait_for_completion_timeout(struct completion *x,
+                                                           unsigned long timeout);
+
+          /*  TASK_INTERRUPTIBLE
+           *  @timeout:  time in jiffies.
+           *  return:  1 -> condition completed
+           *           0 -> timer expired
+           *           -ERESTARTSYS -> interrupted by signal
+           */
+          extern unsigned long wait_for_completion_interruptible_timeout(struct completion *x,
+                                                                         unsigned long timeout);
+
+          /*  try_wait_for_completion - try wait a condition completed without blocking.
+           *  @x:                       completion pointer.
+           *  return:                   0 -> decrement cannot be done without blocking
+           *                            1 -> decrement succeed
+           *  #  this function return 1,means the completion decrement succeed,thus the caller
+           *     is able to use the condition right after control returned.
+           *     because @x->done had been decreased,thus another task will see the condition
+           *     is not completed(zero),they will wait for next completed.
+           */
+          extern bool try_wait_for_completion(struct completion *x);
+
+          /*  completion_done - test to see if a completion has any waiters.
+           *  @x:               completion pointer.
+           *  return:           0 -> there are waiters
+           *                    1 -> there are no waiters
+           *  #  this function just checks if @x->done is equal to 0.
+           *     if it is,that means a thread called to wait_for_completion*() did decrement to
+           *     @x->done(become zero,it is in progress);
+           *     else,@x->done is equal to 1,no any threads used the completed condition.
+           */
+          extern bool completion_done(struct completion *x);
+
+          
+
+          
             
         
