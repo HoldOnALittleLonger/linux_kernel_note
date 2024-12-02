@@ -5324,7 +5324,7 @@ Chapter 4 : Interrupts and Exceptions
             static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
 
           thread_info.preempt_count :
-            [0, 7]        preemption counter      /*  how many times preemption is explicitly disabled  */
+            [0, 7]        preemption counter      /*  how many times preemption is explicitly disabled,max depth 256  */
             [8, 15]       softirq counter         /*  how many levels deep the disabling of deferrable functions is  */
             [16, 27]      hardirq counter         /*  specifies the number of nested interrupt handlers on the local CPU  */
             [28]          PREEMPT_ACTIVE flag     /*  allow preemption or refuse preemption  */
@@ -7435,8 +7435,77 @@ Chapter 5 : Kernel Synchronization
            */
           extern bool completion_done(struct completion *x);
 
-          
+      Local Interrupt Disabling :          
+        interrupt disabling ensure that a sequence of kernel statements is treated as a critical section.
+        the kernel control path entered the critical section,which will do not care about hardware event,
+        thus providing an effective way to protect data structures that are also accessed by interrupt
+        handlers.but this way in the case that interrupt handlers run on other CPUs(SMP) and access the
+        protected data structures concurrently is useless,it is absolutely useful for uniprocessor system.
 
-          
-            
-        
+        for disable local interrupt,have to clear eflags.IF,the assembly instruction "cli" is take a charge
+        to the feature.
+        for enable local interrupt,have to set eflags.IF,the assembly instruction "sti" is take a charge to
+        the feature.
+
+        linux defined some macros or functions used to disable/enable local CPU interrupt :
+          <linux/irqflags.h>
+            /*  local_irq_disable - cli  */
+            #define local_irq_disable()
+
+            /*  local_irq_enable - sti  */
+            #define local_irq_enable()
+
+            /*  local_irq_save - save the older eflags state before disable local CPU interrupt
+             *  @flags:          unsigned long type variable(not pointer) used to save the older
+             *                   eflags state.
+             */
+            #define local_irq_save(flags)
+
+            /*  local_irq_restore - restore eflags
+             *  @flags:             the eflags state previously saved by local_irq_save().
+             *  #  this function do not process "sti",it just call "popf" to restore eflags register.
+             */
+            #define local_irq_restore(flags)
+
+            /*  irqs_disabled - return eflags.IF == 0  */
+            #define irqs_disabled()
+
+        !!  because interrupt is allowed to nest,eflags register may be changed by other interrupt handler,
+            thus the kernel does not necessarily know what the IF flag was before the current control path
+            executed.in the case,use local_irq_save() to save the older eflags state and restore it before
+            exit critical region.
+
+      Disabling and Enabling Deferrable Functions :
+        deferrable functions do the work that is allowed to deferred to half-bottom of interrupt.
+        the mechanism for half-bottom of interrupt contains :
+          softirqs, tasklet, work_queue
+
+        linux defined two macros used to disable or enable local softirqs :
+          <linux/bottom_half.h>
+            /*  local_bh_disable - increase preempt_count.softirq_counter  */
+            extern void local_bh_disable(void);
+
+            /*  local_bh_enable - decrease preempt_count.softirq_counter
+             *  #  this function would checks
+             *       if local_irq_pending() && !in_irq()
+             *       true: call to do_softirq()
+             *       false: decrease preempt_count.softirq_counter then call to preempt_check_resched()
+             *     kernel preemption keep disabled until done with softirqs processing {
+             *             preempt_count -= (255 = SOFTIRQ_OFFSET - 1)  bits[0, 7] => preempt count
+             *             true-if
+             *                     do_softirq()
+             *             preempt_count -= 1    bits[8, 15] => softirq count
+             *     }
+             *     e.g.
+             *       preempt_disable() => 000000001 => 1  /*/
+             *       local_bh_disable() => 1 + 256 = 257 => 100000001
+             *       preempt count = 257 - (SOFTIRQ_OFFSET - 1) = 255 => 2 => 000000010
+             *       dec_preempt_count() => 2-- => 1 => 000000001  /*/
+             */
+            extern void local_bh_enable(void);
+
+            /*  local_bh_enable_ip - enable local bh(bottom of interrupt),@ip is used to trace softirqs  */
+            extern void local_bh_enable_ip(unsigned long ip);
+
+        !!  tasklet is based softirq,thus local bottom disable/enable is take effect to tasklet,too.
+        !!  preempt_disable() => increase preempt count; preempt_enable() => decrease preempt count
