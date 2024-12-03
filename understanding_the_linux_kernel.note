@@ -933,6 +933,24 @@ Chapter 2 : Memory Addressing
     	if a line with the same tag as the high-order bits of the address is found,the CPU has a cache hit;otherwise,it
     	has a cache miss.
 
+          subset_index := SUBSET_INDEX(physical_address)
+          tag := TAG(physical_address)
+
+          hardware_cache_subset := get_subset(subset_index)
+          line := try_hit_cache_line(hardware_cache_subset, tag)
+
+          if is_hit(line)
+                  if is_expired(line)
+                          update_cache_line(&line, physical_address, hardware_cache_subset)
+                  return get_cache(line, OFFSET(physical_address))
+
+          line := make_cache_line(fetch_from_RAM(physical_address))
+          new_cache_entry := make_cache_entry(tag, hardware_cache_subset, line)
+
+          insert_hardware_cache_entry(new_cache_entry, hardware_cache_subset)
+          map_cache_line(line)
+          
+
     	when a cache hit occurs,the cache controller behaves differently,depending on the access type :
     	  READ >
     	    controller selects the data from the cache line and transfers it into a CPU register.
@@ -6362,6 +6380,11 @@ Chapter 5 : Kernel Synchronization
           linux kernel provides a special atomic_t type(an atomically accessible counter) and some functions and macros
           that act on atomic_t variables and are implemented as single,atomic assembly language instructions.
           On multiprocessor systems,each such instruction is prefixed by a "lock" byte.
+          /*  macro LOCK_PREFIX is defined in <arch/x86/include/asm/alternative.h> used to replace the LOCK and LOCK
+           *  LOCK_PREFIX macro used everywhere in the source code tree.
+           *  #  LOCK instruction prefix is introduced in x86 architecture.
+           */
+
           /*  POSIX provides sig_atomic_t type,operations on it is guaranteed no interuppts in middle.
            *  introduced in header <signal.h>
            *  normally,operation on int type and pointer type all is atomic.
@@ -6981,7 +7004,7 @@ Chapter 5 : Kernel Synchronization
             }
 
             struct INTStruct *copy = kmalloc(sizeof(struct INTStruct), GFP_KERNEL);
-            if (PTR_ERR(copy))
+            if (IS_ERR(copy))
               panic("RCU make copy was failed.");
 
             /*  make a copy  */
@@ -7509,3 +7532,55 @@ Chapter 5 : Kernel Synchronization
 
         !!  tasklet is based softirq,thus local bottom disable/enable is take effect to tasklet,too.
         !!  preempt_disable() => increase preempt count; preempt_enable() => decrease preempt count
+            preempt enabled if and only if preempt counter equals to zero,and preempt is able to be
+            disabled more than once,each calling to preempt_disable() will increase preempt counter.
+
+      Synchronizing Accesses to Kernel Data Structures :
+        system performance may depends on which sychronization primitive is selected.
+        there is a rule should to follow when select a synchronization primitive for protect
+        kernel data structure: "always keep the concurrency level as high as possible in the system".
+
+        the concurrency level in the system depends on two main factors:
+          1>  the number of I/O devices that operate concurrently
+          2>  the number of CPUs that do productive work
+
+        !!  device IRQs is only can be disabled in a short periods of time.
+        !!  CPUs in the system should avoid waste times on spin lock,that is do not select spin lock
+            whenever possible.
+            local IRQ disable is more efficiency than spin lock,it just clear eflags.IF .
+
+        the examples that keep the concurrency level as high as possible :
+          1>  a shared data is type of integer value it is accessed concurrently.
+              declare it with atomic_t type,do not use spin lock or other different kernel synchronization
+              primitives to protect it from concurrently access.
+
+          2>  a shared linked list have to be updated.
+
+              new->next = head->next;
+              head->next = new;
+
+              data corrupted to new->next when an interrupt handler modified head->next after the
+              statement "new->next = head->next" finished.
+                interrupt handler:
+                  list_del(head->next);
+
+                in this case,a kernel synchronization primitive is required:
+                  unsigned long eflags;
+                  local_irq_save(eflags);
+                  new->next = head->next;
+                  head->next = new;
+                  local_irq_restore(eflags);
+
+              data corrupted to these two statements there compiler optimizing or CPU out-of-order
+              has taken a place:
+                head->next = new => finished
+                interrupt come
+                interrupt handler access to head->next try to traverse list,but at this time,
+                new->next == new
+                /*  interrupt handler does not delete list item  */
+
+                in this case,a memory write barrier is required:
+                  new->next = head->next;
+                  smp_wmb();
+                  head->next = new;
+              
