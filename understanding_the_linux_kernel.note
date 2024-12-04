@@ -1678,10 +1678,10 @@ Chapter 2 : Memory Addressing
 	      static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr);
 
           every microprocessor usually offers a far more restricted set of TLB-invalidating assembly language instructions,
-	  Intel microprocessors offers only two TLB-invalidating techniques :
-	    >  all Pentium models automatically flush the TLBs relative to non-global pages when a value is loaded into cr3.
-	    >  in Pentium Pro and later models,the "invlpg" assembly language instruction invalidates a single TLB mapping a
-	       given linear address.
+	      Intel microprocessors offers only two TLB-invalidating techniques :
+	        >  all Pentium models automatically flush the TLBs relative to non-global pages when a value is loaded into cr3.
+	        >  in Pentium Pro and later models,the "invlpg" assembly language instruction invalidates a single TLB mapping a
+	           given linear address.
 
 	  Linux macros that exploit such hardware technique :
 	    <arch/x86/include/asm/tlbflush.h>
@@ -4002,6 +4002,12 @@ Chapter 4 : Interrupts and Exceptions
       never preempts an interrupt handler !
 
       !  THE ONLY EXCEPTION THAT CAN BE TRIGGEED IN KERNEL MODE IS "Page Fault".
+         /*  Page Fault exception have vector 14
+          *  the coressponding exception handler page_fault() is inserted to IDT by set_intr_gate()
+          *  page_fault() as an entry included in <entry_32.S>,the primary function do_page_fault() is
+          *  defined in <arch/x86/mm/fault.c>.
+          */
+
       !  Interrupt handlers never perform operations that can induce page faults,and thus,potentially,a process switch.
       !  In contrast to exceptions,interrupts issued by I/O devices do not refer to data structures specific to the 
          current process.
@@ -4188,12 +4194,18 @@ Chapter 4 : Interrupts and Exceptions
              (specified by TSS)
 
       Saving the Registers for the Exception Handler : 
-        each exception handler starts with the following assembly language instructions : (defined in <arch/x86/kernel/entry_32.S>)
+        each exception handler starts with the following assembly language instructions :
           @handler_name:
                 pushl $0                    #  pad stack with null value,if control unit is not insert a hardware error code
                                             #  on the stack automatically when the exception occurs.
                 pushl $do_handler_name      #  address of high-level C function
                 jmp error_code              #  the assembly code of "error_code" label will call to the function "do_##name()".
+
+        /*  defined in <arch/x86/kernel/entry_32.S>  */
+        /*  entry definition in <entry_64.S> is diff to <entry_32.S>,
+         *  the assembly macro "errorentry"/"paranoidentry"/"zeroentry" are used to define 
+         *  exception entry points.
+         */
         
         the assembly language fragment labeled as "error_code" is the same for all exception handlers except the one for 
         the "Device not available" exception.(Linux 2.6,it is same as others)
@@ -4732,6 +4744,8 @@ Chapter 4 : Interrupts and Exceptions
             movl %edx,%fs
             SET_KERNEL_GS %edx      #  movl $(__KERNEL_STACK_CANARY),%edx
                                     #  movl %edx,%gs
+                                    #  __KERNEL_STACK_CANARY is defined in <arch/x86/include/asm/segment.h>,
+                                    #  it is equal to GDT_ENTRY_STACK_CANARY * 8
 
             !  eflags,cs,eip,ss,and esp would not be saved,which are already saved automatically by the
                control unit.
@@ -7583,4 +7597,60 @@ Chapter 5 : Kernel Synchronization
                   new->next = head->next;
                   smp_wmb();
                   head->next = new;
+
+      Choosing Among Spin Locks,Semaphores,and Interrupt Disabling :
+        choosing the synchronization primitives depends on what kinds of kernel control paths access
+        the data structure.
+
+        kernel control path                   uniprocessor                      multiprocessor
+        exceptions                            semaphore                         none
+        interrupts                            local interrupt disabling         spin lock
+        deferrable functions                  none                              none or spin lock
+        exceptions + interrupts               local interrupt disabling         spin lock
+        exceptions + deferrable functions     local softirq disabling           spin lock
+        interrupts + deferrable functions     local interrupt disabling         spin lock
+        exceptions + interrupts +             local interrupt disabling         spin lock
+        deferrable functions
+
+        /*  the primitives disable kernel preempt :
+         *    spin lock
+         *    local interrupt disable
+         *    local bottom-half disable
+         */
+
+        protecting a data structure accessed by exceptions :
+          the exception occurs in Kernel Mode only the "Page Fault",the "Page Fault" handler deal with it.
+          the "Page Fault" handler(page_fault()) reload cr3 with new Page Table Address and load new
+          segment selector.(simply describe)
+          no shared data structures to be accessed,and each CPU in the system has its own cr3 register
+          and segment selector register.
+          /*  how synchronize to the shared data structures placed in the page for concurrently accessing
+           *  is the work of kernel control paths,page_fault() does not care about,it does not access to
+           *  such shared data structures,it just replaces pages.
+           */
+
+          the process in User Mode is able to call to system-call via "int" or "int3",and linux implement
+          syscall in traps.(default the vector of system trap gate is 0x80,and handler is system_call())
+          thus,the shared data structures accessed by syscall usually represents a resource that can be
+          assigned to one or more processes.
+          race condition occurs when more than one syscalls try to access the resource,such resource can be
+          protected by semaphore primitive,because semaphore is allow processes to sleep until the resource
+          is available.
+
+          kernel preemption does not create problem when syscall owns a semaphore :
+            process1 holds semaphore sem1 ->
+            process2 preempt process1 ->
+            process2 try to acquires sem1 ->
+            sem1 is unavailable ->
+            process2 entry sleep ->
+            scheduler pick up next process ->
+            ...
+            scheduler pick up process1 to run ->
+            process1 finished accessing to the resource ->
+            sem1 is available now ->
+            process2 is woken up
+
+          !!  the kernel preemption must to be disabled in a syscall that is the syscall wants to
+              access Per-CPU variable.
+
               
