@@ -7653,4 +7653,150 @@ Chapter 5 : Kernel Synchronization
           !!  the kernel preemption must to be disabled in a syscall that is the syscall wants to
               access Per-CPU variable.
 
-              
+        protecting a data structure accessed by interrupts :
+
+          data structure accessed by the top-half of interrupt:
+
+            data structure only accessed by the interrupt handlers have the same type>
+              do not need any synchronization,because such interrupt handlers are serialized.
+
+            data structure accessed by interrupt handlers and each has the different type>
+            /*  interrupt can be nested  */
+
+              uniprocessor :
+                enter any critical region in the interrupt handler must disable local irq at first.
+                /*  semaphore brings blocking,but interrupt context forbid such action.
+                 *  spin lock,interrupt handler holding a spin lock maybe interrupted by another
+                 *  interrupt,and the interrupt handler request the same spin lock => dead-lock
+                 */
+
+              multiprocessor :
+                1>  disable local irq before enter any critical region in the interrupt handler
+                    /*  disable local irq won't interfere other CPU,the interrupt with the
+                     *  same type may handled on other CPU
+                     */
+                2>  acquire a spin lock or a rw spin lock before access to the data structure
+                    /*  acquire spin lock after local irq disabled,then no interrupt has highter
+                     *  priority would interrupts current interrupt handler.
+                     *  acquire spin lock disabling the concurrently access to the data structure
+                     *  by interrupt handlers with the same type on other CPU.
+                     *  SPIN LOCK MIGHT SPIN UNTIL UNLOCK,BUT TOP-HALF OF INTERRUPT MUST BE
+                     *  SHORT AND FAST,THUS INTERRUPT HANDLER ACQUIRE SPIN LOCK WOULD NOT
+                     *  FREEZE SYSTEM.
+                     */
+
+          linux macros coupled spin lock with local irq enabling/disabling :
+            spin_lock_irq
+            spin_unlock_irq
+            spin_lock_bh
+            spin_unlock_bh
+            spin_lock_irqsave
+            spin_unlock_irqrestore
+            
+            read_lock_irq                   read_seqbegin_irqsave
+            read_unlock_irq                 read_seqretry_irqrestore
+            read_lock_bh
+            read_unlock_bh
+            read_lock_irqsave
+            read_unlock_irqrestore            
+            
+            write_lock_irq                  write_seqlock_irqsave
+            write_unlock_irq                write_sequnlock_irqrestore
+            write_lock_bh                   write_seqlock_irq
+            write_unlock_bh                 write_sequnlock_irq
+            write_lock_irqsave              write_seqlock_bh
+            write_unlock_irqrestore         write_sequnlock_bh
+
+        protecting a data structure accessed by deferrable functions : (bottom-half)
+          !!  no race condition may exist in uniprocessor system in the case that data structure
+              accessed only by deferrable functions.
+              /*  deferrable function can not be interrupted by another,serialized.  */
+
+          multiprocessor :
+            softirq => softirqs has same type can run concurrently on several CPUs at a time
+            tasklet => tasklets has same type can not run on more than one CPU at a time
+                                                 
+                                                 /*  protection  */
+            softirqs            require          spin lock
+            one tasklet         require          none
+            many tasklets       require          spin lock
+
+            /*  many tasklets might access to the same data structure concurrently,
+             *  thus a synchronizing mechanism is demand.
+             */
+
+          !!  work_queue is dealt with by scheduler,in process context,thus any type of
+              synchronization is OK except local irq disable(it is useless).
+
+        protecting a data structure accessed by exceptions and interrupts :
+          interrupt handler can not be interrupted by exceptions.          
+          (non-reentrant)
+
+          uniprocessor :
+            just disable local irq as well,prevent interrupt handler is interrupted by other
+            interrupts with different type.
+            if just one kind of interrupt handler access to the data structure,do not need
+            to disable local irq.
+
+          multiprocessor :
+            disable local irq
+              =>  prevent interrupt handler interrupted by other
+            select an appropriate kernel synchronizing mechanism to protect the data structure
+              =>  prevent concurrently access to the data structure by I/E handlers on other CPU
+
+            /*  on multiprocessor system,semaphore is preferable to replace spin lock.
+             *    interrupt handler can not sleep
+             *    exception handler can not sleep
+             *    syscall is allowed to sleep
+             *    only "Page Fault" occurs in Kernel Mode(only one type)
+             *  thus,interrupt handler can use down_trylock() to acquire semaphore,it works like
+             *  a spin lock.
+             */
+
+        protecting a data structure accessed by exceptions and deferrable functions :
+          softirq AND tasklet in interrupt context
+          exception handler "Page Fault" in interrupt context
+          syscall in process context
+          work_queue in process context
+
+          multiprocessor :
+            exception handler         require     disable bottom-half(or disable local irq)
+                                                  spin lock
+
+            deferrable function       require     spin lock
+            /*  no exception can be raised when a deferrable
+             *  function is running.
+             *  exception can not interrupt interrupt handler
+             */
+
+          of course,semaphore can used to replace spin lock,but the handler in interrupt context
+          must use down_trylock() to instead down().
+
+        protecting a data structure accessed by interrupts and deferrable functions :
+          interrupt handler can interrupt deferable function,but deferrable function can not
+          interrupt an interrupt handler.
+
+          multiprocessor :
+            deferrable function        require        disable local irq
+                                                      spin lock
+
+        protecting a data structure accessed by exceptions,interrupts and deferrable functions :
+          exception can not be raised when interrupt handler or deferrable function is running.
+          interrupt handler can interrupt exceptions and deferrable functions.
+
+          multiprocessor :
+            deferrable function        require        disable local irq
+                                                      spin lock
+                                                      /*  dont care about exception  */
+
+            exception handler          require        disable local irq
+                                                      spin lock or semaphore
+                                                      /*  disable local irq influence to
+                                                       *  interrupt and softirq
+                                                       */
+
+            interrupt handler          require        disable local irq
+                                                      spin lock
+
+          !!  essentailly,deferrable function activated right after when interrupt handlers finished,
+              thus exception handler do not to explicitly disable bh.
