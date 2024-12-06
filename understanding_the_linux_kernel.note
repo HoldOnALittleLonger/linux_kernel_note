@@ -6587,7 +6587,8 @@ Chapter 5 : Kernel Synchronization
           static inline void spin_is_locked(spinlock_t *lock);
 
           /*  spin_trylock - try to get spinlock.
-           *                 if failed,do not enter a cycle,just return to caller.
+           *                 return 1 -> succeed to get lock
+           *                 return 0 -> failed to get lock               
            */
           static inline void spin_trylock(spinlock_t *lock);
 
@@ -6600,6 +6601,24 @@ Chapter 5 : Kernel Synchronization
            *  macron BUILD_LOCK_OPS(op, locktype) was defined in <kernel/spinlock.c>,this macro generate
            *  lockfunc such "__raw_##op##_lock(locktype##_t *lock)".
            */
+
+         /*  very interesting things i had found out :
+          *    the architecture specified functions in <arch/x86/include/asm/spinlock.h>
+          *
+          *      void __ticket_spin_lock(arch_spinlock_t *lock)
+          *      int __ticket_spin_trylock(arch_spinlock_t *lock)
+          *
+          *    these functions are implemented via inline assembly.
+          *    ticket concept is introduced,that is :
+          *      ticket is a queue has two parts,one is head,one is tail
+          *      the @slock becomes a queue
+          *      when need to acquire the lock,just atomically noting the tail and increase it by one
+          *      then,wait until head becomes the initial value of the tail
+          *
+          *    so,acquire lock is not decrease @slock by one,it is increase @slock by 0x0100(256).
+          *    unlock stay increase @slock by one.
+          *    even so,spin lock is stay allows one kernel control path holding it.
+          */
 
         The spin_lock macro with kernel preemption :
           when try to get a spinlock,the caller must call to spin_lock() function.
@@ -7247,7 +7266,9 @@ Chapter 5 : Kernel Synchronization
 
         !!  because semaphore is protected by kernel spin lock,thus kernel preemption is disabled
             when operating semaphore object(locked),kernel preemption is enabled after smeaphore
-            is unlocked(operating over).
+            is unlocked(operating finished).
+
+        !!  kernel preemption is allowed when a kernel control path holding a semaphore.
 
       RW Semaphores :
         rw kernel semaphore is similar to kernel semaphore,but the operations are split to two kinds
@@ -7800,3 +7821,108 @@ Chapter 5 : Kernel Synchronization
 
           !!  essentailly,deferrable function activated right after when interrupt handlers finished,
               thus exception handler do not to explicitly disable bh.
+
+      Examples of Race Condition Prevention :
+
+        Reference Counters >
+          a reference counter is just an atomic_t counter associated with a specific resource such
+          inode,file,memory page,module,etc.
+
+          a kernel control path starts use the resource,increase reference counter;
+          a kernel control path finishes use the resource,decrease reference counter;
+          when reference counter is equals to zero,it can be released if necessary.
+
+        Big Kernel Lock >
+          In Linux 2.6.34.1,BKL is used to protect old code(functions to VFS or to several filesystems).
+          BKL as an optional feature configured by CONFIG_LOCK_KERNEL.
+
+          the corresponding APIs is defined in <linux/smp_lock.h>,and implementions are included in 
+          <top-level/lib/kernel_lock.c> .
+
+          In Linux 2.6.11,BKL is based on a meaningful semaphore,but in the earlier 2.6,it based on a
+          spin lock.
+          !!  LINUX 2.6.34.1,BKL IS BASED ON A SPIN LOCK NAMED @kernel_flag WHICH IS DEFINED IN
+              <lib/kernel_lock.c> IS TYPE OF raw_spinlock_t.
+
+          <linux/smp_lock.h>
+            /*  lock_kernel - acquire BKL,the kernel preemption would be disabled after
+             *                got BKL.kernel preempt is enabled during spin.
+             *
+             *  #  this macro call to _lock_kernel() defined in <lib/kernel_lock.c> .
+             *  #  _lock_kernel() would checks whether @current->lock_depth is equal to -1.
+             *       if it is,then call to __lock_kernel() which spin on @kernel_flag for
+             *       get the spin lock.
+             *     increase @current->lock_depth before return to called.
+             */
+            #define lock_kernel()
+
+            /*  unlock_kernel - release BKL and enable kernel preemption.
+             * 
+             *  #  this macro call to _unlock_kernel() defined in <lib/kernel_lock.c> .
+             *  #  must call to _unlock_kernel() when @current->lock_depth is greater than or
+             *     equal to zero,otherwise,it is a BUG.
+             *     this function decrease @current->lock_depth at first,
+             *     if the value becomes less than zero,
+             *       then call to __unlock_kernel() to release BKL.
+             *     else does nothing.
+             */
+            #define unlock_kernel()
+
+            /*  release_kernel_lock - release BKL,this macro used by scheduler.
+             *                        after released,enable kernel preemption without
+             *                        reschedule.
+             *
+             *  #  if @tsk->lock_depth >= 0,then call to __release_kernel_lock() .
+             *  #  __release_kernel_lock() is defined in <lib/kernel_lock.c> ,which
+             *     does not decrease @current->lock_depth,only decrease preempt counter,
+             *     if preempt counter is equal to zero,that means kernep preempt enabled.
+             */
+            #define release_kernel_lock(tsk)
+
+            /*  reacquire_kernel_lock - reacquire the BKL.after got lock,disable 
+             *                          kernel preempt.
+             *  @tsk:                   task pointer used to check @lock_depth
+             *  return:                 -EAGAIN -> need reschedule but failed to
+             *                                     acquire lock
+             *                          0 -> succeed to acquire lock,before return,
+             *                               kernel preempt would be disabled.
+             *  #  this function checks whether @tsk->lock_depth is greater than or
+             *     equal to zero first.
+             *     if it is,call to __reacquire_kernel_lock()
+             *     else return 0.
+             */
+            static inline int reacquire_kernel_lock(struct task_struct *tsk);
+
+            !!  if a process is holding BKL,and call to schedule() to relinquish CPU,
+                BKL is automatically unlocked during process switch by schedule(),
+                but BKL would be automatically reacquired by schedule() when the process
+                is selected to run by scheduler.
+
+          <lib/kernel_lock.c>
+            /*  kernel_flag - the BKL.  */
+            static __cacheline_aligned_in_smp DEFINE_RAW_SPINLOCK(kernel_flag);
+
+          !!  task_struct.lock_depth is crucial for allowing interrupt handlers,exception
+              handlers,and deferrable functions to take the BKL,without it,every asynchronous
+              function that tries to get the BKL could generate a deadlock if the current
+              process already owns the BKL.
+              /*  these three kinds of kernel control paths are use the process kernel stack.
+               *  @lock_depth is process exclusive.
+               *  @lock_depth == -1 -> unlocked
+               *  because @lock_depth,the same process issues two or more consecutive requests for
+               *  BKL would not hang processor.
+               */
+
+          !!  In Linux 2.6.11,BKL is implemented via semaphore,semaphore is allows kernel preempt
+              inside a critical region.
+              thus,if a process is holding a semaphore inside a critical region,it maybe preempted
+              by other.
+              but in the case,semaphore should not be released to prevent the possible data corruption.
+              preempt_schedule_irq() temporarily sets @lock_depth to -1,then schedule() does not
+              release BKL,because @lock_depth < 0;preempt_schedule_irq() restores the @lock_depth
+              before the preempted process is selected to run but have not been replaced.
+
+          
+    
+
+        
