@@ -6540,7 +6540,7 @@ Chapter 5 : Kernel Synchronization
            *  @raw_lock:       it is the architecture depends spinlock structure,
            *                   which is defined in <arch/x86/include/asm/spinlock_types.h>,
            *                   typedef struct arch_spinlock arch_spinlock_t
-           *                   it has member @slock is type of unsigned int(0 locked,@v > 0 unlocked).
+           *                   it has member @slock is type of unsigned int .
            *  @break_lock:     flag signaling that a process is busy waiting for the lock.
            */
           typedef struct raw_spinlock {
@@ -6556,6 +6556,23 @@ Chapter 5 : Kernel Synchronization
                           struct raw_spinlock rlock;
                   };
           } spinlock_t;
+
+          !!  UP and SMP have the different __ARCH_SPIN_LOCK_UNLOCKED macro definitions.
+              UP :
+                macro __ARCH_SPIN_LOCK_UNLOCKED is defined in <linux/spinlock_types_up.h>
+                extend to { 1 } or { }  /*  CONFIG_DEBUG_SPINLOCK or !CONFIG_DEBUG_SPINLOCK  */
+                on uniprocessor environment,spin lock is useless,because everytime only one
+                kernel control path is executing.
+                thus,acquire spin lock just decrease @slock in 1 and increase @slock in 1 to
+                release spin lock.
+
+              SMP :
+                macro __ARCH_SPIN_LOCK_UNLOCKED is defined in <arch/x86/include/asm/spinlock_types.h>
+                extend to { 0 }
+                on Symmetrical Multi-Processor environment,spin lock is based ticket concept.a FIFO
+                is constructed to queue the CPUs acquire the spin lock.@slock is encoded to represents
+                the FIFO.
+
 
         <linux/spinlock.h>
           /*  spin_lock_init - initializer.
@@ -6606,18 +6623,50 @@ Chapter 5 : Kernel Synchronization
           *    the architecture specified functions in <arch/x86/include/asm/spinlock.h>
           *
           *      void __ticket_spin_lock(arch_spinlock_t *lock)
+          *        asm volatile (
+          *                LOCK_PREFIX "xaddw %w0, %1\n\t"  
+          *                ...
+          *                "cmpb %h0, %b0\n\t"
+          *                "je 2f\n\t"  #  return
+          *                ...
+          *        );
+          *        #  %0 -> @inc(0x0100) variable =Q (eax | ebx | ecx | edx)
+          *           %h0 -> high 8-bits of the register  (i.e. ah)
+          *           %b0 -> below b-bits of the register (i.e. al)
+          *           %1 -> memory address of lock->slock
+          *        #  xadd {  "w" a word
+          *                   exchange %0 and %1
+          *                   add %0 to %1,save result in %1
+          *           }
+          *        #  cmpb {
+          *                   %b0 - %h
+          *                   if result = 0 => ZF = 1
+          *                   else => ZF = 0
+          *           }
+          *        #  default value of @lock->slock is zero,@lock->slock += 0x0100 to acquire lock
+          *           high 8-bits equal to low-8-bits means no one is holding the lock
+          *
           *      int __ticket_spin_trylock(arch_spinlock_t *lock)
+          *        asm volatile (
+          *                "movzwl %2, %0\n\t"  #  %2 -> &lock->slock, %0 -> tmp variable in eax
+          *                                     #  zero-extend to eax,contents in ax is copied from
+          *                                     #  @lock->slock
+          *                "cmpb %h0, %b0\n\t"  #  same as above
+          *                ...
+          *        );
+          *    !!  lock primitive waits until spin lock is able to be locked.
+          *        trylock primitive does not wait.if it is can not get lock,return 0,otherwise,1.
           *
           *    these functions are implemented via inline assembly.
           *    ticket concept is introduced,that is :
           *      ticket is a queue has two parts,one is head,one is tail
-          *      the @slock becomes a queue
+          *      the @slock becomes a FIFO
           *      when need to acquire the lock,just atomically noting the tail and increase it by one
           *      then,wait until head becomes the initial value of the tail
           *
           *    so,acquire lock is not decrease @slock by one,it is increase @slock by 0x0100(256).
           *    unlock stay increase @slock by one.
-          *    even so,spin lock is stay allows one kernel control path holding it.
+          *    even so,spin lock is stay allows one kernel control path to holding it at the same time.
           */
 
         The spin_lock macro with kernel preemption :
