@@ -3743,7 +3743,6 @@ Chapter 4 : Interrupts and Exceptions
             -------------Interrupt Controller Communication(ICC) bus----------
                                         |
                                     I/O APIC
-                                        ^
                                         |
                                     external IRQs(IRQs from hardware)
 
@@ -4411,33 +4410,48 @@ Chapter 4 : Interrupts and Exceptions
          *  #  kernel checks these fields,if the value exceed the threshold,kernel disable the IRQ line.
          */
 
-        sample figure :
-          (dev1)   (dev2)
-          IRQ0     IRQ0 IRQ1  (external devices' IRQ lines,physical circuit)
-          |        |    |
-          |        ======
-          |        |
-          V        V
-          PIC      PIC        (hardware Programmable Interrupt Controller)
-          |        |          (INT output line)
-          ===I/O APIC==== 
-               |
-               V
-          ====ICC=======
-          |        |
-          CPU1     CPU2
-          |        
-          ==========
-          |        |   
-          |        |   
-          V        V
-          37       82    (dev1.IRQ0 <=> vector 82, dev2.IRQ0 <=> vector 82, dev2.IRQ1 <=> vector 37)
-          |        |
-          irqd_37   irqd_82
-          |           |
-          ISR9     =======      (ISR9 handles vector = 37 from dev2)
-                   |     |
-                  ISR4   IRS7   (ISR4 handles vector = 82 from dev1, ISR7 handles vector = 82 from dev2)
+        sample graph :
+          +------+  +-----------+
+          |(dev1)|  |  (dev2)   |
+          | IRQ0 |  | IRQ0 IRQ1 |  (external devices' IRQ lines,physical circuit)
+          +------+  +-----------+
+             |            |
+             |      =============
+             |         |
+             V         V
+           +---+     +---+
+           |PIC|     |PIC|         (hardware Programmable Interrupt Controller)
+           +---+     +---+
+             |         |           (INT output line)
+          ====I/O APIC======
+                 |
+                 V
+          ====ICC===========
+            |         |
+          +------+  +------+
+          | CPU1 |  | CPU2 |
+          |lAPIC |  |lAPIC |    (local APIC)
+          +------+  +------+
+            |         |
+          ==================
+            |         |   
+            |         |   
+            V         V
+           +--+      +--+
+           |37|      |82|       (dev1.IRQ0 <=> vector 82, dev2.IRQ0 <=> vector 82, dev2.IRQ1 <=> vector 37)
+           +--+      +--+
+            |         |
+          +-------+  +-------+
+          |irqd_37|  |irqd_82|
+          +-------+  +-------+
+            |         |
+          +----+      |
+          |ISR9|     =========  (ISR9 handles vector = 37 from dev2)
+          +----+      |     |
+                      |     |
+                   +----+  +----+
+                   |ISR4|  |IRS7|  (ISR4 handles vector = 82 from dev1, ISR7 handles vector = 82 from dev2)
+                   +----+  +----+
 
           #  the mapping between IRQ line number and the vector is able to be altered via issue an
              I/O instruction to PIC.
@@ -6574,6 +6588,7 @@ Chapter 5 : Kernel Synchronization
                 the FIFO.
 
 
+
         <linux/spinlock.h>
           /*  spin_lock_init - initializer.
            *  @_lock:          a pointer to spinlock_t.
@@ -6619,55 +6634,99 @@ Chapter 5 : Kernel Synchronization
            *  lockfunc such "__raw_##op##_lock(locktype##_t *lock)".
            */
 
-         /*  very interesting things i had found out :
-          *    the architecture specified functions in <arch/x86/include/asm/spinlock.h>
-          *
-          *      void __ticket_spin_lock(arch_spinlock_t *lock)
-          *        asm volatile (
-          *                LOCK_PREFIX "xaddw %w0, %1\n\t"  
-          *                ...
-          *                "cmpb %h0, %b0\n\t"
-          *                "je 2f\n\t"  #  return
-          *                ...
-          *        );
-          *        #  %0 -> @inc(0x0100) variable =Q (eax | ebx | ecx | edx)
-          *           %h0 -> high 8-bits of the register  (i.e. ah)
-          *           %b0 -> below b-bits of the register (i.e. al)
-          *           %1 -> memory address of lock->slock
-          *        #  xadd {  "w" a word
-          *                   exchange %0 and %1
-          *                   add %0 to %1,save result in %1
-          *           }
-          *        #  cmpb {
-          *                   %b0 - %h
-          *                   if result = 0 => ZF = 1
-          *                   else => ZF = 0
-          *           }
-          *        #  default value of @lock->slock is zero,@lock->slock += 0x0100 to acquire lock
-          *           high 8-bits equal to low-8-bits means no one is holding the lock
-          *
-          *      int __ticket_spin_trylock(arch_spinlock_t *lock)
-          *        asm volatile (
-          *                "movzwl %2, %0\n\t"  #  %2 -> &lock->slock, %0 -> tmp variable in eax
-          *                                     #  zero-extend to eax,contents in ax is copied from
-          *                                     #  @lock->slock
-          *                "cmpb %h0, %b0\n\t"  #  same as above
-          *                ...
-          *        );
-          *    !!  lock primitive waits until spin lock is able to be locked.
-          *        trylock primitive does not wait.if it is can not get lock,return 0,otherwise,1.
-          *
-          *    these functions are implemented via inline assembly.
-          *    ticket concept is introduced,that is :
-          *      ticket is a queue has two parts,one is head,one is tail
-          *      the @slock becomes a FIFO
-          *      when need to acquire the lock,just atomically noting the tail and increase it by one
-          *      then,wait until head becomes the initial value of the tail
-          *
-          *    so,acquire lock is not decrease @slock by one,it is increase @slock by 0x0100(256).
-          *    unlock stay increase @slock by one.
-          *    even so,spin lock is stay allows one kernel control path to holding it at the same time.
-          */
+        /*  very interesting things i had found out :
+         *    the architecture specified functions in <arch/x86/include/asm/spinlock.h>
+         *
+         *      void __ticket_spin_lock(arch_spinlock_t *lock)
+         *        asm volatile (
+         *                LOCK_PREFIX "xaddw %w0, %1\n\t"  
+         *                ...
+         *                "cmpb %h0, %b0\n\t"
+         *                "je 2f\n\t"  #  return
+         *                ...
+         *        );
+         *        #  %0 -> @inc(0x0100) variable =Q (eax | ebx | ecx | edx)
+         *           %h0 -> high 8-bits of the register  (i.e. ah)
+         *           %b0 -> below b-bits of the register (i.e. al)
+         *           %1 -> memory address of lock->slock
+         *        #  xadd {  "w" a word
+         *                   exchange %0 and %1
+         *                   add %0 to %1,save result in %1
+         *           }
+         *        #  cmpb {
+         *                   %b0 - %h
+         *                   if result = 0 => ZF = 1
+         *                   else => ZF = 0
+         *           }
+         *        #  default value of @lock->slock is zero,@lock->slock += 0x0100 to acquire lock
+         *           high 8-bits equal to low-8-bits means no one is holding the lock
+         *
+         *      int __ticket_spin_trylock(arch_spinlock_t *lock)
+         *        asm volatile (
+         *                "movzwl %2, %0\n\t"  #  %2 -> &lock->slock, %0 -> tmp variable in eax
+         *                                     #  zero-extend to eax,contents in ax is copied from
+         *                                     #  @lock->slock
+         *                "cmpb %h0, %b0\n\t"  #  same as above
+         *                ...
+         *        );
+         *    !!  lock primitive waits until spin lock is able to be locked.
+         *        trylock primitive does not wait.if it is can not get lock,return 0,otherwise,1.
+         *
+         *    these functions are implemented via inline assembly.
+         *    ticket concept is introduced,that is :
+         *      ticket is a queue has two parts,one is head,one is tail
+         *      the @slock becomes a FIFO
+         *      when need to acquire the lock,just atomically noting the tail and increase it by one
+         *      then,wait until head becomes the initial value of the tail
+         *
+         *    so,acquire lock is not decrease @slock by one,it is increase @slock by 0x0100(256).
+         *    unlock stay increase @slock by one.
+         *
+         *    Ticket Queue  <- @slock
+         *    [high-32bits][high-16bits][high-8bits][low-8bits]  <= unsigned int
+         *                               ah          al
+         *                               TAIL        HEAD
+         *      increment := 0x0100 -> 256     <- x86
+         *      increment := 0x00000100 -> 256 <- x86-64
+         *      ah in default : 00000000
+         *      al in default : 00000000
+         *  
+         *      x86 =>
+         *        kcpA try acquire lock
+         *          ah = al => no one is holding the lock now
+         *          ax += 0x0100
+         *            =>  ah : 00000001
+         *                al : 00000000
+         *                ax : 0000000100000000
+         *         
+         *        kcpB try acquire lock
+         *          ah != al => someone is holding the lock now
+         *          set @condition_indicator := ax
+         *            =>  ah : 00000001
+         *                al : 00000000
+         *          ax += 0x0100  -> queue itself to the tail of FIFO
+         *            =>  ah : 00000010
+         *                al : 00000000
+         *          kcpB spin,enter a cycle
+         *            movb @slock->al, @condition_indicator->al
+         *            check if @condition_indicator->ah = @condition_indicator->al
+         *       
+         *        kcpA release lock
+         *          @slock++
+         *            =>  ah : 00000010
+         *                al : 00000001
+         *                ax : 0000001000000001
+         *       
+         *        kcpB finds out lock had been released
+         *          movb @slock->al, @condition_indicator->al
+         *            =>  ah : 00000001
+         *            =>  al : 00000001
+         *          lock is available
+         *          @slock : 00000010 00000001
+         *          return
+         *
+         *    even so,spin lock is stay allows one kernel control path to holding it at the same time.
+         */
 
         The spin_lock macro with kernel preemption :
           when try to get a spinlock,the caller must call to spin_lock() function.
@@ -7689,11 +7748,13 @@ Chapter 5 : Kernel Synchronization
          */
 
         protecting a data structure accessed by exceptions :
-          the exception occurs in Kernel Mode only the "Page Fault",the "Page Fault" handler deal with it.
-          the "Page Fault" handler(page_fault()) reload cr3 with new Page Table Address and load new
-          segment selector.(simply describe)
-          no shared data structures to be accessed,and each CPU in the system has its own cr3 register
-          and segment selector register.
+          the exception occurs in Kernel Mode only the "Page Fault".
+          that is the subsequent "Page Fault" would be blocked until current is finished.
+          the "Page Fault" handler(page_fault()) deal with it.
+
+          a struct named mm_struct would be accessed by page_fault(),but it just accessed in read-only for
+          scanning.  /*  page_fault() -> do_page_fault()  */
+
           /*  how synchronize to the shared data structures placed in the page for concurrently accessing
            *  is the work of kernel control paths,page_fault() does not care about,it does not access to
            *  such shared data structures,it just replaces pages.
@@ -7971,7 +8032,39 @@ Chapter 5 : Kernel Synchronization
               release BKL,because @lock_depth < 0;preempt_schedule_irq() restores the @lock_depth
               before the preempted process is selected to run but have not been replaced.
 
-          
-    
+        Memory Descriptor Read/Write Semaphore >
+          @mm_struct defined in <linux/mm_types.h> has a member named @mmap_sem is type of 
+          struct rw_semaphore,when Page Fault occurred,page_fault() get read-semaphore to scans
+          the memory descriptors.
+          @mmap_sem used to protects the mm_struct when it is shared by several lightweight processes.
+          e.g.
+            process A shared mm_struct @mm with process B
 
-        
+            process A call to do_mmap() to extends virtual memory.
+            if no free memory is available,A would be suspended.
+            for extending,write-semaphore have to be holden.
+
+            process B is stay running,it is able to use the shard memory but can not read/write @mm.
+
+        Slab Cache List Semaphore >
+          struct kmem_list3 is defined in <mm/slab.c>,a member named @list_lock is type of spin lock
+          used to protect concurrently access to this structure.
+          struct kmem_cache is defined in <linux/slab_def.h>,it contains a member is named @nodelists
+          is an array of struct kmem_list3.
+
+          @kmem_list3 is the slab lists for all objects.when kernel control path wants to alloc a new
+          node in a nodelist,it have to acquire the @list_lock for grants an exclusive right to access
+          and modify the list.
+
+        Inode Semaphore >
+          struct indoes is defined in <linux/fs.h>,which contains some kernel primitives such spin lock,
+          mutex,rw semaphore,etc.
+          
+          a member named @i_lock is type of spinlock_t used to protects the struct inode get accessing
+          concurrently to several file-system drivers or syscalls.
+          any process wants to modify inode have to acquire this lock at first.
+
+        !!  whenever more than one locks is to request,the changes of dead-lock to occur would
+            increase significantly.for reduce dead-lock probability,must acquire the locks in a
+            predefined order.
+          
