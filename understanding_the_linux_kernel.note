@@ -7120,7 +7120,7 @@ Chapter 5 : Kernel Synchronization
           INTStruct *pints = NULL;
 
           init:
-            pints = kmalloc(sizeof(struct INTStruct, GFP_KERNEL);
+            pints = kmalloc(sizeof(struct INTStruct, GFP_KERNEL));
             pints->x = 0;
             pints->rcu.next = NULL;
             pints->rcu.func = NULL;
@@ -8086,6 +8086,9 @@ Chapter 6 : Timing Measurements
         they are programmable circuits,they issue the timer interrupts at a fixed,predefined frequence,
         kernel is able to set the frequence.
 
+      <===IBM-compatible===>
+
+
       Real Time Clock(RTC) : (Hardware,often integered into Motherboard of Computer)
        real time clock is independent of the CPU and all other chips.
        even the PC power off it stay tick,because it is energized by a small battery,the COMS RAM
@@ -8133,12 +8136,99 @@ Chapter 6 : Timing Measurements
        !! to avoid losing significant digits in the integer divisions,calibrate_tsc()
           returns the duration,in microseconds,of a clock tick multiplied by 2^32 .
           /*  clock tick,it is alike to that the clock hanged on the wall tick once
-           *  to tell us a second past.
+           *  to tell us a second is past.
            */
 
+     Programmable Interval Timer(PIT) :
+       PIT notify the kernel that a specified time interval has elapsed.it issues a special
+       interrupt called "timer interrupt" to the kernel after a time interval has elapsed.
+       after set up PIT,it continuously issues interrupt at a fixed frequency specified by kernel.
 
+       /*  PIT is also used to drive an audio amplifier connected to the computer's
+        *  internal speaker.
+        *  IBM-compatiable PC cotains at least a PIT,it implemented by an 8254 CMOS chip using
+        *  the 0x40--0x43 ports.
+        */
 
+       such hardware interrupt is issued on IRQ0 at a (roughly) 1000Hz(or 100Hz) frequency,
+       the time interval approximately equal to 1 millisecond and called a tick.
 
-      
+       <kernel/time/ntp.c>
+         /*  tick_nsec - the tick in nanoseconds.
+          *  #  it approximately equal to 999.848 nanoseconds.
+          *     clock signal frequency of about 1000.15Hz .
+          *     this variable may automatically adjusted by kernel when it synchronizes to
+          *     an external clock.
+          */
+         unsigned long tick_nsec;
+        
+       shorter ticks result in higher resolution timers,that will help to some featrues are
+       requie more accurate timer to do something.(ie. I/O multiplexing or multimedia playback ...)
+       but shorter ticks means CPU have to traps into Kernel Mode more frequently(timer interrupt).
+       /*  the frequency of timer interrupts depends on the hardware architecture.  */
+
+       some macro definitions used by kernel to yields time constant :
+         CONFIG_HZ - yields the approximately number of timer interrupts per second.
+                     this is defined in kernel config file,and Makefile use this macro 
+                     to produces HZ in header <timeconst.h> .
+                     default value on x86 platform is 1000
+
+         CLOCK_TICK_RATE - it is the 8254 chip's internal oscillator frequency.
+                           in header <arch/x86/include/asm/timex.h>,it is deined with value
+                           PIT_TICK_RATE,which is defined in <linux/timex.h> with value
+                           1193182ul .
+
+         LATCH - it is used by PIT,defined in <linux/jiffies.h> with value
+                 (CLOCK_TICK_RATE + HZ/2) / HZ
     
-      
+       on x86 platform,the PIS is model i8253,and some associated macros and functions are defined
+       in header <arch/x86/include/asm/i8253.h>,implementations in <arch/x86/kernel/i8253.c> :
+         #define PIT_MODE 0x43
+         #define PIT_CH0 0x40
+         #define PIT_CH2 0x42
+
+         /*
+          * setup_pit_timer - register a clock event device for PIT,and set the clock event
+          *                   as the global clock event.
+          * 
+          * #  a static object named @pit_ce is type of struct clock_event_device
+          *    defined in <i8253.c>,the definition of struct clock_event_device in
+          *    <linux/clockchips.h> .
+          *    the static object @pit_ce's @set_mode member is assigned to init_pit_timer() which
+          *    is also in <i8253.c> as a static function.
+          *    the default mode of PIT device is CLOCK_ENV_FEAT_PERIODIC | CLOCK_ENV_FEAT_ONESHOT .
+          *    so it supports two kinds of work modes.
+          *    when booting system,the boot CPU have to initialize PIT through communicate to the
+          *    device via I/O ports :
+          *      case CLOCK_ENV_FEAT_PERIODIC:
+          *              outb_pit(0x34, PIT_MODE);           =>  work on periodic mode.
+          *              outb_pit(LATCH & 0xff, PIT_CH0);    =>  LSB of LATCH
+          *              outb_pit(LATCH >> 8, PIT_CH0);      =>  MSB of LATCH
+          *
+          *      case CLOCK_ENV_FEAT_ONESHOT:
+          *              outb_pit(0x38, PIT_MODE);           =>  work on oneshot mode.
+          *
+          *      0x30 means PIT UNUSED,in this case,frequency of internal oscillator is set to zero.
+          *
+          *    outb_pit -> outb_p -> outb
+          *                          inline function constructed by BUILDIO macro.
+          *    outb has same function as IO instruction "outb" that is write first operand
+          *    to the second operand which should be I/O port.
+          *    how many length of data can be written is depends on hardware,sometimes,delay to
+          *    consecutive operations is required for device to read data from I/O port.
+          */
+         extern void setup_pit_timer(void);
+
+     CPU Local Timer :
+       local APIC provides another time-measuring device: the CPU local timer.
+
+       CPU local timer is similar to PIT but has same difference :
+         >  APIC's timer counter is 32-bits,PIT's timer counter is 16-bits,therefore,CPU local
+            timer can programmed to issues timer interrupt at very lower frequency.
+            (counter stores the number of ticks that must elapsed before issue a timer interrupt)
+
+         >  CPU local timer issues timer interrupt only to its CPU,PIT raise global clock event.
+
+         >  CPU local timer based on the bus clock signal,it can be programmed in such a way to
+            decrease the timer counter every 1, 2, 4, 8, 16, 32, 64, 128 bus clock signals.
+            PIT make use its own clock signals,can be programmed in a more flexible way.
