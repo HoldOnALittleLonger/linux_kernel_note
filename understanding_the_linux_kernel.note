@@ -8106,15 +8106,18 @@ Chapter 6 : Timing Measurements
        Starting with the Pentium,80x86 microprocessor has a counter that is increased at each clock signal,
        the counter is accessible through the 64-bit Time Stamp Counter (TSC) register.
 
-       /*  the data of TSC is abled to be readed by assembly instruction "rdtsc"  */
+       /* 
+        * the data of TSC is abled to be readed by assembly instruction "rdtsc".
+        * everytime a clock signal raised on the CLK input pin,TSC automatically increase.
+        */
 
        Linux can use TSC to get more accurate time measurements than Programmable Interval Timer.
        different PC might have the different clock signal frequency,thus the kernel does not specify
        a specialized clock signal frequency when comiling.
 
        Linux determine the clock signal frequency when initializing the system,to figure out the
-       actual frequency of a CPU,the function calibrate_tsc() is used to counting the number of
-       clock signals that occur in a time interval of approximately 5 milliseconds.
+       actual clock signal frequency of a CPU,the function calibrate_tsc() is used to counting the
+       number of clock signals that occur in a time interval of approximately 5 milliseconds.
 
        /*  x86_init_ops is defined in <arch/x86/include/asm/x86_init.h>  */
        x86_init_ops is a structure which contains some primitives used when boot the system on 
@@ -8232,3 +8235,47 @@ Chapter 6 : Timing Measurements
          >  CPU local timer based on the bus clock signal,it can be programmed in such a way to
             decrease the timer counter every 1, 2, 4, 8, 16, 32, 64, 128 bus clock signals.
             PIT make use its own clock signals,can be programmed in a more flexible way.
+
+     High Precision Event Timer(HPET) :
+       timer chip developed jointly by Intenl and Microsoft.
+
+       HPET provides a number of hardware timers that can be exploited by the kernel.
+       basically,it includes up to eight 32-bit or 64-bit independent counters.
+       each counter is driven by its own clock signal,and the frequency at least is 10Hz.
+       any counter associated with at most 32 timers and the timer is composed by a
+       "comparator" and a "match register".
+
+       comparator used to checks whether the value of counter is matched in the match register,
+       if it is,then raise a hardware interrupt.
+       /*
+        * some timers support to generate a periodic interrupt.
+        * for program them,have to write instructions into the I/O address where mapped to 
+        * their register,such mapping is constructed during bootstraping phase by BIOS.
+        * HPET allows kernel process I/O operation on counter and match register,and set the
+        * oneshot mode or periodic mode(work mode depends on timer).
+        */
+
+                +-------+
+                |counter|  <== 32bit or 64bit
+                +-------+
+                  | | |
+                  | | +------->  timer1 { comparator match-register }
+                  | +--------->  timer2
+                  +----------->  timer3
+                  ...            ...
+
+     ACPI Power Management Timer(ACPI PMT) :
+       ACPI PMT is another clock device included in almost all ACPI-based motherboards,and its
+       clock signal frequency is fixed at roughly 3.58Hz.
+       it actually a simple counter increased at each clock tick,kernel can read its value through
+       an I/O port whose address mapping is established by BIOS.
+
+       ACPI PMT is preferable to the TSC if the OS or the BIOS may dynamically lower the frequency
+       or voltage of the CPU to save power.
+       /*
+        * CPU enter the power save mode,TSC would automatically changes its frequency,
+        * ACPI PMT would not.
+        * however,a HPET is present,it should always be preferred to the other circuits because
+        * of its richer architecture.
+        */
+       
