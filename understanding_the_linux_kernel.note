@@ -8278,4 +8278,152 @@ Chapter 6 : Timing Measurements
         * however,a HPET is present,it should always be preferred to the other circuits because
         * of its richer architecture.
         */
+
+    The Linux Timekeeping Architecture :
+      several time-related activitys that kernel must carry on >
+        <  updates the time elapsed since system startup
+        <  updates the time and date
+        <  time slots checking for the processes on CPUs
+        <  updates resource usage statistics
+        <  checks whether the interval of time associated with each software timer has eplased
+
+      linux timekeeping architecture is the set of time-related kernel data structures and some functions.
+      it depends on the availability of the TSC,of the ACPI PMT,and of the HPET.
+      kernel uses two basic timekeeping functions :
+        one to keep the current time up-to-date
+        another to count the number of nanoseconds that have eplased within the current second
+      /*
+       * 80x86 based multiprocessor machine have a different timekeeping architecture to uniprocessor
+       *   uniprocessor : all time-keeping activities are triggered by interrupts raised by the
+       *                  global timer(PIT or HPET)
+       *   multiprocessor : all general activities are triggered by the interrupts raised by the global
+       *                    timer,while CPU-specific activities are triggered by the interrupts raised
+       *                    by the local APIC timer
+       *                    general activity - such software timer
+       *                    CPU-specific - monitoring the execution time of the currently running process
+       *   #  the early SMP system based on 80486 Intel processor did not have local APICs.
+       *      on some SMP motherboards,the local timer interrupts are not usable.
+       */
+
+      Data Structures of the Timekeeping Architecture :
+        the timer object :
+          <<understanding the linux kernel>> has introduced a structure is named timer_opts,which represents
+          a timer object.
+          but such structure had been removed in patch 
+            "Time: i386 Conversion - part 4: Remove Old timer_opts Code"
+          at Fri,17 Mar 2006 .
+          SO THE Linux 2.6.34.1 HAS NOT SUCH STRUCTURE NOW!
+
+        timer_list :
+          Linux 2.6.34.1 has a structure is named @timer_list which is inclued in <linux/timer.h> .
+
+          <linux/timer.h>
+            /**
+             * timer_list - list is constructed by timers,and each entry represents a timer
+             * @entry:      embedded list_head object
+             * @expires:    expire jiffy
+             * @function:   what to do after expired
+             * @data:       argument for @function
+             * @base:       time vector,indicates which base this timer belongs to.
+             * @start_site: which instruction started this timer
+             * @start_comm: command name
+             * @start_pid:  pid of the process started this timer
+             */
+            struct timer_list {
+                    struct list_head entry;
+                    unsigned long expires;
+                    void (*function)(unsigned long);
+                    unsigned long data;
+                    struct tvec_base *base;
+
+            #ifdef CONFIG_TIMER_STATS
+                    void *start_site;
+                    char start_comm[16];
+                    int start_pid;
+            #endif
+                    ...
+            };
+
+            /* 
+             * structure tvec_base is defined in <kernel/timer.c>.
+             * different timer is belong to different time vector.
+             */
+
+          timer_list is one of components for high-resolution timers.
+          high-resolution timers is newer timer mechanism(timer wheel has been abandoned).
+          timer_list as the component brings the two new benefits :
+            >  time ordered enqueuing into a rb-tree
+            >  independent of ticks (the processing is based on nanoseconds)
+
+          hrtimer base data structure - ktime_t
+            every time value,absolute or relative,is in a special nanoseconds-resolution type
+            ktime_t.
+            
+            <linux/ktime.h>
+              union ktime {
+                      s64 tv64;
+              #if BITS_PER_LONG != 64 && !defined(CONFIG_KTIME_SCALAR)
+                      struct {
+              # ifdef __BIG_ENDIAN
+                              s32 sec, nsec;
+              # else 
+                              s32 nsec, sec;
+              # endif } tv;
+              #endif
+              };
+
+              typedef union ktime ktime_t;
+
+              #define KTIME_MAX ((s64)~((u64)1 << 63))
+
+              #if (BITS_PER_LONG == 64)
+              # define KTIME_SEC_MAX (KTIME_MAX / NSEC_PER_SEC)
+              #else
+              # define KTIME_SEC_MAX LONG_MAX
+              #endif
+
+        jiffies :
+          there are two jiffies existed,one is @jiffies_64 is defined in <kernel/timer.c>,
+          another is @jiffies which is defined in the linker script.
+
+          <linux/jiffies.h>
+            #define __jiffy_data __attritbue__((section(".data")))
+
+            extern u64 __jiffy_data jiffies_64;
+            extern unsigned long volatile __jiffy_data jiffies;
+
+            /*
+             * initial value for jiffies,the counter will overflow five minutes after the
+             * system boot.
+             */
+            #define INITIAL_JIFFIES ((unsigned long)(unsigned int) (-300 * HZ))
+
+          jiffies is a counter that stores the number of elapsed ticks since the system was started.
+          it is increased by one when a timer interrupt occurs,that is,on every tick.
+
+          jiffies would wraparound after data type is overflowed.
+          linux handles cleanly the overflow of jiffies through some macros :
+            time_after, time_after_eq, time_before, time_before_eq
+            /* these macro yield the correct value even if a wraparound occurred. */
+
+          in some cases,the kernel needs the real number of system ticks eplased since the system boot,
+          regardless of the overflows of jiffies,so @jiffies_64 saves the ticks eplased,and linker
+          equated @jiffies to the LSB 32bits of @jiffies_64.
+          /*
+           * value of @jiffies_64 is not atomic on 32-bit architecture,
+           * therefore,read @jiffies_64 must through function get_jiffies_64().
+           * the function acquires @xtime_lock before reading,any writing(updating) to
+           * @jiffies_64 must wait until the reading is accomplished.
+           * any updating to @jiffies_64 will synchronize to @jiffies(LSB 32bits of @jiffies_64).
+           */
+
+          
+            
+
+
+
+          
+          
+      
+      
        
