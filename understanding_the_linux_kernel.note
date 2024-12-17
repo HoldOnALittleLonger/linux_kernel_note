@@ -8417,13 +8417,140 @@ Chapter 6 : Timing Measurements
            * any updating to @jiffies_64 will synchronize to @jiffies(LSB 32bits of @jiffies_64).
            */
 
+        xtime :
+          xtime is a variable used to save the current time and date,it is type of struct timespec.
           
-            
+          <linux/time.h>
+            struct timespec {
+                    /* __kernel_time_t is a type definition of "long" */
+                    __kernel_time_t tv_sec;  /* seconds */
+                    long tv_nsec;            /* nanoseconds */
+            };
 
+          @xtime.tv_sec - number of seconds that have eplased since midnight of January 1,1970(UTC)
+          @xtime.tv_nsec - number of nanoseconds that have eplased within the last second
 
+          <kernel/time/timekeeping.c>
+            /* xtime_lock - @xtime sequence lock */
+            __cacheline_aligned_in_smp DEFINE_SEQLOCK(xtime_lock);
 
-          
-          
-      
+            /* xtime - current time and date */
+            struct timespec xtime __attribute__ ((aligned (16)));
+
+            /*
+             * the function get_jiffies_64() above acquires @xtime_lock reading lock before read from
+             * @jiffies_64.
+             */
+
+          @xtime variable is usually updated once in a tick,the user programs get the current time and
+          date through it,and kernel use it to updating inode timestamps,etc.
+
+          !!  @xtime_lock IS USED TO PROTECT SEVERAL CRITICAL REGIONS OF THE TIMEKEEPING ARCHITECTURE.
+
+      Timekeeping Architecture in Uniprocessor Systems :
+        on uniprocessor platform,all time-related activity are triggered by the PIT interrupt on IRQ0.
+        some of these activities are executed right after the interrupt raised,the remaining activites
+        are carried on by deferrable functions.
+
+        initialization phase :
+          during kernel initialization,the function time_init() is used to initializes system timekeeping
+          architecture.
+
+          <arch/x86/kernel/time.c>
+            /*
+             * time_init - initializes TSC and delay the periodic timer init to late x86_late_time_init()
+             *  
+             * #  @late_time_init is a pointer to a function which receives nothing and returns nothing,
+             *    if it is not NULL,the function start_kernel() will call to it.
+             */
+            void __init time_init(void);
+
+            /*
+             * x86_late_time_init - x86 platform timekeeping architecture initializer
+             *
+             * #  this function calls to x86_init.time.timer_init() to sets up timer,
+             *    then calls to tsc_init() to sets up TSC.
+             *    generally,the @timer_init of @x86_init points to hpet_time_init().
+             */
+            static __init void x86_late_time_init(void);
+
+            /*
+             * hpet_time_init - set up system timer
+             * 
+             * # if hpet_enable() returned false,use PIT as a substitution,else,use the HPET.
+             *   set up default timer interrupt via setup_default_timer_irq(),it associates
+             *   IRQ0 with @irq0 is type of struct irqaction.
+             */
+            void __init hpet_time_init(void);
+
+            /*
+             * irq0 - the interrupt action of interrupts raised on IRQ0
+             * @handler: time_interrupt() as the interrupt handler
+             * @flags:   disables IRQ0 during interrupt handler is processing |
+             *           no irq balancing |
+             *           interrupt is used for polling |
+             *           timer interrupt
+             * @name:    "timer"
+             */
+            static struct irqaction irq0 = {    
+                    .handler = time_interrupt,
+                    .flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
+                    .name = "timer
+            };
+
+            /*
+             * hpet_enable() is defined in <arch/x86/kernel/hpet.c>.
+             * if hpet is capable,@boot_hpet_disable must be false,and the @hpet_address is the
+             * the memory address mapped to hpet I/O ports.
+             * if hpet is enabled,@hpet_legacy_int_enabled must be 1,its value is setup by
+             * hpet_enable_legacy_init(),this function is called by hpet driver used to init HPET.
+             */
+
+          @wall_to_monotic is type of struct timespec,it is defined in <kernel/time/timekeeping.c>.
+          this variable is what kernel need to add to @xtime to get to monotonic time,or @xtime
+          corrected for sub jiffie times.
+          its @tv_sec maybe negative,but @tv_nsec always be positive.
+
+          !!  <kernel/time/clocksource.c> defined @curr_clocksource,it is type of struct clocksource,
+              and function clocksource_select() sets up it to the best clocksource available in the
+              system.
+              generally,the variable @timekeeper is type of struct timekeeper and used to represents the
+              timekeeper is activied in the system,a member named @clock is point to @curr_clocksource.
+              /* static function change_clocksource() used to modify @clock member. */
+
+          @xtime is initialized by function timekeeping_init() which is defined in <kernel/time/timekeeping.c>,
+          start_kernel() calls to timekeeping_init() to initializes the clocksource and common timekeeping
+          values.
+            /* read the persistent clock to get @now,it is specified during system booting. */
+            @xtime.tv_sec = now.tv_sec;
+            @xtime.tv_nsec = now.tv_nsec;
+            ...
+            if @boot.tv_sec == 0 && @boot.tv_nsec == 0
+            then
+                    @boot.tv_sec = @xtime.tv_sec
+                    @boot.tv_nsec = @xtime.tv_nsec
+            /* initializes @wall_to_monotonic with the boot time */
+            set_normalized_timespec(&wall_to_motonotic, -@boot.tv_sec, -@boot.tv_nsec);
+
+            /*
+             * macro definition NSEC_PER_SEC = 1000000000L in <linux/time.h>.
+             *
+             * @nsec = -@boot.tv_nsec, @sec = -@boot.tv_sec
+             * loop until @nsec < NSEC_PER_SEC
+             *         @nsec -= NSEC_PER_SEC
+             *         ++@sec
+             * loop until @nsec > 0
+             *         @nsec += NSEC_PER_SEC
+             *         --@sec
+             * finally,setup @wall_to_monotonic
+             * 
+             * the first loop will be skipped because @nsec < 0,the second loop ensure
+             * @wall_to_monotonic.tv_nsec is positive and @wall_to_monotonic.tv_sec is
+             * negative.
+             * so,use @xtime + @wall_to_monotonic is able to get boot time.
+             * but @wall_to_monotonic is no longer the boot time,for get boot time,have to
+             * use getboottime(),the real boot time is get through @wall_to_monotonic and
+             * @total_sleep_time.
+             */
       
        
