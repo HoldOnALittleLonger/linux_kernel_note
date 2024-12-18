@@ -8635,7 +8635,7 @@ Chapter 6 : Timing Measurements
              * @ticks:    tick delta
              * 
              * #  this function add @ticks to @jiffies_64
-             *    call to update_wall_time() due to updates wall time
+             *    call to update_wall_time() in order to updates wall time
              *    call to calc_global_load() for re-calculating system global loading
              *    if a time slot of a process had exhausted,scheduler have to pick next
              *    process for running
