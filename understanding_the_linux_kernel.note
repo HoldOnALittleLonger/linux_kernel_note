@@ -8493,7 +8493,7 @@ Chapter 6 : Timing Measurements
              * @name:    "timer"
              */
             static struct irqaction irq0 = {    
-                    .handler = time_interrupt,
+                    .handler = timer_interrupt,
                     .flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
                     .name = "timer
             };
@@ -8553,4 +8553,98 @@ Chapter 6 : Timing Measurements
              * @total_sleep_time.
              */
       
-       
+        timer_interrupt :
+          timer_interrupt() is the ISR for timer interrupt.
+          
+          <arch/x86/kernel/time.c>
+            /*
+             * timer_interrupt - common timer interrupt handler
+             * @irq:             IRQ line number,it usually is IRQ0
+             * @dev_id:          device exclusive data
+             * return:           IRQ_HANDLED
+             */
+            static irqreturn_t timer_interrupt(int irq, void *dev_id);
+
+          timer_interrupt just a common timer interrupt ISR,what it will does is depends on what
+          the timer device is selected by kernel.
+          generally it does the following steps :
+            1>  increase irq_cpustat_t.__nmi_count to update the NMI interrupt counter.
+            2>  if @timer_ack is TRUE
+                then
+                        acquire spin lock @i8259A_lock
+                        "outb" 0x0c on PIC_MASTER_OCW3 - it is PIC_MASTER_ISR <- PIC_MASTER_CMD(0x20)
+                        "inb" on PIC_MASTER_POLL - it also is PIC_MASTER_ISR
+                        release spin lock
+                        /* 
+                         * these two assembly instructions acknowledge to PIC we have handled the interrupt
+                         * AEOI will end it automatically.
+                         * 
+                         * this IF is optimized out for !IO_APIC AND x86_64
+                         * AEOI means "Automatic End Of Interrupt",it is work mode of intel 8259A PIC
+                         */
+            3>  call to @global_clock_event->event_handler
+                if no HPET chip had probed,it generally is PIC
+            4>  if MCA_bus is TRUE
+                then
+                        /* acknowledge irq0 by setting bit 7 in port 0x61 */
+                        outb_p(inb_p(0x61) | 0x80, 0x61)
+                /* MCA - Microchannel Architecture Bus */
+            5>  return
+
+          !!  @event_handler is setup by framework,the struct clock_event_device is described in
+              <linux/clockchips.h>.
+         
+          
+          !!  if a timer device is selected by kernel used for periodic tick,then,@event_handler
+              of the clock_event_device belongs to such device will be assigned to @tick_handle_periodic.
+
+              function tick_setup_device() is defined in <kernel/time/tick-common.c>,it changes the clock
+              event device of a tick device to a newer clock event device.
+                if the tick device is used for periodic tick,then call to tick_setup_periodic(),this function
+                sets the @event_handler to function @tick_periodic_handler if no broadcast is enabled,
+                otherwise,set to @tick_periodic_handler_broadcast.
+
+                if the tick device is used for oneshot tick,then call to tick_setup_oneshot(),this function 
+                sets the @event_handler of the newer clock event device to the event handler of current tick
+                device,and changes the work mode of the clock devent device to CLOCK_EVT_MODE_ONESHOT.
+
+             !!  IF THE TICK DEVICE HAVE NONE OF CLOCK EVENT DEVICE NOW,THEN CAN NOT SET IT AS AN ONESHOT
+                 TICK DEVICE,THUS ITS WORK MODE WILL AUTOMATICALLY SET TO TICKDEV_MODE_PERIODIC.
+
+          <kernel/time/tick-common.c>
+            /*
+             * tick_handle_periodic - the common periodic tick handler
+             * @dev:                  the underlying clock event device
+             *
+             * #  the main works are accomplished by tick_periodic().
+             *    it checks whether @tick_do_timer_cpu is equals to current cpu at first
+             *      TRUE
+             *        acquires @xtime_lock
+             *        updates @tick_next_period to keep tracing to next periodict event
+             *        call to do_timer(1)
+             *        release @xtime_lock
+             *    call to update_process_times() to updates CFQ time slots of processes
+             *    call to profile_tick(CPU_PROFILING)
+             *    return
+             */
+            void tick_handle_periodic(struct clock_event_device *dev);
+
+          <kernel/timer.c>
+            /*
+             * do_timer - updates timekeeping architecture associated data
+             * @ticks:    tick delta
+             * 
+             * #  this function add @ticks to @jiffies_64
+             *    call to update_wall_time() due to updates wall time
+             *    call to calc_global_load() for re-calculating system global loading
+             *    if a time slot of a process had exhausted,scheduler have to pick next
+             *    process for running
+             */
+            void do_timer(unsigned long ticks);
+            
+
+             
+              
+
+                
+
