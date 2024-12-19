@@ -5259,7 +5259,7 @@ Chapter 4 : Interrupts and Exceptions
            */
 
           /*  Linux 2.6 DOES NOT CONTAIN THE WRAPPERS FOR THESE FUNCTIONS,IN ORDER TO SEND IPI,HAVE TO USE THE
-           *  GLOBAL OBJECT @apic IS TYPE OF "struct apic *",FOR EXAMPLE,"acpi->send_IPI_all(CALL_FUNCTION_VECTOR)".
+           *  GLOBAL OBJECT @apic IS TYPE OF "struct apic *",FOR EXAMPLE,"apic->send_IPI_all(CALL_FUNCTION_VECTOR)".
            *  Linux SUPPORTS TO SEVERAL TYPES OF APIC,SO THE MEMBERS OF THE OBJECT MAYBE DIFFERENT.
            *  x86 DEFAULT APIC    : apic_default       <arch/x86/kernel/apic/probe_32.c>
            *  x86_64 DEFAULT APIC : apic_flat          <arch/x86/kernel/apic/apic_flat_64.c>
@@ -6878,7 +6878,7 @@ Chapter 5 : Kernel Synchronization
           !!  Linux-2.6.34.1,BUILD_LOCK_OPS() macro builds preemption-friendly version for spin lock functions.
               thus,even kernel preemption is not selected,__raw_read_lock() stay defined by this macro.(no
               CONFIG_INLINE_READ_LOCK)
-              <<understanding the linux kernel>> indicates if no kernel preemption is configured,read_lock() macro
+              "understanding the linux kernel" indicates if no kernel preemption is configured,read_lock() macro
               would be expanded to some assembly language code.
               /*  ENTRY(__read_lock_failed) stay existed in <arch/x86/lib/rwlock_64.S>,and arch_read_lock() will
                *  jump to the entry if failed to got rwlock for reading.actually,arch_read_lock() is composed in
@@ -7467,7 +7467,7 @@ Chapter 5 : Kernel Synchronization
             implement it,the associated APIs are suffix to *_nest .
 
       Completion :
-        <<understanding linux kernel>> described that kernel synchronize mechanism "Completion"
+        "understanding linux kernel" described that kernel synchronize mechanism "Completion"
         is imported for reslove kernel semaphore concurrently operating,but in Linux 2.6.34.1,
         the same kernel semaphore is disallow to be concurrently operated,kernel preemption and
         local interrupt request all are disabled when hold the spin lock embedded in the
@@ -8307,7 +8307,7 @@ Chapter 6 : Timing Measurements
 
       Data Structures of the Timekeeping Architecture :
         the timer object :
-          <<understanding the linux kernel>> has introduced a structure is named timer_opts,which represents
+          "understanding the linux kernel" has introduced a structure is named timer_opts,which represents
           a timer object.
           but such structure had been removed in patch 
             "Time: i386 Conversion - part 4: Remove Old timer_opts Code"
@@ -8642,9 +8642,82 @@ Chapter 6 : Timing Measurements
              */
             void do_timer(unsigned long ticks);
             
+      Timekeeping Architecture in Multiprocessor systems :
+        multiprocessor system can rely on two different sources of timer interrupts :
+          1>  PIT or High Precision Event Timer(hrtimer)
+              /* PIT or HPET used for the global timer event */
+          2>  CPU local timer
+              /* CPU local timer interrupt signals timekeeping activities related to the local CPU. */
 
-             
+        initialization phase :
+          linux uses interrupt vector 239(0xef) as the local APIC timer interrupt.
+
+          <arch/x86/kernel/irqinit.c>
+            /*
+             * smp_intr_init - initializes CPU-to-CPU interrupt gates
+             * 
+             * #  if no CONFIG_SMP AND no CONFIG_X86_64 OR CONFIG_X86_64_APIC defined
+             *    this function does nothing.
+             *    otherwise,setup IPI.
+             */
+            static void __init smp_intr_init(void);
+
+            /*
+             * apic_intr_init - initializes APIC related interrupt gates
+             *
+             * #  if no CONFIG_X86_64 OR CONFIG_X86_64_APIC defined
+             *    kernel will not creates some APIC related interrupt gates.
+             *    kernel will not creates local CPU APIC timer interrupt gate,
+             *    otherwise,create local APIC timer interrupt gate on vector 0xef(LOCAL_TIMER_VECTOR),
+             *    the handler is apic_timer_interrupt().
+             */
+            static void __init apic_intr_init(void);
+
+          apic_timer_interrupt() is a low-level interrupt handler,after acknowledged interrupt,it calls to
+          local_apic_timer_interrupt() to deal with the local CPU APIC timer interrupt.
+          /*
+           * symbol "apic_timer_interrupt" is re-defined to "smp_apic_timer_interrupt" in <arch/x86/kernel/entry_64.S>.
+           * and function smp_apic_timer_interrup() is defined in <arch/x86/kernel/apic/apic.c>.
+           * local_apic_timer_interrupt() is defined in the same header,which retrieve current CPU-id from SMP
+           * environment,next retrieve the per-CPU variable @lapic_events is type of struct clock_event_device,
+           * if @event_handler is NULL,then call to lapic_timer_setup() to sets the clock event device work on
+           * CLOCK_EVT_MODE_SHUTDOWN,that is disable it;
+           * otherwise,call to the @event_handler set by framework.(NMI counter increase)
+           */
+
+          function "static void __init calibrate_APIC_clock(void)" is used to calibrate the local APIC timer's
+          frequency of booting CPU during a tick(1ms),the exact value is used to program the local APICs.
+          /*
+           * calibrate_APIC_clock() is called by "void __init setup_boot_APIC_clock(void)",it as an operation
+           * inclued by x86_init_ops as the member @setup_percpu_clockev.
+           * global variable @x86_cpuinit is type of struct x86_cpuinit_ops,member @setup_percpu_clockev is set
+           * to "void __cpuinit setup_secondary_APIC_clock(void)",this function will call to
+           * "static void __cpuinit setup_APIC_timer(void)".
+           * function setup_APIC_timer() copies the calibrated value from boot CPU and use it to program its
+           * local APIC timer.
+           */
+
+          !!  setup_boot_APIC_clock() is called by APIC_init_uniprocessor(),which is called by smp_sanity_check().
+              start_kernel -> rest_init -> kernel_init -> smp_prepare_cpus -> smp_sanity_check
+              -> APIC_init_uniprocessor -> setup_boot_APIC_clock
+
+          !!  @x86_cpuinit is figure in __cpuinitdata,this macro expands to "__section(.cpuinit.data)".
+          
+          !!  under SMP environment,each cpu has a per-CPU variable named @tick_cpu_device is type of 
+              struct tick_device.
+              /* uniprocessor environment,the CPU stay has such variable,but only one is existed in the system. */
+              in function setup_tick_device(),if the clock event device of tick device is unassigned,
+              then function checks whether @tick_do_timer_cpu is equals to TICK_DO_TIMER_BOOT(value is -2)
+              /* no CPU took the do_timer update,assign it to current cpu */
+                TRUE
+                        sets @tick_do_timer_cpu to current cpu  /* the CPU becomes do timer cpu */
+                        sets @tick_next_periodic = ktime_get()  /* set next periodic */
+                        sets @tick_period = ktime_set(0, NSEC_PER_SEC / HZ) /* set timer tick frequency */
               
+              IN FUNCTION tick_periodic(),IF CURRENT CPU IS NOT THE @tick_do_timer_cpu,THEN ONLY UPDATES THE PROCESSES'
+              TIMES ON CURRENT CPU AND PROFILE TICK.
+              THE CPU IS @tick_do_timer_cpu,THEN CALL TO do_timer(1) TO UPDATES "Timekeeping Architecture" RELATED
+              DATA.
 
-                
-
+              as described above,SMP environment,it is still only one CPU deal with do_timer update,and finally,
+              does the same thing as what uniprocessor does.
