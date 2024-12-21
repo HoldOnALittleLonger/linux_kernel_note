@@ -8506,7 +8506,7 @@ Chapter 6 : Timing Measurements
              * hpet_enable_legacy_init(),this function is called by hpet driver used to init HPET.
              */
 
-          @wall_to_monotic is type of struct timespec,it is defined in <kernel/time/timekeeping.c>.
+          @wall_to_monotonic is type of struct timespec,it is defined in <kernel/time/timekeeping.c>.
           this variable is what kernel need to add to @xtime to get to monotonic time,or @xtime
           corrected for sub jiffie times.
           its @tv_sec maybe negative,but @tv_nsec always be positive.
@@ -8721,3 +8721,76 @@ Chapter 6 : Timing Measurements
 
               as described above,SMP environment,it is still only one CPU deal with do_timer update,and finally,
               does the same thing as what uniprocessor does.
+
+      Updating the Time and Date :
+        function do_timer() updates @jiffies_64,call to function update_wall_time() to updates wall time.
+    
+        <kernel/time/timekeeping.c>
+          /*
+           * update_wall_time - uses the current clocksource to increment the wall time
+           * 
+           * #  function is called from the timer interrupt,and @xtime_lock is required.
+           */
+          void update_wall_time(void);
+
+          the things update_wall_time() does :
+            1>  get current clocksource of @timekeeper.
+                /*
+                 * struct clocksource is defined in <linux/clocksource.h>,it is hardware
+                 * abstraction for a free running counter,provides mostly state-free accessors
+                 * to the underlying hardware.
+                 */
+
+            2>  calculate offset,it is number of clock cycles in one NTP interval.
+                /*
+                 * clock cycle - time is not a consecutive line,it is separated short lines 
+                 *               linked together,each of them is a clock cycle,means a time
+                 *               periodic.
+                 *               generally,tick represents such time periodic.
+                 *               HZ specified how many tick in a second,in other word,how long
+                 *               the separated line is in one second.
+                 */
+
+            3>  get shift,it is the shift value of current clocksource.
+                /*
+                 * for convert clock cycles to nanoseconds,have to calculate
+                 *   (clock cycles / FREQUENCY) * NSEC_PER_SEC => nanoseconds
+                 *
+                 * division is deprecated in kernel,thus for remove division,must specify
+                 * multiple and shift to convert the formula above to
+                 *   clock cycles * multiple >> shift
+                 *
+                 * clocksource.mult => multiple AND clocksource.shift => shift
+                 */
+
+            4>  use offset to updates shift.
+                /*
+                 * this is implemented via a while-cycle,and inside the cycle,
+                 * function logarithmic_accumulate(offset, shift) is called to
+                 * update @xtime.tv_sec,new offset is got from result of the function.
+                 */
+                then call to timekeeping_adjust(offset) to adjust NTP error.
+
+            5>  store full nanoseconds in @xtime.tv_nsec.
+                @xtime.tv_nsec = @timekeeper.xtime_nsec >> @timekeeper.shift + 1
+                /*
+                 * timekeeper.xtime_nsec stores the clock shifted nano seconds remainder not
+                 * stored in @xtime.tv_nsec.
+                 */
+
+            6>  use @xtime to update @timekeeper.xtime_nsec and @timekeeper.ntp_error
+
+            7>  call to update_xtime_cache() with the converted nanoseconds.
+                /* 
+                 * @xtime_cache is cache for @xtime,@xtime.tv_nsec stored the full nanoseconds.
+                 *   @xtime_cache = @xtime + converted nanoseconds
+                 *
+                 * at step 5,@xtime stored the remainded nanoseconds from most recently timer
+                 * interrupt.
+                 * the converted nanoseconds is calculated by offset -- clock cycle value at
+                 * this time(the timer interrupt).
+                 */
+
+            8>  call to update_vsyscall(&xtime, timekeeper.clock, timekeeper.mult) to the data
+                readonly from vsyscalls,such data is written by timer interrupt or systc.
+     
