@@ -8793,4 +8793,101 @@ Chapter 6 : Timing Measurements
 
             8>  call to update_vsyscall(&xtime, timekeeper.clock, timekeeper.mult) to the data
                 readonly from vsyscalls,such data is written by timer interrupt or systc.
-     
+
+      Updating Local CPU Statistics :
+        updating process times :
+          tick_periodic() call to update_process_times(user_mode(get_irq_regs())) to updating
+          Local CPU Statistics about to processes running on current CPU.
+          
+          <kernel/timer.c>
+            /*
+             * update_process_times - charge one tick to the current process
+             * @user_tick:            1 => the user time tick
+             *                        0 => the system time tick
+             */
+            void update_process_times(int user_tick);
+
+            the things that update_process_times() to does :
+              1>  retrieves @current process on current CPU.
+
+              2>  call to account_process_tick(@current, @user_tick).
+                  the function is defined in <kernel/sched.c>,
+                  if @user_tick == 1
+                          => account_user_time()
+                  else if @current != this_rq()->idel || irq_count() != HARDIRQ_OFFSET
+                          => account_system_time()
+                  else
+                          => account_idle_time()
+
+                  account_user_time() is also defined in <kernel/sched.c>,which updates current
+                  process's associated times(@utime, @utimescaled, group user time).
+                    utime += @cputime               /* via cputime_add() */
+                    utimescaled += @cputime_scaled  /* utime - time spent in User Mode */
+                    /* cputime is @cpu_one_jiffy,cputime_scaled is cputime_to_scaled(@cpu_one_jiffy) */
+
+                  next add user time to cpu_usage_stat,it converts cputime_t @cputime to 64-bit
+                  then checks whether TASK_NICE(@current) > 0,if it is,update cpu_usage_stat.nice;
+                  otherwise,update cpu_usage_stat.user.
+                  finally call to account_update_integrals(@current) to account for user time used,this
+                  function will updates the fields associated to mm member of the task.
+
+                  account_system_time() is also defined in <kernel/sched.c>,which account system cpu time
+                  to a process.it is similar to account_system_time(),but it might updates @irq,@softirq,or
+                  @system in cpu_usage_stat.
+                  in the case,that @current->flags & PF_VCPU && irq_count() - @hardirq_offset == 0
+                  then account guest cpu time to a process.                 /* HARDIRQ_OFFSET */
+                  /* account_system_time() call to account_update_integrals(),too. */
+
+                  account_idle_time() might updates @iowait or @idle in cpu_usage_stat depends on 
+                  this_rq()->nr_iowait > 0.
+
+              3>  call to run_local_timers() to starts hrtimers,then raise a softirq is type of 
+                  TIME_SOFTIRQ,before returning,call to softlockup_tick() to checks whether the
+                  watchdog thread has hung or not.
+                  /* run_local_timers() is called from per-CPU time interrupt of local-CPU on SMP */
+
+              4>  call to rcu_check_callbacks() to checks whether this CPU is in a non-context-switch
+                  quiescent state.
+                  if no rcu pending on this CPU,do nothing.
+                  if @user_tick == 1 OR (current CPU is idel AND rcu active AND not in softirq  AND
+                  hardirq_count() <= (1 << HARDIRQ_SHIFT))
+                  then note a sched quiescent state and a bottom-half quiescent state.
+                  if not in softirq,then note a bottom-half quiescent state only.
+
+                  before returing,checks a quiescent state from the current CPU through call to
+                  rcu_preempt_check_callbacks(),if @current->rcu_read_lock_nesting == 0,then disable
+                  flag RCU_READ_UNLOCK_NEED_QS in @current->rcu_read_unlock_sepcial,next note a preempt
+                  quiescent state;otherwise,just enable RCU_READ_UNLOCK_NEED_QS as well.
+                  finally,raise a softirq is type of RCU_SOFTIRQ and returns.
+
+                  /* callbacks of RCU are queued by call_rcu() */
+                  /* 
+                   * when a softirq is RCU_SOFTIRQ is raised,the softirq handler will deal with
+                   * @rcu_tasklet.
+                   */
+
+              5>  checks if there are some messages have to be logged in kernel message loop-queue and 
+                  print them.(via printk_tick() to checks and prints)
+
+              6>  checks if there are some performance events pending and deal with them.
+
+              7>  call to scheduler_tick() to does real-time scheduling,this will cause run-queue clock
+                  updating,cpu-load updating.
+
+                  it call to task_tick_rt() updates current task's runtime statistics in the run-queue
+                  of this CPU.
+                  reduce one to current task's real-time time_slice,if it is greater than 0,then returns;
+                  otherwise,set it equals to DEF_TIMESLICE,next checks the @run_list of a real-time 
+                  scheduling class which the curr is associated to whether contains another processes,
+                  if it is,then requeue current task to the end,and setup its task need resched flag.
+                  /*
+                   * time_slice is not equal to 0 means the time slot of current is not exhausted.
+                   */
+
+                  it call to perf_event_task_tick(rq->curr) to adjust performance event related robin
+                  tree.
+
+                  /* on SMP,loading rebalance will be triggered before returing. */
+
+              8>  call to run_posix_cpu_timers(@current),this function is a piece of POSIX.1 standard,
+                  which checks whether there are some posix timer on current CPU need to be fired.
