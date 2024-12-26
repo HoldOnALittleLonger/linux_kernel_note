@@ -7082,6 +7082,56 @@ Chapter 5 : Kernel Synchronization
            */
           void synchronize_rcu(void);
 
+        RCU "quiescent state" in Linux Kernel :
+          classic RCU read-side critical sections are confined to kernel code and are not permitted
+          to block.this means that any time a given CPU is seen either blocking,in the idle loop,or
+          exiting the kernel,we know that all RCU read-side critical sections that were previously
+          running on that CPU must have completed.
+          such states are called "quiescent states",and after each CPU has passed through at least
+          one quiescent state,the RCU grace period ends.
+
+        RCU mechanism initialization in Linux Kernel :
+          Linux kernel supports two kinds of RCU,one is for SMP environment,another is for uniprocessor
+          environment - "bloatwatch edition".the headers are <linux/rcupdate.h> and <linux/rcutiny.h>,
+          respectively.
+          kernel initializes RCU mechanism during system booting through function rcu_init().
+
+          <linux/rcupdate.h>
+          /**
+           * rcu_init - initializing function for initializes RCU mechanism for mutual exclusion
+           */
+          extern void rcu_init(void);
+          /* void __init rcu_init(void); - <kernel/rcutree.c> */
+
+          !!  RCU nodes are combined together through robin-tree.
+
+          what rcu_init() to does :
+            1>  announce rcu bootup.
+            2>  initialize rcu flavor - @rcu_sched_state with @rcu_sched_data AND @rcu_bh_state with @rcu_bh_data.
+            3>  call to static function __rcu_init_preempt() defined in <kernel/rcutree_plugin.h> to initialize
+                rcu flavor - @rcu_preempt_state with @rcu_preempt_data.
+                /**
+                 * assign leaf node pointers into each CPU's rcu_data structure.
+                 */
+            4>  register RCU_SOFTIRQ deferrable function "rcu_process_callbacks()".
+            5>  register cpu notifier @rcu_cpu_notify.
+            6>  for each online CPUs call once rcu_cpu_notify(NULL, CPU_UP_PREPARE, (void *)(long)@cpu).
+                this will make CPUs to initialize per-CPU variables for sched state,bh state,and preempt state.
+
+          <kernel/rcutree.c>
+            /**
+             * rcu_process_callbacks - the softirq RCU_SOFTIRQ handler
+             */
+            static void rcu_process_callbacks(struct softirq_action *unused);
+            
+            this function checks the quiescent state for @rcu_sched_state and @rcu_bh_state,if any callback is
+            ready,then invoke it. (__rcu_process_callbacks())
+            then deal with preemptable RCU @rcu_preempt_state.
+            finally,check if any future RCU-related work will need to be done by current CPU.(through function
+            rcu_needs_cpu_flush(),which call to rcu_needs_quick_check() to do primary checking.if there
+            are some,then have to deal with them.even if none need be done immediately,returning 1 if so,but
+            its return value is unused.)
+                
         RCU principle :
           reader :
             read RCU data,it maybe old data or new data.
@@ -8106,7 +8156,7 @@ Chapter 6 : Timing Measurements
        Starting with the Pentium,80x86 microprocessor has a counter that is increased at each clock signal,
        the counter is accessible through the 64-bit Time Stamp Counter (TSC) register.
 
-       /* 
+       /** 
         * the data of TSC is abled to be readed by assembly instruction "rdtsc".
         * everytime a clock signal raised on the CLK input pin,TSC automatically increase.
         */
@@ -8119,7 +8169,7 @@ Chapter 6 : Timing Measurements
        actual clock signal frequency of a CPU,the function calibrate_tsc() is used to counting the
        number of clock signals that occur in a time interval of approximately 5 milliseconds.
 
-       /*  x86_init_ops is defined in <arch/x86/include/asm/x86_init.h>  */
+       /* x86_init_ops is defined in <arch/x86/include/asm/x86_init.h> */
        x86_init_ops is a structure which contains some primitives used when boot the system on 
        x86 platform.
 
@@ -8130,10 +8180,11 @@ Chapter 6 : Timing Measurements
 
        finally,the time constant is produced by properly setting up one of the channels of
        the Programmable Interval Timer.
-       /*  1Hz means the thing appears once in a periodic
-        *  100Hz means the thing appears 100 times in a periodic
-        *  so,we can define the N Hz is the number of clock signal is appear in a second
-        *  then we know after N times clock signal is past,a second is past
+       /** 
+        * 1Hz means the thing appears once in a periodic
+        * 100Hz means the thing appears 100 times in a periodic
+        * so,we can define the N Hz is the number of clock signal is appear in a second
+        * then we know after N times clock signal is past,a second is past
         */
 
        !! to avoid losing significant digits in the integer divisions,calibrate_tsc()
@@ -8190,7 +8241,7 @@ Chapter 6 : Timing Measurements
          #define PIT_CH0 0x40
          #define PIT_CH2 0x42
 
-         /*
+         /**
           * setup_pit_timer - register a clock event device for PIT,and set the clock event
           *                   as the global clock event.
           * 
@@ -8247,7 +8298,7 @@ Chapter 6 : Timing Measurements
 
        comparator used to checks whether the value of counter is matched in the match register,
        if it is,then raise a hardware interrupt.
-       /*
+       /**
         * some timers support to generate a periodic interrupt.
         * for program them,have to write instructions into the I/O address where mapped to 
         * their register,such mapping is constructed during bootstraping phase by BIOS.
@@ -8272,7 +8323,7 @@ Chapter 6 : Timing Measurements
 
        ACPI PMT is preferable to the TSC if the OS or the BIOS may dynamically lower the frequency
        or voltage of the CPU to save power.
-       /*
+       /**
         * CPU enter the power save mode,TSC would automatically changes its frequency,
         * ACPI PMT would not.
         * however,a HPET is present,it should always be preferred to the other circuits because
@@ -8292,7 +8343,7 @@ Chapter 6 : Timing Measurements
       kernel uses two basic timekeeping functions :
         one to keep the current time up-to-date
         another to count the number of nanoseconds that have eplased within the current second
-      /*
+      /**
        * 80x86 based multiprocessor machine have a different timekeeping architecture to uniprocessor
        *   uniprocessor : all time-keeping activities are triggered by interrupts raised by the
        *                  global timer(PIT or HPET)
@@ -8344,7 +8395,7 @@ Chapter 6 : Timing Measurements
                     ...
             };
 
-            /* 
+            /** 
              * structure tvec_base is defined in <kernel/timer.c>.
              * different timer is belong to different time vector.
              */
@@ -8392,7 +8443,7 @@ Chapter 6 : Timing Measurements
             extern u64 __jiffy_data jiffies_64;
             extern unsigned long volatile __jiffy_data jiffies;
 
-            /*
+            /**
              * initial value for jiffies,the counter will overflow five minutes after the
              * system boot.
              */
@@ -8457,7 +8508,7 @@ Chapter 6 : Timing Measurements
           architecture.
 
           <arch/x86/kernel/time.c>
-            /*
+            /**
              * time_init - initializes TSC and delay the periodic timer init to late x86_late_time_init()
              *  
              * #  @late_time_init is a pointer to a function which receives nothing and returns nothing,
@@ -8474,7 +8525,7 @@ Chapter 6 : Timing Measurements
              */
             static __init void x86_late_time_init(void);
 
-            /*
+            /**
              * hpet_time_init - set up system timer
              * 
              * # if hpet_enable() returned false,use PIT as a substitution,else,use the HPET.
@@ -8483,7 +8534,7 @@ Chapter 6 : Timing Measurements
              */
             void __init hpet_time_init(void);
 
-            /*
+            /**
              * irq0 - the interrupt action of interrupts raised on IRQ0
              * @handler: time_interrupt() as the interrupt handler
              * @flags:   disables IRQ0 during interrupt handler is processing |
@@ -8498,7 +8549,7 @@ Chapter 6 : Timing Measurements
                     .name = "timer
             };
 
-            /*
+            /**
              * hpet_enable() is defined in <arch/x86/kernel/hpet.c>.
              * if hpet is capable,@boot_hpet_disable must be false,and the @hpet_address is the
              * the memory address mapped to hpet I/O ports.
@@ -8532,7 +8583,7 @@ Chapter 6 : Timing Measurements
             /* initializes @wall_to_monotonic with the boot time */
             set_normalized_timespec(&wall_to_motonotic, -@boot.tv_sec, -@boot.tv_nsec);
 
-            /*
+            /**
              * macro definition NSEC_PER_SEC = 1000000000L in <linux/time.h>.
              *
              * @nsec = -@boot.tv_nsec, @sec = -@boot.tv_sec
@@ -8557,7 +8608,7 @@ Chapter 6 : Timing Measurements
           timer_interrupt() is the ISR for timer interrupt.
           
           <arch/x86/kernel/time.c>
-            /*
+            /**
              * timer_interrupt - common timer interrupt handler
              * @irq:             IRQ line number,it usually is IRQ0
              * @dev_id:          device exclusive data
@@ -8612,7 +8663,7 @@ Chapter 6 : Timing Measurements
                  TICK DEVICE,THUS ITS WORK MODE WILL AUTOMATICALLY SET TO TICKDEV_MODE_PERIODIC.
 
           <kernel/time/tick-common.c>
-            /*
+            /**
              * tick_handle_periodic - the common periodic tick handler
              * @dev:                  the underlying clock event device
              *
@@ -8630,7 +8681,7 @@ Chapter 6 : Timing Measurements
             void tick_handle_periodic(struct clock_event_device *dev);
 
           <kernel/timer.c>
-            /*
+            /**
              * do_timer - updates timekeeping architecture associated data
              * @ticks:    tick delta
              * 
@@ -8653,7 +8704,7 @@ Chapter 6 : Timing Measurements
           linux uses interrupt vector 239(0xef) as the local APIC timer interrupt.
 
           <arch/x86/kernel/irqinit.c>
-            /*
+            /**
              * smp_intr_init - initializes CPU-to-CPU interrupt gates
              * 
              * #  if no CONFIG_SMP AND no CONFIG_X86_64 OR CONFIG_X86_64_APIC defined
@@ -8662,7 +8713,7 @@ Chapter 6 : Timing Measurements
              */
             static void __init smp_intr_init(void);
 
-            /*
+            /**
              * apic_intr_init - initializes APIC related interrupt gates
              *
              * #  if no CONFIG_X86_64 OR CONFIG_X86_64_APIC defined
@@ -8675,7 +8726,7 @@ Chapter 6 : Timing Measurements
 
           apic_timer_interrupt() is a low-level interrupt handler,after acknowledged interrupt,it calls to
           local_apic_timer_interrupt() to deal with the local CPU APIC timer interrupt.
-          /*
+          /**
            * symbol "apic_timer_interrupt" is re-defined to "smp_apic_timer_interrupt" in <arch/x86/kernel/entry_64.S>.
            * and function smp_apic_timer_interrup() is defined in <arch/x86/kernel/apic/apic.c>.
            * local_apic_timer_interrupt() is defined in the same header,which retrieve current CPU-id from SMP
@@ -8687,7 +8738,7 @@ Chapter 6 : Timing Measurements
 
           function "static void __init calibrate_APIC_clock(void)" is used to calibrate the local APIC timer's
           frequency of booting CPU during a tick(1ms),the exact value is used to program the local APICs.
-          /*
+          /**
            * calibrate_APIC_clock() is called by "void __init setup_boot_APIC_clock(void)",it as an operation
            * inclued by x86_init_ops as the member @setup_percpu_clockev.
            * global variable @x86_cpuinit is type of struct x86_cpuinit_ops,member @setup_percpu_clockev is set
@@ -8726,7 +8777,7 @@ Chapter 6 : Timing Measurements
         function do_timer() updates @jiffies_64,call to function update_wall_time() to updates wall time.
     
         <kernel/time/timekeeping.c>
-          /*
+          /**
            * update_wall_time - uses the current clocksource to increment the wall time
            * 
            * #  function is called from the timer interrupt,and @xtime_lock is required.
@@ -8735,14 +8786,14 @@ Chapter 6 : Timing Measurements
 
           the things update_wall_time() does :
             1>  get current clocksource of @timekeeper.
-                /*
+                /**
                  * struct clocksource is defined in <linux/clocksource.h>,it is hardware
                  * abstraction for a free running counter,provides mostly state-free accessors
                  * to the underlying hardware.
                  */
 
             2>  calculate offset,it is number of clock cycles in one NTP interval.
-                /*
+                /**
                  * clock cycle - time is not a consecutive line,it is separated short lines 
                  *               linked together,each of them is a clock cycle,means a time
                  *               periodic.
@@ -8752,7 +8803,7 @@ Chapter 6 : Timing Measurements
                  */
 
             3>  get shift,it is the shift value of current clocksource.
-                /*
+                /**
                  * for convert clock cycles to nanoseconds,have to calculate
                  *   (clock cycles / FREQUENCY) * NSEC_PER_SEC => nanoseconds
                  *
@@ -8764,7 +8815,7 @@ Chapter 6 : Timing Measurements
                  */
 
             4>  use offset to updates shift.
-                /*
+                /**
                  * this is implemented via a while-cycle,and inside the cycle,
                  * function logarithmic_accumulate(offset, shift) is called to
                  * update @xtime.tv_sec,new offset is got from result of the function.
@@ -8773,7 +8824,7 @@ Chapter 6 : Timing Measurements
 
             5>  store full nanoseconds in @xtime.tv_nsec.
                 @xtime.tv_nsec = @timekeeper.xtime_nsec >> @timekeeper.shift + 1
-                /*
+                /**
                  * timekeeper.xtime_nsec stores the clock shifted nano seconds remainder not
                  * stored in @xtime.tv_nsec.
                  */
@@ -8781,7 +8832,7 @@ Chapter 6 : Timing Measurements
             6>  use @xtime to update @timekeeper.xtime_nsec and @timekeeper.ntp_error
 
             7>  call to update_xtime_cache() with the converted nanoseconds.
-                /* 
+                /** 
                  * @xtime_cache is cache for @xtime,@xtime.tv_nsec stored the full nanoseconds.
                  *   @xtime_cache = @xtime + converted nanoseconds
                  *
@@ -8800,7 +8851,7 @@ Chapter 6 : Timing Measurements
           Local CPU Statistics about to processes running on current CPU.
           
           <kernel/timer.c>
-            /*
+            /**
              * update_process_times - charge one tick to the current process
              * @user_tick:            1 => the user time tick
              *                        0 => the system time tick
@@ -8808,7 +8859,7 @@ Chapter 6 : Timing Measurements
             void update_process_times(int user_tick);
 
             the things that update_process_times() to does :
-              1>  retrieves @current process on current CPU.
+              1>  fetch @current process on current CPU.
 
               2>  call to account_process_tick(@current, @user_tick).
                   the function is defined in <kernel/sched.c>,
@@ -8834,8 +8885,8 @@ Chapter 6 : Timing Measurements
                   account_system_time() is also defined in <kernel/sched.c>,which account system cpu time
                   to a process.it is similar to account_system_time(),but it might updates @irq,@softirq,or
                   @system in cpu_usage_stat.
-                  in the case,that @current->flags & PF_VCPU && irq_count() - @hardirq_offset == 0
-                  then account guest cpu time to a process.                 /* HARDIRQ_OFFSET */
+                  in the case that @current->flags & PF_VCPU && irq_count() - @hardirq_offset == 0
+                  then just account guest cpu time to a process and return. /* HARDIRQ_OFFSET */
                   /* account_system_time() call to account_update_integrals(),too. */
 
                   account_idle_time() might updates @iowait or @idle in cpu_usage_stat depends on 
@@ -8854,17 +8905,13 @@ Chapter 6 : Timing Measurements
                   then note a sched quiescent state and a bottom-half quiescent state.
                   if not in softirq,then note a bottom-half quiescent state only.
 
-                  before returing,checks a quiescent state from the current CPU through call to
+                  before return,checks a quiescent state from the current CPU through call to
                   rcu_preempt_check_callbacks(),if @current->rcu_read_lock_nesting == 0,then disable
                   flag RCU_READ_UNLOCK_NEED_QS in @current->rcu_read_unlock_sepcial,next note a preempt
                   quiescent state;otherwise,just enable RCU_READ_UNLOCK_NEED_QS as well.
                   finally,raise a softirq is type of RCU_SOFTIRQ and returns.
-
+                  /* rcu_process_callbacks() handler will deal with this softirq. */
                   /* callbacks of RCU are queued by call_rcu() */
-                  /* 
-                   * when a softirq is RCU_SOFTIRQ is raised,the softirq handler will deal with
-                   * @rcu_tasklet.
-                   */
 
               5>  checks if there are some messages have to be logged in kernel message loop-queue and 
                   print them.(via printk_tick() to checks and prints)
@@ -8880,14 +8927,14 @@ Chapter 6 : Timing Measurements
                   otherwise,set it equals to DEF_TIMESLICE,next checks the @run_list of a real-time 
                   scheduling class which the curr is associated to whether contains another processes,
                   if it is,then requeue current task to the end,and setup its task need resched flag.
-                  /*
+                  /**
                    * time_slice is not equal to 0 means the time slot of current is not exhausted.
                    */
 
                   it call to perf_event_task_tick(rq->curr) to adjust performance event related robin
                   tree.
 
-                  /* on SMP,loading rebalance will be triggered before returing. */
+                  /* on SMP,loading rebalance will be triggered before return. */
 
               8>  call to run_posix_cpu_timers(@current),this function is a piece of POSIX.1 standard,
                   which checks whether there are some posix timer on current CPU need to be fired.
