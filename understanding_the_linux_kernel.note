@@ -61,7 +61,7 @@ Chapter 1 : Introducation
       applications belonging to two or more users.
 
       Concurrently :
-        applications can be active at the same time and contend for various resources such as CPU,memory,
+        applications can be activated at the same time and contend for various resources such as CPU,memory,
         hard disks,and so on.
       Independently :
         each application can perform its task with no concern for what the applications of the other uses are
@@ -212,7 +212,7 @@ Chapter 1 : Introducation
           >  they do not interact with users,and thus do not require terminal devices
           >  they are usually created during system startup and remain alive until the system
              is shut down.
-        Unix kernels do much more than handle system calls;in fact,kernel routines can be actived in several ways :
+        Unix kernels do much more than handle system calls;in fact,kernel routines can be activated in several ways :
           >  A process invokes a system call
           >  the CPU executing the process signals an exception,which is an unusual condition such as
              an invalid instruction.the kernel handles the exception on behalf of the process that 
@@ -825,7 +825,7 @@ Chapter 2 : Memory Addressing
         and server needs more than 4GB RAM.
         Intel introduced a mechanism called Physical Address Extension(PAE)<36-bit physical address> on Pentium Pro processor.
 
-        PAE is actived by setting the Physical Address Externsion flag in the cr4 control register.
+        PAE is activated by setting the Physical Address Externsion flag in the cr4 control register.
         if PAE is open,then the Page Size flag in page directory entry will set to 1.
 
     PAE paging mechanism :
@@ -5524,7 +5524,7 @@ Chapter 4 : Interrupts and Exceptions
 
           !  softirq functions may reactive themselves,in fact,both the networking softirqs and the
              tasklet softirqs do this,moreover,external events,such as packet flooding on a network card
-             may active softirqs at very high frequence.
+             may activate softirqs at very high frequence.
 
           <kernel/softirq.c>
             /*  per-cpu data for per-cpu kernel thread [ksoftirqd]  */
@@ -5697,7 +5697,7 @@ Chapter 4 : Interrupts and Exceptions
               2>  empty the tasklet list.
               3>  enable local irq and enter a while-loop.
               4>  traverse the list to deal with each tasklet if it had not been disabled,
-                  each tasklet only be actived once if it is not reactives itself.
+                  each tasklet only be activated once if it is not reactives itself.
                   if @t has been running on another cpu or it has been disabled,then it will
                   be push back to the tail of the tasklet list,raise_softirq_irqoff() will be
                   called before next loop.
@@ -8938,3 +8938,101 @@ Chapter 6 : Timing Measurements
 
               8>  call to run_posix_cpu_timers(@current),this function is a piece of POSIX.1 standard,
                   which checks whether there are some posix timer on current CPU need to be fired.
+
+      Profiling the Kernel Code :
+        Linux kernel includes a minimalist code profiler called "readprofile" used to discover where
+        the kernel spends its time in Kernel Mode.
+
+        Linux 2.6.34.1 supports to four kinds of profiler :
+          <linux/profile.h>
+            #define CPU_PROFILING   1
+            #define SCHED_PROFILING 2
+            #define SLEEP_PROFILING 3
+            #define KVM_PROFILING   4
+
+            /* these functions are implemented in <kernel/profile.c> */
+
+            /**
+             * profile_setup - setup function for kernel profiler
+             * @str:           kernel parameter,it must be form "<type>,<prof_shift>"
+             *                 supported forms -
+             *                   "schedule,<prof_shift>"
+             *                   "sleep,<prof_shift>"
+             *                   "kvm,<prof_shift>"
+             *                   "<prof_shift>"  =>  cpu profiling
+             *                   <prof_shift> is a parameter denotes the size of the code fragments
+             *                   to be profiled,the size equals to 2^<prof_shift>.
+             *
+             * #  this function will sets @prof_on to the macro definitions above to indicates
+             *    kernel profiling is on.
+             *    the kernel parameter must be the forms :
+             *      profile=<type>,<prof_shift> OR profile=<prof_shift>
+             */
+            int profile_setup(char *str);
+
+            /**
+             * profile_init - initialize kernel profiler
+             * return:        0 => succeed | profiler off
+             *                -ENOMEM => failed
+             *
+             * #  this function calculates size of the code to profiling,setup corresponding data objects.
+             */
+            int profile_init(void);
+
+            /**
+             * profile_tick - do profiling on a tick
+             * @type:         what type of profiler to activate
+             *
+             * #  if @type == CPU_PROFILING AND @timer_hook != NULL
+             *      then call to @timer_hook() to process profiling
+             *    else if "in Kernel Mode" AND @prof_cpu_mask != NULL AND "current cpu in prof cpu mask"
+             *      then call to @profile_hit(type, (void *)profile_pc(regs)) to process profiling
+             */
+            void profile_tick(int type);
+
+            !!  tick_periodic() call to profile_tick() with CPU_PROFILING.
+                @timer_hook is installed via register_timer_hook() and uninstalled
+                via unregister_timer_hook(),it is defined in <kernel/profile.c> is type of 
+                  int (*timer_hook)(struct pt_regs *)
+
+      Checking the NMI Watchdogs :
+        NMI - nonmaskable interrupt
+
+        Watchdog system :
+          it is useful to detect kernel bugs that cause a system freeze.
+
+        Linux kernel supports two kinds of watchdog :
+          touch watchdog every tick came
+          touch watchdog every NMI occurred
+
+        hard lockup :
+          Linux kernel initializes NMI in trap gate,the handler is assembly entry "nmi" defined in
+          <arch/x86/kernel/entry_64.S>,it call to do_nmi() to deal with this exception.
+          function setup_apic_nmi_watchdog() is defined in <arch/x86/kernel/apic/nmi.c> used to
+          setup NMI watchdog during system booting.
+          the watchdog is Local APIC version deal with "hard lockup",it checks the value of @irq0_irqs.
+          if "this" timer interrupt handler accomplished,@irq0_irqs must increased 1.
+          if lapic watchdog detected current value as same as the older,that means the last
+          timer interrupt handler did not execute completely,it turn out CPU has some problem.
+          /**
+           * !!  interrupt can interrupts exception.
+           *     when CPU processing a timer interrupt,the local IRQ is disabled until timer interrupt
+           *     exited.
+           * For activate it,must boot kernel with parameter 'nmi_watchdog' .
+           * local APIC is able to product NMI exception,such NMI is regonized by CPU only.
+           */
+
+        soft lockup :
+          function update_process_times() call to softlockup_tick() to touch watchdog is tick-version.
+          it just deal with "soft lockup".in this case,watchdog as a kernel thread named "khungtaskd",
+          the "main" function of this thread is watchdog() which defined in <kernel/hung_task.c>.
+          the primary works function watchdog() to does are :
+            1>  enter a infinite loop.
+            2>  enter another while-loop,hang itself until timeout.
+                /* task state set to TASK_INTERRUPTIBLE */
+            3>  call to check_hung_uninterruptible_tasks() with a timeout value.
+                check_hung_uninterruptible_tasks() scan all threads with the specified timeout value,
+                if there is a thread the time it hung is greater than @timeout,then report this problem.
+                prints CPU registers,kernel stack,etc.
+            4>  goto 2> .
+
