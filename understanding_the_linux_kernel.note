@@ -7435,8 +7435,8 @@ Chapter 5 : Kernel Synchronization
         <linux/rwsem-spinlock.h>
           /*  rw_semaphore - represent a kernel rw semaphore.
            *  @activity:     indicator.(default initialized to 0)
-           *                 = 0 -> there are no active readers or writers
-           *                 > 0 -> the number of active readers
+           *                 =  0 -> there are no active readers or writers
+           *                 >  0 -> the number of active readers
            *                 = -1 -> one active writer
            *  @wait_lock:    rw_semaphore protector.
            *  @wait_list:    list of waiters.
@@ -8372,10 +8372,10 @@ Chapter 6 : Timing Measurements
             /**
              * timer_list - list is constructed by timers,and each entry represents a timer
              * @entry:      embedded list_head object
-             * @expires:    expire jiffy
+             * @expires:    expire jiffies(setting jiffies + timeout)
              * @function:   what to do after expired
-             * @data:       argument for @function
-             * @base:       time vector,indicates which base this timer belongs to.
+             * @data:       argument for @function(deviceID or other meaningful data)
+             * @base:       time vector,indicates which vector this timer based
              * @start_site: which instruction started this timer
              * @start_comm: command name
              * @start_pid:  pid of the process started this timer
@@ -8397,7 +8397,8 @@ Chapter 6 : Timing Measurements
 
             /** 
              * structure tvec_base is defined in <kernel/timer.c>.
-             * different timer is belong to different time vector.
+             * different timer belongs to different time vector.
+             * it has a spin lock member used to prevent race condition on it.
              */
 
           timer_list is one of components for high-resolution timers.
@@ -8995,7 +8996,7 @@ Chapter 6 : Timing Measurements
                 via unregister_timer_hook(),it is defined in <kernel/profile.c> is type of 
                   int (*timer_hook)(struct pt_regs *)
 
-      Checking the NMI Watchdogs :
+      Checking the Watchdogs :
         NMI - nonmaskable interrupt
 
         Watchdog system :
@@ -9036,3 +9037,149 @@ Chapter 6 : Timing Measurements
                 prints CPU registers,kernel stack,etc.
             4>  goto 2> .
 
+     Software Timers and Delay Functions :
+       a timer is a software facility that allows functions to be invoked at some future moment,after a given
+       time interval has eplased;a timeout denotes a moment at which the time interval associated with a timer
+       has eplased.
+
+       Linux introduced two types of timers :
+         dynamic timer - used by the Kernel
+         interval timer - used by the User Mode processes
+
+       Linux kernel cannot ensure that timer functions will start right at their expiration times,it can only
+       ensure that they are executed either at the proper time or after with a delay of up to a few hundreds of
+       milliseconds(none real-time strictly)
+       /* reason is the checking timer functions usually dealt with by deferrable functions */
+
+       Dynamic Timers :
+         dynamically created and destroyed,no limit to the number of currently active timers.
+         
+         dynamic timers are linked by structure "struct timer_list".
+                                      (introduced in Data Structures of Timekeeping Architecture)
+
+         a dynamic timer can be created through three methods :
+           1>  static global variable in the code
+           2>  local variable inside a function,in this case,the object is stored in Kernel Mode stack
+           3>  dynamically allocated descriptor
+
+         <linux/timer.h>
+           /**
+            * init_timer - initialize a dynamic timer
+            * @timer:      pointer points to an object is type of struct timer_list
+            */
+           #define init_timer(timer)
+
+           !!  if want a timer is deferrable,must initialize it through init_timer_deferrable().
+               in this case,timer_set_deferrable() would open the flag TBASE_DEFERRABLE_FLAG of
+               its base.
+               <kernel/timer.c> #define TBASE_DEFERRABLE_FLAG (0x1)
+               #  all tvec_base are 2 byte aligned,the lower bit of base in timer_list is guaranteed
+                  to be zero.
+                  (unsigned long)base | TBASE_DEFERRABLE_FLAG => deferrable timer (flag opened)
+
+
+           /* TIMER_NOT_PINNED - timer is not pinned can be rebalanced to another CPU on SMP */
+           #define TIMER_NOT_PINNED 0
+           /* TIMER_PINNED - timer is pnned can not be relanced to another CPU on SMP */
+           #define TIMER_PINNED     1
+
+           /**
+            * add_timer_on - add a timer on a particular cpu
+            * @timer:        the timer to add
+            * @cpu:          cpu ID to place timer
+            *
+            * #  this function is implemented in <kernel/timer.c>.
+            *    it fetch per-CPU variable @tvec_bases is type of struct tvec_base *.
+            *    setup start info(address of instruction,process command, pid).
+            *    setup base for @new_timer,and if necessary,updates @tvec_bases->next_timer.
+            *                                               ( it := @new_timer->expires)
+            *    queue this @new_timer to the tail of the @base,which list to place is depend on
+            *    @new_timer->expires - @base->timer_jiffies,use the result to determin time vector.
+            *    wake up idel CPUs to make them check condition to determine need to reevaluate 
+            *    the timer wheel when nohz is active.
+            */
+           extern void add_timer_on(struct timer_list *timer, int cpu);
+
+           /**
+            * del_timer - deactive a timer
+            * @timer:     the timer to deactive
+            * return:     0 => delete an inactive timer
+            *             1 => delete an active timer
+            *
+            * #  clean the timer info through timer_stats_timer_clear_start_info().
+            *    if @timer is pending,then detach it,and updates @next_timer of its base
+            *    if necessary.
+            *    return.
+            */
+           extern int del_timer(struct timer_list *timer);
+           /**
+            * del_timer_sync() is synchronized version to wait until @timer->@function accomplished.
+            * it fetch and lock @timer's base(spin lock).
+            * if @timer is running then unlock @base and returns,because it is running on another CPU,
+            * there is no way to stop function it running.
+            * otherwise,does the same things as what del_timer() does.
+            * return: -1 => timer running 
+            *          0 => timer is not pending and deactived 
+            *          1 => timer is pending and deactived
+            */
+
+           /**
+            * mod_timer - modify a timer with a new expiration in TIMER_NOT_PINNED state
+            * @timer:     the timer to modify
+            * @expires:   new expiration
+            * return:     1 => succeed
+            *             0 => fault
+            *
+            * #  this function call to an internal function __mod_timer() to process primary works.
+            *                                               <kernel/timer.c>
+            *    fetch and lock the @timer's base,if this timer is pending,then detach it.
+            *    update its @base if necessary.
+            *    fetch per-CPU variable @tvec_bases,if @base != @new_base,then reset base for @timer
+            *    to @new_base.
+            *    update expiration of @timer,and update its base's new_timer member if necessary.
+            *    call to internal_add_timer() to queue @timer.
+            *
+            * !! vector is determined by "expires - timer_jiffies",thus,modification maybe associate
+            *    @timer with a new vector.
+            */
+           extern int mod_timer(struct timer_list *timer, unsigned long expires);
+
+           /* mod_timer_pending - modify a pending timer's timeout */
+           extern int mod_timer_pending(struct timer_list *timer, unsigned long expires);
+
+           /* mod_timer_pinned - modify a timer with a new expires in TIMER_PINNED state */
+           extern int mod_timer_pinned(struct timer_list *timer, unsigned long expires);
+
+           /* timer_pending - if @timer->entry.next != NULL => pending OTHERWISE not pending */
+           static inline int timer_pending(const struct timer_list *timer);
+
+           e.g.
+             int kthread_example(void *data)
+             {
+                     struct timer_list *example_timer = kmalloc(sizeof(struct timer_list), GFP_KERNEL);
+                     if (IS_ERR(example_timer)) {
+                             printk(KERN_DEBUG "Failed to allocate memory for @example_timer.");
+                             return -ENOMEM;
+                     }
+
+                     init_timer(example_timer);
+
+                     /**
+                      * before timer added to timer list of a CPU,it is safely to assign values for members
+                      * of it.
+                      * but in the case timer is added and activated,modify jiffies can only through mod_timer().
+                      * @function and another properties can not be modified furthuer.
+                      */
+                     /* if @function is NULL,it must be a bug */
+                     example_timer->function = example_timer_fn;
+                     example_timer->expires = jiffies + (unsigned long)16;
+
+                     add_timer_on(example_timer, smp_processor_id());
+                     ...
+                     mod_timer(example_timer, jiffies + (unsigned long)32);
+                     ...
+                     del_timer(example_timer);
+                     ...
+                     kfree(example_timer);
+                     return 0;
+             }
