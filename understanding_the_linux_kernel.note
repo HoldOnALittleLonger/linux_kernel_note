@@ -9053,12 +9053,84 @@ Chapter 6 : Timing Measurements
 
        Dynamic Timers :
          dynamically created and destroyed,no limit to the number of currently active timers.
-         
-         dynamic timers are linked by structure "struct timer_list".
-                                      (introduced in Data Structures of Timekeeping Architecture)
+
+         Data structures for dynamic timers :         
+           dynamic timers are linked by structure "struct timer_list".
+                                        (introduced in Data Structures of Timekeeping Architecture)
+
+           <kernel/timer.c>
+             #define TVN_BITS (CONFIG_BASE_SMALL ? 4 : 6)
+             #define TVR_BITS (CONFIG_BASE_SMALL ? 6 : 8)
+             #define TVN_SIZE (1 << TVN_BITS)
+             #define TVR_SIZE (1 << TVR_BITS)
+             #define TVN_MASK (TVN_SIZE - 1)
+             #define TVR_MASK (TVR_SIZE - 1)
+
+             /* tvec - structure represents timer vector node */
+             struct tvec {
+                     struct list_head vec[TVN_SIZE];
+             };
+
+             /* tvec_root - structure represents timer vector root */
+             struct tvec_root {
+                     struct list_head vec[TVR_SIZE];
+             };
+
+             /**
+              * structures @tvec and @tvec_root used to partitions the expiration values into
+              * blocks of ticks,that allows dynamic timers to percolate efficiently from lists
+              * with larger expiration values to lists with smaller ones.
+              */
+              
+
+             /**
+              * tvec_base - structure collected all data needed by dynamic timer API
+              * @lock:      race condition protector
+              * @running_timer: the dynamic timer is handled now by local CPU
+              * @timer_jiffies: the earliest expiration time of the dynamic timers yet
+              *                 to be checked :
+              *                   @it == @jiffies => no backlog of deferrable functions has
+              *                                      accumulated
+              *                   @it < @jiffies  => lists of dynamic timers that refer to
+              *                                      previous ticks must be dealt with
+              *                 @it is increased once when run_timer_softirq() handles dynamic timer
+              * @next_timer:    next expires time
+              * @tv1:           all dynamic timers
+              * @tv2:           dynamic timers in next 2^14 - 1 ticks
+              * @tv3:           dynamic timers in next 2^20 - 1 ticks
+              * @tv4:           dynamic timers in next 2^26 - 1 ticks
+              * @tv5:           dynamic timers do not belong to @tv2 -- @tv4
+              */
+             struct tvec_base {
+                     spinlock_t lock;
+                     struct timer_list *running_timer;
+                     unsigned long timer_jiffies;
+                     unsigned long next_timer;
+                     
+                     struct tvec_root tv1;
+                     struct tvec tv2;
+                     struct tvec tv3;
+                     struct tvec tv4;
+                     struct tvec tv5;
+             } ____cacheline_aligned;
+
+             !!  each CPU in system has a per-CPU variable @tvec_bases it is a pointer points to
+                 an object is type of struct tvec_base.
+
+                 except boot CPU,all another CPUs allocate an object is type of struct tvec_base
+                 then use the address setup its per-CPU variable @tvec_bases;
+                 /**
+                  * allocating and setup is handled by function "static int init_timer_cpu(int cpu);"
+                  * defined in <kernel/timer.c>.
+                  * in that function,@timer_jiffies and @next_timer are assigned with the value
+                  * of @jiffies.(of course,these list_head arraies are initialized,too)
+                  */
+                 boot CPU's @tvec_bases use a static object is named boot_tvec_bases defined in
+                 <kernel/timer.c>.
 
          a dynamic timer can be created through three methods :
            1>  static global variable in the code
+               /* use macro DEFINE_TIMER(_name, _function, _expires, _data) <linux/timer.h> */
            2>  local variable inside a function,in this case,the object is stored in Kernel Mode stack
            3>  dynamically allocated descriptor
 
@@ -9099,6 +9171,9 @@ Chapter 6 : Timing Measurements
             *    the timer wheel when nohz is active.
             */
            extern void add_timer_on(struct timer_list *timer, int cpu);
+
+           /* add_timer - no CPU specified version,the dynamic timer may assigned to another CPU */
+           extern void add_timer(struct timer_list *timer);
 
            /**
             * del_timer - deactive a timer
@@ -9183,3 +9258,59 @@ Chapter 6 : Timing Measurements
                      kfree(example_timer);
                      return 0;
              }
+
+         run_timer_softirq :
+           TIMER_SOFTIRQ handler is run_timer_softirq().
+           function init_timers() call to open_softirq() to setup this function as a handler for softirq TIMER_SOFTIRQ,
+           it also setup per-CPU variable @tvec_bases and CPU timer notifier,such notifier is used for support to
+           CPU hotplug(migrate timers on the CPU ready to offline).
+
+           <kernel/timer.c>
+             /**
+              * run_timer_softirq - handler for softirq TIMER_SOFTIRQ
+              * @h:                 softirq action acciated to this handler
+              */
+             static void run_timer_softirq(struct softirq_action *h);
+
+             !!  run_timer_softirq() call to hrtimer_run_pending() to expire hrtimers,it is called from
+                 timer softirq every jiffy.
+                 function hrtimer_run_pending() checks whether high-resolve timer is active
+                   activated => return
+                   not activated => check if high-resolution timer mode is enabled AND nohz mode inactive
+                                      TRUE  => checkout to HRT
+                                      FALSE => stay work on nohz mode
+                 /* clocksource switch happens in the timer interrupt with @xtime_lock is held. */
+                 /**
+                  * tick for hrtimer works on one-shot mode,the corresponding timer interrupt handler
+                  * is hrtimer_handler() which is defined in <kernel/hrtimer.c>
+                  */
+                 AS DESCRIBED ABOVE,WE HAD KNOWN THAT HRT USE THE SAME TYPE OF SOFTIRQ AS NOHZ TIMER.
+
+             /**
+              * __run_timers - internal routine for run_timer_softirq()
+              * @base:         the per-CPU variable @tvec_bases fetched
+              *                by run_timer_softirq()
+              */
+             static inline void __run_timers(struct tvec_base *base);
+
+             __run_timers() does :
+               1>  acquire lock to local @base
+               2>  enter a while-loop,iterating until @timer_jiffies before @jiffies
+                                                 older                                   newer
+                                                 [ - - - - @timer_jiffies - - - @jiffies ]
+                                                 [ - - - (@timer_jiffies @jiffies) - - - ] coincided
+                                                 [ - - - - @jiffies - - - @timer_jiffies ]
+                                                 after                                   before
+               3>  cascade timers -- place the dynamic timers they had not expired to new vectors in
+                   the @base(adjust tv2 -- tv5)
+               4>  increase @timer_jiffies once
+               5>  for each expired dynamic timer,detach it from @base,and set @running_timer points to
+                   it to indicate that "this" timer is dealt with,now.
+               6>  call to "this" timer's @function with its @data.
+               7>  goto 2>
+
+               /* detach_timer() is defined in <kernel/timer.c>,which dequeue a timer from timer_list. */
+
+           
+
+
