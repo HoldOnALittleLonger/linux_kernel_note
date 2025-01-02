@@ -9311,6 +9311,64 @@ Chapter 6 : Timing Measurements
 
                /* detach_timer() is defined in <kernel/timer.c>,which dequeue a timer from timer_list. */
 
-           
+         An Application of Dynamic Timers - the nanosleep() System Call :
+           system call "nanosleep" is defined in <kernel/hrtimer.c> in system call definition method 2.
+
+           <kernel/hrtimer.c>
+             SYSCALL_DEFINE2(nanosleep, struct timespec __user *, rqtp, struct timespec *, rmtp);
+             =>
+               <linux/syscalls.h>
+                 SYSCALL_DEFINE2(name, ...) = SYSCALL_DEFINEx(2, _##name, __VA_ARGS__)
+                 =>  finally :
+                   asmlinkage long sys_nanosleep(struct timespec __user *rqtp, struct timespec __user *rmtp);
+
+             /**
+              * sys_nanosleep - system call nanosleep
+              * @rqtp:          pointer points to an object is type of struct timespec as the requested time
+              *                 interval
+              * @rmtp:          remained time interval to save when this syscall is interrupted
+              * return:         0 => time interval elapsed completely
+              *                 -EFAULT => error,copy to(/from) user failed
+              *                 -EINVAL => error,invalid timespec
+              *                 -ERESTARTNOHAND => error,restart syscall with no handler
+              *                 -ERESTART_RESTARTBLOCK => error,interrupted by signal and restarted
+              *                                           in this case,@rmtp saves the remained time interval
+              *                                           if syscall restart have forbidden,just saves the
+              *                                           remained time interval only,do not to restart syscall
+              */
+
+           the syscall sys_nanosleep() creates hrtimer on the stack of the process in Kernel Mode,before 
+           function hrtimer_nanosleep() exit,such hrtimer would be destroyed.
+                    (sys_nanosleep -> hrtimer_nanosleep)
+
+           the primary sleeping routine is handled by function do_nanosleep().
+
+           /**
+            * do_nanosleep - main routine of hrtimer_nanosleep()
+            * @t:            hrtimer sleeper created by hrtimer_nanosleep()
+            * @mode:         work mode of hrtimer
+            * return:        T => time interval elasped completely
+            *                F => interrupted
+            */
+           static int __sched do_nanosleep(struct hrtimer_sleeper *t, enum hrtimer_mode mode);
+
+           what do_nanosleep does :
+             1>  set @t->function to hrtimer_wakeup(),
+                 set @t->task to @current
+             2>  enter do-while loop until hrtimer completed or interrupted by an signal,
+             3>  set @current to TASK_INTERRUPTIBLE
+             4>  start timer expiring through hrtimer_start_expires(&@t->timer, @mode)
+             5>  if timer inactive,set sleeper's @task to NULL
+                 this means,the hrtimer had timeout
+             6>  if @t.task != NULL,call to schedule() relinquish CPU
+             7>  cancel hrtimer and change @mode to HRTIMER_MODE_ABS
+             8>  goto 3>
+             9>  exit do-while loop,set @current to TASK_RUNNING
+             10> return @t->task == NULL
+
+           !!  IF @current IS RE-PICKED AS THE NEXT TASK TO RUN,AND THE SPECIFIED TIME INTERVAL HAVE NOT
+               EPLASED,THEN THE do-while LOOP WILL RESTART A HRTIMER AGAIN AND RELINQUISH CPU.
+               @expires := @request + @jiffies
+
 
 
