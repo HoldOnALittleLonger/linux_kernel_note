@@ -9370,5 +9370,91 @@ Chapter 6 : Timing Measurements
                EPLASED,THEN THE do-while LOOP WILL RESTART A HRTIMER AGAIN AND RELINQUISH CPU.
                @expires := @request + @jiffies
 
+       Delay Functions :
+         the minimum wait time for dynamic timer is 1-milliseconds,it is useless when kernel need a timer
+         to wait a time interval less than 1-milliseconds.(1-microseconds / 1-nanoseconds)
+         such case appears often in device driver.
 
+         <arch/x86/include/asm/delay.h>
+           /**
+            * udelay - delay function used to wait a time interval in microseconds
+            * @n:      how many microseconds to wait for
+            */
+           #define udelay(n)  (__builtin_constant_p(n) ? \
+                               ((n) > 20000 ? __bad_udelay() : __const_udelay((n) * 0x10c7ul)) \
+                               __udelay(n))
 
+           !!  __udelay => __const_udelay(n * 0x000010c7)
+
+           /**
+            * ndelay - delay function used to wait a time interval in nanoseconds
+            * @n:      how many nanoseconds to wait for
+            */
+           #define ndelay(n)  (__builtin_constant_p(n) ? \
+                               ((n) > 20000 ? __bad_ndelay() : __const_udelay((n) * 0x5ul)) \
+                               : __ndelay(n))
+
+           !!  __ndelay => __const_udelay(n * 0x00005)
+
+           /**
+            * __const_udelay - main delay function
+            * @xloops:          how many loops to iterates
+            */
+           extern void __const_udelay(unsigned long xloops);
+
+           /**
+            * use_tsc_delay - switch the delay clock source to TSC
+            */
+           void use_tsc_delay(void);
+
+           !!  kernel must take a way to convert microseconds and nanoseconds to loops,and have to
+               calibrate how many loops in a tick.
+               the convertion is :
+                 32-bit mull
+                 =>  eax : @xloops *= 4
+                     edx : cpu_data(raw_smp_processor_id()).loops_per_jiffy * (HZ / 4)
+
+                 @loops_per_jiffy is the loops in a tick which is calibrated during system booting through
+                 calibrate_delay() defined in <init/delay.c>.
+                 the cpu_data() fetch an object is type of struct cpuinfo_x86 is introduced in
+                 <arch/x86/include/asm/processor.h>.
+
+               for boot CPU,just set @loops_per_jiffy to its clock frequency as well,but for the rest CPUs,
+               must call to calibrate_delay() to determine the value of its @loops_per_jiffy.
+               the @loops_per_jiffy can be set through kernel parameter "lpj=<v>" .
+
+           !!  <arch/x86/lib/delay.c>
+                 /**
+                  * delay_fn - the real delay function setup during system booting
+                  * @arg1:     loops to delay
+                  */
+                 static void (*delay_fn)(unsigned long) = delay_loop;
+
+                 delay_loop() is defined in the same source code file as default delay function.
+                 static function delay_tsc() is the delay function based TSC,and use_tsc_delay()
+                 switch @delay_fn to delay_tsc().
+
+           !!  HPET or TSC as the delay clock source,one loop corresponds to one CPU cycle -- 
+               time interval between two consecutive CPU clock signals.
+               PIT  or unspecified,one loop corresponds to the time duration of a single iteration
+               of a tight instruction loop.
+
+     System Calls Related to Timing Measurements :
+       some system call primitives related to timing measurement >
+
+         SUS :
+           time
+           gettimeofday
+           adjtimex
+           /* settimeofday REQUEST _BSD_SOURCE */
+
+         POSIX.1 :
+           clock_gettime
+           clock_settime
+           clock_getres
+           timer_create
+           timer_gettime
+           timer_settime
+           timer_getoverrun
+           timer_delete
+           clock_nanosleep
