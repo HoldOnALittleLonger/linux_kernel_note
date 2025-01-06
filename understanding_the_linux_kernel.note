@@ -9458,3 +9458,68 @@ Chapter 6 : Timing Measurements
            timer_getoverrun
            timer_delete
            clock_nanosleep
+
+       SUS System Call :
+         <kernel/time.c>
+           /**
+            * sys_time - system call time to retrieve time in seconds since the Epoch
+            * @tloc:     pointer points to an object is type of time_t,
+            *            if @tloc is not NULL,then write the time into
+            *            *@tloc
+            * return:    time in seconds since UTC 1970-01-01 00:00
+            *            -EFAULT => failed to write time into @tloc
+            */
+           SYSCALL_DEFINE1(time, time_t __user *, tloc);
+
+           !!  the system call sys_time() is able to be implemented at user-level using
+               sys_gettimeofday(),but this interface is remained for compatible.
+
+           /**
+            * sys_gettimeofday - system call gettimeofday to retrieve time of day
+            * @tv:               pointer points to an object is type of struct timeval,
+            *                    the object is used to save time info
+            * @tz:               pointer points to an object is type of struct timezone,
+            *                    if @tz is not NULL,then write @sys_tz(system timezone) to @tz
+            * return:            0 => succeed
+            *                    -EFAULT => tv == NULL OR (tv != NULL AND write time info to @tv failed)
+            *                               tz != NULL AND write @sys_tz to @tz failed
+            *
+            * #  this function call to do_gettimeofday() to fetch current system time,function 
+            *    timekeeping_get_ns() would be called by it,and @xtime_lock will be acquired during
+            *    read current time from the clock source of @timekeeper.
+            */                         
+           SYSCALL_DEFINE2(gettimeofday, struct timeval __user *, tv, struct timezone __user *, tz);
+
+           !!  under linux,the second field of struct timezone @tz_dsttime is never been used.
+
+           /**
+            * sys_adjtimex - system call adjtimex used to tune kernel clock
+            * @txc_p:        pointer points to an object is type of struct timex,
+            *                it saves the new parameters used by kernel to tunes clock
+            * return:        -EFAULT => failed to copy current values of kernel clock to @txc_p
+            *                TIME_OK => succeed
+            *                TIME_ERROR => failed to adjust kernel clock
+            *                ...
+            *                TIME_* => represent clock synchronization status,introduced in <linux/timex.h>
+            *
+            * 
+            * #  this function use @txc_p to tunes kernel clock,if succeed,the paramter
+            *    @txc_p save the copy of the current values of kernel clock.
+            *    @xtime_lock is write-lock during tuning kernel clock.
+            *    real-time-clock (RTC) integered in motherboard also be modified.
+            */
+           SYSCALL_DEFINE1(adjtimex, struct timex __user *, txc_p);
+
+           !!  structure timex is defined in <linux/timex.h> used to discipline kernel clock oscillator.
+           !!  clock synchronization status :
+                 TIME_OK     0           =>  synchronized,no leap second
+                 TIME_INS    1           =>  insert leap second
+                 TIME_DEL    2           =>  delete leap second
+                 TIME_OOP    3           =>  leap second in progress
+                 TIME_WAIT   4           =>  leap second has occurred
+                 TIME_ERROR  5           =>  not synchronized
+                 TIME_BAD    TIME_ERROR  =>  bw compat
+
+           
+
+         
