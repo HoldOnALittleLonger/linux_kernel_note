@@ -9447,6 +9447,8 @@ Chapter 6 : Timing Measurements
            gettimeofday
            adjtimex
            /* settimeofday REQUEST _BSD_SOURCE */
+           setitimer
+           alarm           
 
          POSIX.1 :
            clock_gettime
@@ -9459,6 +9461,7 @@ Chapter 6 : Timing Measurements
            timer_delete
            clock_nanosleep
 
+       !!  Linux System Call routines always return long int.
        SUS System Call :
          <kernel/time.c>
            /**
@@ -9519,6 +9522,66 @@ Chapter 6 : Timing Measurements
                  TIME_WAIT   4           =>  leap second has occurred
                  TIME_ERROR  5           =>  not synchronized
                  TIME_BAD    TIME_ERROR  =>  bw compat
+
+         <kernel/itimer.c>
+           /**
+            * sys_setitimer - system call allow User Mode processes to set special timers
+            *                 - interval timers(no relating to PIT)
+            * @which:         which policy to apply -
+            *                   ITIMER_REAL    => actual elapsed time,SIGALRM
+            *                   ITIMER_VIRTUAL => time spent by the process in User Mode,SIGVTALRM
+            *                   ITIMER_PROF    => time spent by the process both in User Mode and in
+            *                                     Kernel Mode,SIGPROF
+            * @value:         itimer parameter to set
+            * @ovalue:        the older itimer parameter to save
+            * return:         0 => succeed
+            *                 -EINVAL => invalid itimer parameter
+            *                 -EFAULT => failed when copy from user or copy to user
+            */
+           SYSCALL_DEFINE3(setitimer, int, which, struct itimerval __user *, value,
+                           struct itimerval __user *, ovalue);
+
+           !!  structure itimerval is defined in <linux/time.h>
+                 struct itimerval {
+                         struct timeval it_interval;
+                         struct timeval it_value;
+                 };
+
+                 @it_interval means the time interval must to be waitted before send an signal
+                 @it_value means the times for signals have to be sent
+
+                 /**
+                  * everytime after an signal had sent,@it_value been decreased,stop when it becomes to zero.
+                  * everytime an signal was sent and @it_value is not equal to zero,reset itimer to
+                  * @it_interval for next signal is going to be raised.
+                  */
+
+           !!  structure task_struct has member named @signal is type of a pointer for structure signal_struct.
+               members {
+                 struct hrtimer real_timer            /* high-resolution timer */
+                 struct pid *leader_pid               /* process group id */
+                 ktime_t signal_struct.it_real_incr   /* time interval in ktime_t,conversion occurred */
+               } reserved for ITIMER_REAL for @current task.
+
+           !!  ITIMER_VIRTUAL and ITIMER_PROF are migrated to cpu itimer now,not as the process itimer.
+               for these two policies,cpu itimer is set to CPUCLOCK_VIRT and CPUCLOCK_PROF,respectively.
+               function set_cpu_itimer() is defined in <kernel/itimer.c>,it operates an array contains two
+               elements included in signal_struct has name @it is type of struct cpu_itimer.
+               parameter @clockid of set_cpu_itimer() has argument CPUCLOCK_VIRT or CPUCLOCK_PROF.
+           
+           /**
+            * sys_alarm - system call alarm,send called SIGALRM after an especified time interval in seconds 
+            *             had been elapsed.
+            * @seconds:   time interval in seconds.
+            * return:     0 => timer is not activated,that is,time interval elapsed and signal raised
+            *             > 0 => remaining time in seconds of a pending timer
+            *
+            * #  this function call to alarm_setitimer() to set an itimer(ITIMER_REAL) at oneshot mode
+            *    with parameter @seconds.
+            */
+           SYSCALL_DEFINE1(alarm, unsigned int, seconds);
+               
+                        
 
            
 
