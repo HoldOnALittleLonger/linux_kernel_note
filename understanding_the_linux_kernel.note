@@ -9580,6 +9580,141 @@ Chapter 6 : Timing Measurements
             *    with parameter @seconds.
             */
            SYSCALL_DEFINE1(alarm, unsigned int, seconds);
+
+       !!  POSIX.1b API returns 0 means succeed,otherwise,returns error code.
+       POSIX.1 System Call : 
+         <linux/time.h>
+           /* system clocks for POSIX.1b interval timers */
+           #define CLOCK_REALTIME            0
+           #define CLOCK_MONOTONIC           1
+           #define CLOCK_PROCESS_CPUTIME_ID  2
+           #define CLOCK_THREAD_CPUTIME_ID   3
+           #define CLOCK_MONOTONIC_RAW       4
+           #define CLOCK_REALTIME_COARSE     5
+           #define CLOCK_MONOTONIC_COARSE    6
+
+         <linux/posix-timers.h>
+           struct k_itimer;        /* POSIX.1b interval timer */
+
+           /* struct k_clock - POSIX timer operations */
+           struct k_clock {
+                   int res;  /* in nanoseconds */
+                   int (*clock_getres)(const clockid_t which_clock, struct timespec *tp);
+                   int (*clock_set)(const clockid_t which_clock, struct timespec *tp);
+                   int (*clock_get)(const clockid_t which_clock, struct timespec *tp);
+                   int (*timer_create)(struct k_itimer *timer);
+                   int (*nsleep)(const clockid_t which_clock, int flags, struct timerspec *,
+                                  struct timespec __user *);
+                   int (*nsleep_restart)(struct restart_block *restart_block);
+                   int (*timer_set)(struct k_itimer *timr, int flags,
+                                     struct itimerspec *new_setting,
+                                     struct itimerspec *old_setting);
+                   int (*timer_del)(struct k_itimer *timr);
+           #define TIMER_RETRY 1
+                   void (*timer_get)(struct k_itimer *timr,
+                                     struct itimerspec *cur_setting);
+           };
+
+         <kernel/posix-timers.c>
+           /* posix_clocks - table for POSIX clocks,MAX_CLOCKS = 16 defined in <linux/time.h> */
+           static struct k_clock posix_clocks[MAX_CLOCKS];
+
+           /**
+            * CLOCK_DISPATCH - generic caller routine used to dispatch clock from posix_clocks table
+            *                  and does @call on it
+            * @clock:          which clock
+            * @call:           which routine to call
+            * @arglist:        arguments enclosed by parentheses
+            *
+            * #  @clock < 0,negative index was selected in the table,thus call to posix cpu clock routine
+            * #  @call == NULL,no such routine is existed,thus call to common routine
+            */
+           #define CLOCK_DISPATCH(clock, call, arglist)  \
+                   ((clock) < 0 ? posix_cpu_##call arglist :  \
+                           (posix_clocks[clock].call != NULL  \
+                            ? (*posix_clocks[clock].call) arglist : common_##call arglist))
+
+           /**
+            * sys_clock_gettime - POSIX.1b API,get time in seconds and in nanoseconds from a clock
+            * @which_clock:       indicates which clock to get the time,it is type of 
+            *                       clockid_t => __kernel_clockid_t => int
+            * @tp:                pointer points to an object is type of struct timespec,it saves
+            *                     the time retrieve from @posix_clocks[@which_clock]
+            * return:             0 => get time succeed
+            *                     -EINVAL => invalid clock id
+            *                     -EFAULT => copy to user failed
+            */
+           SYSCALL_DEFINE2(clock_gettime, const clockid_t, which_clock, struct timespec __user *, tp);
+
+           /* sys_clock_settime - POSIX.1b API,set time in seconds and in nanoseconds for a clock */
+           SYSCALL_DEFINE2(clock_settime, const clockid_t, which_clock, const struct timespec __user *, tp);
+
+           /* sys_clock_getres - POSIX.1b API,get @res from a clock */
+           SYSCALL_DEFINE2(clock_getres, const clockid_t, which_clock, struct timespec __user *, tp);
+
+           /* sys_timer_create - POSIX.1b API,create and start an interval timer */
+           SYSCALL_DEFINE3(timer_create, const clockid_t, which_clock, struct sigevent __user *,
+                           timer_event_spec, timer_t __user *, create_timer_id);
+
+           !!  structure sigevent is defined in <asm-generic/siginfo.h>
+                 #define SIGEV_SIGNAL     0        /* notify via signal */
+                 #define SIGEV_NONE       1        /* other notification: meaningless */
+                 #define SIGEV_THREAD     2        /* deliver via thread creation */
+                 #define SIGEV_THREAD_ID  4        /* deliver to thread */
+
+
+                 #ifndef __ARCH_SIGEV_PREAMBLE_SIZE
+                 #define __ARCH_SIGEV_PREAMBLE_SIZE  (sizeof(int) * 2 + sizeof(sigval_t))
+                 #endif
+
+                 #define SIGEV_MAX_SIZE  64
+                 #define SIGEV_PAD_SIZE  ((SIGEV_MAX_SIZE - __ARCH_SIGEV_PREAMBLE_SIZE)  \
+                                          / sizeof(int))
+
+                 /* structure for notification from asynchronous routines(aio_read, aio_write,etc.) */
+                 typedef struct sigevent {
+                         sigval_t sigev_value;
+                         int sigev_signo;
+                         int sigev_notify;
+                         union {
+                                 int _pad[SIGEV_PAD_SIZE];
+                                 int _tid;
+                                 
+                                 struct {
+                                         void (*_function)(sigval_t);
+                                         void *_attribute;        /* really pthread_attr_t */
+                                 } _sigev_thread;
+                         };
+                 } sigevent_t;
+
+           /* sys_timer_gettime - POSIX.1b API,get the remaining time from an interval timer */
+           SYSCALL_DEFINE2(timer_gettime, timer_t, timer_id, struct itimerspec __user *, setting);
+
+           /* sys_timer_settime - POSIX.1b API,set an interval timer */
+           SYSCALL_DEFINE4(timer_settime, timer_t, timer_id, int, flags, const struct itimerspec __user *,
+                           new_setting, struct itimerspec __user *, old_setting);
+
+           /* sys_timer_getoverrun - POSIX.1b API,get the number of overruns of an interval timer */
+           SYSCALL_DEFINE1(timer_getoverrun, timer_t, timer_id);
+
+           /* sys_timer_delete - POSIX.1b API,delete an interval timer */
+           SYSCALL_DEFINE1(timer_delete, timer_t, timer_id);
+
+           /**
+            * sys_clock_nanosleep - POSIX.1b API,suspend process until an especial time interval(in nanoseconds)
+            *                       elapsed
+            * @which_clock:         clock id
+            * @flags:               control flags 
+            *                         0 => @rqtp is an interval related to the current value of @which_clock
+            *                         TIMER_ABSTIME => @rqtp is a absolute time
+            * @rqtp:                request
+            * @rmtp:                remained time
+            * return:               0 => time elapsed completely
+            *                       -EINVAL => invalid time
+            *                       -EFAULT => failed when copy to user / copy from user
+            */
+           SYSCALL_DEFINE4(clock_nanosleep, const clockid_t, which_clock, int, flags,
+                           const struct timespec __user *, rqtp, struct timespec __user *, rmtp);
                
                         
 
