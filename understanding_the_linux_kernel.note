@@ -471,7 +471,7 @@ Chapter 2 : Memory Addressing
          *  RPL : Requestor Privilege Level
          */
 
-        processor provides six segmentation registers for retrive segment selector quickly :
+        processor provides six segmentation registers for retrieve segment selector quickly :
           cs, ss, ds, es, fs, gs
           /*  the only purpose is to hold Segment Selectors  */
         program could reuse some segmentation registers,but have to store its contents in memory,and then
@@ -730,7 +730,7 @@ Chapter 2 : Memory Addressing
         }
       }
 
-      physical address = retrivePageFrame(retrivePageTable(cr3, linear.Directory), linear.Table) + Offset
+      physical address = retrievePageFrame(retrievePageTable(cr3, linear.Directory), linear.Table) + Offset
 
       /*  12bit Offset,each page consists of 4kB of data.  */
       /*  10bit Directory,so Page Directory include 1024 entries;10bit Table,so Page Table include 1024 entries,
@@ -1837,7 +1837,7 @@ Chapter 3 : Processes
       POSIX 1003.1c : all threads of a multithreaded application must have the same PID.
       thread groups : the identifier shared by the threads is the PID of the thread group leader,that is,the PID of the
                       first lightweight process in the group.
-                      (task_struct.tgid)[getpid() retrives the value of this field]
+                      (task_struct.tgid)[getpid() retrieves the value of this field]
 
     Process descriptors handling :
       Processes are dynamic entities,Linux packs two different data structures in a single per-process memory area :
@@ -1853,7 +1853,7 @@ Chapter 3 : Processes
       [  thread_info.task -> task_struct ; task_struct.thread_info -> thread_info  ]
       /*  Linux task_struct is defined in <linux/sched.h>,it contains a field named "stack" which type is void* ,
        *  kernel use this field to assocaited task_struct with thread_info object.
-       *  macro "#define task_thread_info(task) ((struct thread_info *)(task)->stack)" is used to retrive the
+       *  macro "#define task_thread_info(task) ((struct thread_info *)(task)->stack)" is used to retrieve the
        *  thread_info object which associated with current process.
        */
 
@@ -1890,7 +1890,7 @@ Chapter 3 : Processes
         the kernel masks out the 12 least significant bits of esp to obtain the base address of the thread_info structure.
 
       <arch/x86/include/asm/thread_info.h>
-        /*  current_thread_info - retrive the address of the thread_info object which is owns to the running process.  */
+        /*  current_thread_info - retrieve the address of the thread_info object which is owns to the running process.  */
         static inline struct thread_info *current_thread_info(void)
         {
                 return (struct thread_info *)(current_stack_pointer & ~(THREAD_SIZE - 1));
@@ -1900,7 +1900,7 @@ Chapter 3 : Processes
         the macro "current".
         /*  this is can be simply achieved by thread_info.task  */
         <arch/x86/include/asm/current.h>
-          /*  get_current - retrive the address of a task_struct object which is owns to the current running process.  */
+          /*  get_current - retrieve the address of a task_struct object which is owns to the current running process.  */
           static __always_inline struct task_struct *get_current(void);    
           #define curren get_current()
 
@@ -1911,7 +1911,7 @@ Chapter 3 : Processes
            *  were forced to introduce a global static variable called current to identify the process descriptor of the
            *  running process.On multiprocessor systems,it was necessary to define current as an array -- one element for
            *  each available CPU.
-           *  #  Linux 2.6 introduced percpu data,macro "current" will retrives the percpu data for running task.
+           *  #  Linux 2.6 introduced percpu data,macro "current" will retrieves the percpu data for running task.
            */
 
     Doubly linked lists :
@@ -2083,8 +2083,8 @@ Chapter 3 : Processes
         /*  Linux 2.6 does not exist @pgrp and @session fields in task_struct,there is a field named 'pids' which type
          *  is array of struct pid_link and represents the four type pid hashlist.
          */
-        /*  Linux 2.6,for retrive group leader's PID,use function task_pgrp(struct task_struct *) ,
-         *  for retrive session leader's PID,use function task_session(struct task_struct *) .
+        /*  Linux 2.6,for retrieve group leader's PID,use function task_pgrp(struct task_struct *) ,
+         *  for retrieve session leader's PID,use function task_session(struct task_struct *) .
          */
 
         <linux/pid.h>
@@ -2139,7 +2139,7 @@ Chapter 3 : Processes
 
       the data structures used in the PID hash tables are quite sophisticated,because they must keep track of the 
       relationships between the processes.
-        >  if kernel wants to retrive all processes in a specified thread group,it must finds out all the processes
+        >  if kernel wants to retrieve all processes in a specified thread group,it must finds out all the processes
            each tgid field == @tgid_value.
            but use @tgid_value to find a process just returns one process descritpor,the thread group leader.
            so kernel have to maintains a list of processes for each thread group!
@@ -2204,7 +2204,7 @@ Chapter 3 : Processes
           extern void detach_pid(struct task_struct *task, enum pid_type);
 
         <linux/sched.h>
-          /*  next_thread - retrive the next thread.
+          /*  next_thread - retrieve the next thread.
            *  @p : the task in the specified thread group.
            *  return - next task pointer in the thread group or @p.
            */
@@ -2218,7 +2218,7 @@ Chapter 3 : Processes
 
       processes in a TASK_INTERRUPTIBLE,TASK_UNINTERRUPTIBLE state are subdivided into many classes,
       each of which corresponds to a specific event.in this case,the process state does not provide enough
-      information to retrive the process quickly,so it is necessary to introduce additional lists of processes,
+      information to retrieve the process quickly,so it is necessary to introduce additional lists of processes,
       there are called wait queues.
 
       Wait queues :
@@ -2614,7 +2614,7 @@ Chapter 3 : Processes
             DECLARE_PER_CPU_SHARED_ALIGNED(struct tss_struct, init_tss);
             /*  the invoked macro is defined in <linux/percpu-defs.h>  */
         !  at each process switch,the kernel updates some fields of the TSS so that the corresponding
-           CPU's control unit may safely retrive the information it needs.
+           CPU's control unit may safely retrieve the information it needs.
            (TSS reflects the privilege of the current process on the CPU,but there is no need to maintain
             TSSs for processes when they're not running.)
 
@@ -3456,7 +3456,7 @@ Chapter 3 : Processes
                   in order to do this,the function scans the per-PID list in the PIDTYPE_TGID hash table corresponding
                   to current->tgid,for each process in the list different from current,it sends a SIGKILL signal to it.
                   as a result,all such processes will eventually execute the do_exit() function.
-                  /*  because Linux 2.6 no PIDTYPE_TGID was existed,so this function call to next_thread() to retrive
+                  /*  because Linux 2.6 no PIDTYPE_TGID was existed,so this function call to next_thread() to retrieve
                    *  the next thread in the thread group.
                    */
 
@@ -4246,7 +4246,7 @@ Chapter 4 : Interrupts and Exceptions
                                           long error_code, siginfo_t *info);
   
           do_trap() will does :
-            1>  retrive current process's task_struct object.
+            1>  retrieve current process's task_struct object.
             2>  @tsk->thread.error_code = @error_code;
                 @tsk->thread.trap_no = @trapnr;
                 if !@info
@@ -4809,7 +4809,7 @@ Chapter 4 : Interrupts and Exceptions
 
           5>  call to "handle_irq(@irq, @regs)" which is defined in <arch/x86/kernel/irq_32.c>.
 
-          6>  if function "handle_irq()" was failed to retrive irq descriptor via @irq,then returns
+          6>  if function "handle_irq()" was failed to retrieve irq descriptor via @irq,then returns
               "false",in this case,"ack_APIC_irq()" was called to acknowledge the @irq(it is not
               be handled,because no irq descriptor was find out).
               error message is printed.
@@ -4860,7 +4860,7 @@ Chapter 4 : Interrupts and Exceptions
           #endif
 
         the works "__do_IRQ()" does as the following :
-          1>  retrive the corresponding interrupt descriptor via @irq.and increase the cpu_usage_stat.irq of current
+          1>  retrieve the corresponding interrupt descriptor via @irq.and increase the cpu_usage_stat.irq of current
               CPU via call to kstat_incr_irqs_this_cpu()<linux/kernel_stat.h>.
 
           2>  if this @irq is IRQ_PER_CPU and current CPU has not disabled it,then handles it through
@@ -5202,7 +5202,7 @@ Chapter 4 : Interrupts and Exceptions
              *  generic_smp_call_function_interrupt {
              *          traverse call_function list (defined in <kernel/smp.c>)
              *          for each entry is type of call_single_data (defined in <linux/smp.h>)
-             *          retrive its container is type of call_function_data (defined in <kernel/smp.c>)
+             *          retrieve its container is type of call_function_data (defined in <kernel/smp.c>)
              *          call to @data->csd.func(@data->csd.info)
              *          if @data->refs == 0
              *              delete current entry from list
@@ -5486,7 +5486,7 @@ Chapter 4 : Interrupts and Exceptions
                */
 
               the following actions this function will takes:
-                1>  retrive pending local softirqs.
+                1>  retrieve pending local softirqs.
                 2>  account system vtime via account_system_vtime(current).
                 3>  call to __local_bh_disable((unsigned long)__builtin_return_address(0)) to updates preempt_count()
                     with SOFTIRQ_OFFSET.
@@ -5693,7 +5693,7 @@ Chapter 4 : Interrupts and Exceptions
             static void tasklet_hi_action(struct softirq_action *a);
 
             the works these two functions do:
-              1>  disable local irq and retrive head of tasklet list.
+              1>  disable local irq and retrieve head of tasklet list.
               2>  empty the tasklet list.
               3>  enable local irq and enter a while-loop.
               4>  traverse the list to deal with each tasklet if it had not been disabled,
@@ -5995,7 +5995,7 @@ Chapter 4 : Interrupts and Exceptions
         need_resched:  /*  when the piece of code is executed,none of the unfinished kernel control path is an
                         *  interrupt handler,otherwise,the preempt_count field would be greater than zero.
                         */
-          >  retrive thread_info.flags
+          >  retrieve thread_info.flags
           >  if TIF_NEED_RESCHED != 1
                      jmp restore_all
              elif eflags.IF != 1
@@ -6015,7 +6015,7 @@ Chapter 4 : Interrupts and Exceptions
         resume_userspace:
           >  disbale local interrupts
           >  ends irq tracing
-          >  retrive thread_info.flags
+          >  retrieve thread_info.flags
           >  if TIF_WORK_MASK & thread_info.flags
                      jmp work_pending  /*  there has some works to be done before int/exception return  */
              else
@@ -6032,7 +6032,7 @@ Chapter 4 : Interrupts and Exceptions
           >  call schedule
           >  disable local interrupts
           >  ends irq tracing
-          >  retrive thread_info.flags
+          >  retrieve thread_info.flags
           >  if thread_info.flags & TIF_WORK_MASK
                      if thread_info.flags & TIF_NEED_RESCHED
                              jmp work_resched
@@ -9585,8 +9585,17 @@ Chapter 6 : Timing Measurements
        POSIX.1 System Call : 
          <linux/time.h>
            /* system clocks for POSIX.1b interval timers */
-           #define CLOCK_REALTIME            0
-           #define CLOCK_MONOTONIC           1
+           #define CLOCK_REALTIME            0          /* resolution = 999848 */
+                   /**
+                    * real-time clock of the system.
+                    * essentially,the value of @xtime.
+                    */
+           #define CLOCK_MONOTONIC           1          /* resolution = 999848 */
+                   /**
+                    * real-time clock of the system purged of every time warp due to the
+                    * synchronization with an external time source.
+                    * essentially,it represented by the sum of @xtime and @wall_to_monotonic.
+                    */
            #define CLOCK_PROCESS_CPUTIME_ID  2
            #define CLOCK_THREAD_CPUTIME_ID   3
            #define CLOCK_MONOTONIC_RAW       4
@@ -9649,8 +9658,11 @@ Chapter 6 : Timing Measurements
            /* sys_clock_settime - POSIX.1b API,set time in seconds and in nanoseconds for a clock */
            SYSCALL_DEFINE2(clock_settime, const clockid_t, which_clock, const struct timespec __user *, tp);
 
-           /* sys_clock_getres - POSIX.1b API,get @res from a clock */
+           /* sys_clock_getres - POSIX.1b API,get @res(timer resolution) from a clock */
            SYSCALL_DEFINE2(clock_getres, const clockid_t, which_clock, struct timespec __user *, tp);
+
+           !!  typedef int __kernel_timer_t;
+               typedef __kernel_timer_t timer_t;
 
            /* sys_timer_create - POSIX.1b API,create and start an interval timer */
            SYSCALL_DEFINE3(timer_create, const clockid_t, which_clock, struct sigevent __user *,
@@ -9715,9 +9727,10 @@ Chapter 6 : Timing Measurements
             */
            SYSCALL_DEFINE4(clock_nanosleep, const clockid_t, which_clock, int, flags,
                            const struct timespec __user *, rqtp, struct timespec __user *, rmtp);
+
+
+Chapter 7 : 
+    Scheduling Policy
+    The Scheduling Algorithm
+    System Calls Related to Scheduling
                
-                        
-
-           
-
-         
