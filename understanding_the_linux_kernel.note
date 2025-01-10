@@ -9730,7 +9730,65 @@ Chapter 6 : Timing Measurements
 
 
 Chapter 7 : 
-    Scheduling Policy
+    Scheduling Policy :
+      the set of rules used to determine when and how to select a new process to run is called "Scheduling Policy".
+
+      Linux scheduling is based on time sharing technique :
+        several processes run in "time multiplexing",the CPU time is divided into slices,one for each runnable
+        process.                                                               /* OR called quantum */
+        !!  time sharing technique relies on timer interrupts and is thus transparent to processes.
+
+      Linux scheduling is also based on ranking processes :
+        process priority.
+        each process is associated with a value that tells the scheduler how appropriate it is to let the
+        process run on a CPU.
+        !!  linux process priority is dynamic,the scheduler keep track of what processes are doing and adjusts
+            their priorities periodically.
+
+      Process classify :
+        I/O-Bound
+          make heavy use of I/O devices and spend much time waiting for I/O operations to complete
+        CPU-Bound
+          number-crunching applications that require a lot of CPU time
+
+        alternative three for classifications >
+          1>  interactive processes
+                interact constantly with their users,and therefore spend a lot of time waiting for
+                keypresses and mouse operations.
+                the average delay must fall between 50 -- 150 milliseconds.
+                /* shell, text editor, graphical application, etc. */
+
+          2>  batch processes
+                do not need user interaction,often run in the background.
+                scheduler can decreases their priority as well.
+                /* language compiler, database searching, scientific computation, etc. */
+
+          3>  real-time processes
+                very stringent scheduling requirements.
+                never be blocked by lower-priority processes,should have a short guaranteed response
+                time with a minimum variance.
+                /* video / sound application, robot controller, program collects data from physical sensor, etc. */
+
+          !!  batch process can be I/O-Bound and CPU-Bound.
+              interactive process often be I/O-Bound.
+              real-time program are explicitly recognized as such by the scheduling algorithm in Linux.
+
+      !!  PROGRAMMER CAN MODIFY THE PROCESS PRIORITY THROUGH SOME SYSTEM-CALL API.
+          SCHEDULER TENDS TO FAVOR THE PROCESS IS INTERACTIVE OVER BATCH.
+
+      Process Preemption :
+        when a process enter TASK_RUNNING state,kernel checks whether its priority is greater than the @current running
+        process,if it is,then scheduler will be invoked,@current would be interrupted and another process is selected to
+        run(usually,"this" process").
+        when a process's time slice had exhausted(TID_NEED_RESCHED set),scheduler would be called after timer interrupt
+        terminated,and @current running process would be preempted by anoter process selected by scheduler.
+
+        !!  A process had preempted is not suspended,it stay in TASK_RUNNING state,but it is no longer uses the CPU.
+            Since Linux 2.6,the Kernel is preemptive,that is,a process can be preempted even when it is executing the
+            Kernel Code in Kernel Mode.
+        
+
+
     The Scheduling Algorithm
     System Calls Related to Scheduling
                
