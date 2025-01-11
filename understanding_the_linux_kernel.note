@@ -9786,9 +9786,181 @@ Chapter 7 :
         !!  A process had preempted is not suspended,it stay in TASK_RUNNING state,but it is no longer uses the CPU.
             Since Linux 2.6,the Kernel is preemptive,that is,a process can be preempted even when it is executing the
             Kernel Code in Kernel Mode.
-        
+            /* interrupt can not be preempted but can be interrupted by another */
 
+      How Long Must a Quantum Last ? :
+        quantum duration is critical for system performance,it should be neither too long nor too short.
 
-    The Scheduling Algorithm
+        suppose,quantum duration is 5s :
+          batch process 1 run at first,and wait for N seconds to start next execution.
+            N = 5s * total(processes - 1)
+          and,maybe an interactive process preempt batch process 1.
+        suppose,quantum duration is 5ms,and process switch require 5ms :
+          process 1 run,and exhausted time slice,scheduler does process switch
+            time consumed = 5ms + 5ms => 10ms
+          CPU time duration = 1s
+            1s = 1000ms
+          times for process switch in 1s = 1000ms / 10ms / 2 = 50
+          times for a process runs in 1s = 1000ms / 10ms / 2 = 50
+          => 50% CPU time had consumed on process switch
+
+        Linux quantum duration rule : choose a duration as long as possible,while keeping good system response time.
+                                      /* compromise */
+
+    The Scheduling Algorithm :
+      Scheduling Algorithm for earlier verions of Linux :
+        at every process switch,kernel scanned the list of runnable processes,computed their priorities,and selected the
+        "best" process to run.  /* too costly */
+
+      Scheduling Algorithm of Linux 2.6 :
+        /* scale well with the number of runnable processes */
+        select the process to run in constant time,independently of the number of runnable processes.
+        /* scale well with the number of processors */
+        each CPU has its own queue of the runnable processes.
+        distinguishing interactive processes and batch processes.
+
+        swapper process (PID 0) :
+          executes only when the CPU cannot execute other processes.
+          each CPU has its own swapper process.
+          scheduler always can find a process to run.
+    
+        scheduling classes : /* every Linux process always scheduled according to a scheduling class */
+          SCHED_FIFO 
+            First-In First-Out real-time process
+            when the scheduler assigns the CPU to the process,it leaves the process descriptor in its current position in
+            the runqueue list.if no other high-priority process is runnable,the process continues to use the CPU as long as
+            it wishes,even if other processes that have the same priority are runnable.
+
+          SCHED_RR
+            Round Robin real-time process
+            when the scheduler assigns the CPU to the process,it puts the process descriptor at the end of the runqueue list.
+            this ensure a fair assignment of CPU time to all SCHED_RR processes that have the same priority.
+
+          SCHED_NORMAL
+            Conventional time-shared process
+
+          Scheduling of Conventional Processes :
+            every conventional process has a static priority,kernel represents the static priority use the number ranging from
+            100(highest-priority) -- 139(lowest-priority).
+            !!  A NEW PROCESS ALWAYS INHERITS THE STATIC PRIORITY OF ITS PARENT.
+                USER CAN CHANGE STATIC PRIORITY OF A PROCESS THROUGH nice() OR setpriority() SYSTEM CALL.BUT A USER CAN ONLY 
+                CONTROL THE PRIORITY OF THE PROCESS WHICH IS BELONGS TO "this" USER,UNLESS "this" USER IS root.
+
+            Base time quantum :
+              /* FORMULA1 */
+                                                    (140 - static priority) * 20 if static priority < 120
+              base time quantum(in milliseconds) = 
+                                                    (140 - static priority) * 5  if static priority >= 120
+
+              base time quantum is assigned when a process has exhausted its previous time quantum.
+
+              btq     =>  base time quantum
+              sp      =>  static priority
+              nv      =>  nice value
+              idelta  =>  interactive delta
+              stt     =>  sleep time threshold
+                                            sp      nv      btq         idelta  stt
+              highest static priority       100     -20     800ms       -3      299ms
+              high static priority          110     -10     600ms       -1      499ms
+              default static priority       120       0     100ms       +2      799ms
+              low static priority           130     +10      50ms       +4      999ms
+              lowest static priority        139     +19       5ms       +6      1199ms
+
+            Dynamic priority and average sleep time :
+              every conventional process also has a dynamic priority is a value ranging from 100(high) -- 139(low).
+              this property is the number actually looked up by the scheduler when selecting the new process to run.
+
+              empirical formula :
+                dynamic priority = max(100, min(static priority - bonus + 5, 139))
+                @bonus : [0, 10]
+                         related to the average sleep time of the process
+
+              average sleep time :
+                average number of nanoseconds that the process spent while sleeping.
+                sleeping in TASK_INTERRUPTIBLE state contributes to the average sleep time in a different
+                way from sleeping in TASK_UNINTERRUPTIBLE state.
+                the average sleep time is decreases while a process is running.
+
+                ast => average sleep time
+                b   => bonus
+                g   => granularity
+
+                /**
+                 * the times that process is sleep greater,the average sleep time is lower.
+                 *   total sleep time / times(process sleep) := average sleep time
+                 */
+                ast                         b           g
+                    0 <= ast < 100ms        0           5120
+                100ms <= ast < 200ms        1           2560
+                200ms <= ast < 300ms        2           1280
+                300ms <= ast < 400ms        3            640
+                400ms <= ast < 500ms        4            320
+                500ms <= ast < 600ms        5            160
+                600ms <= ast < 700ms        6             80
+                700ms <= ast < 800ms        7             40
+                800ms <= ast < 900ms        8             20
+                900ms <= ast < 1000ms       9             10
+                   1s == ast                10            10
+
+                average sleep time is also used by scheduler to determine whether the process is an
+                interactive process or a batch process.
+                a process is considered "interactive" if it satisfies 
+                  dynamic priority <= 3 * static priority / 4 + 28
+                  <=>
+                  bonus - 5 >= static priority / 4 - 28
+                               /* interactive delta */
+
+            Active and expired processes :
+              for prevent process starvation,when a process finishes its time quantum,it can be replaced
+              by a lower priority process whose time quantum has not yet been exhausted.
+
+              two disjoint sets of runnable processes :
+                Active processes {
+                        runnable processes have not yet exhausted their time quantum
+                        allowed to run
+                }                
+            
+                Expired processes {
+                        runnable processes have exhausted their time quantum
+                        forbidden to run until all active processes expire
+                }
+
+              an active batch process exhausted its quantum always becomes expired.
+              an active interactive process exhausted its quantum usually remains active - scheduler refills
+              its time quantum and leaves it in the set of active processes.
+              /**
+               * if waited_long_time(eldest_expired_process) || higher_priority(expired_process)
+               * then
+               *         quantum exhausted-interactive process => expired interactive process
+               *         #  do not refill quantum
+               */
+
+          Scheduling of Real-Time Processes :
+            every real-time process associated with a real-time priority,it is a value ranging from
+            1(highest priority) -- 99(lowest priority).
+            a real-time process inhibits the execution of every lower-priority process while it remains
+            runnable.
+            real-time processes are always considered "active".
+
+            !!  USER CAN CHANGE REAL-TIME PRIORITY THROUGH SYSTEM CALL sched_setparam() AND sched_setscheduler().
+
+            if same_priority(some_real_time_processes)
+            then
+                    scheduler : select first_runnable(PerCPU_Fetch(smp_cpu_id(), runqueue))
+
+            conditions that real-time process to be replaced : /* one of the following */
+              1>  real_time_priority(@current) < real_time_priority(rtp)
+              2>  set_task_state(@current, TASK_INTERRUPTIBLE) || set_task_state(@current, TASK_UNINTERRUPTIBLE)
+                  /* blocking */
+              3>  task_state(@current) == TASK_STOPPED / TASK_TRACED / EXIT_ZOMBIE / EXIT_DEAD
+              4>  relinquish_cpu(smp_cpu_id(), @current) through system call sched_yield()
+              5>  scheduling_class(@current) == SCHED_RR && is_quantum_exhausted(@current)
+
+            !!  SYSTEM CALLS nice() AND setpriority() ON A REAL-TIME PROCESS WITH SCHED_RR DO NOT CHANGE THE
+                REAL-TIME PRIORITY BUT RATHER THE DURATION OF THE BASE TIME QUANTUM .
+                THE BASE TIME QUANTUM OF A REAL-TIME PROCESS WITH SCHED_RR DO NOT DEPEND ON THE REAL-TIME
+                PRIORITY,BUT RATHER ON THE STATIC PRIORITY OF IT,ACCORDING TO THE FORMULA1.
+                
+
     System Calls Related to Scheduling
                
