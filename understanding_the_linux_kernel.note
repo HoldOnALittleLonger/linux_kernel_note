@@ -9960,6 +9960,123 @@ Chapter 7 :
                 REAL-TIME PRIORITY BUT RATHER THE DURATION OF THE BASE TIME QUANTUM .
                 THE BASE TIME QUANTUM OF A REAL-TIME PROCESS WITH SCHED_RR DO NOT DEPEND ON THE REAL-TIME
                 PRIORITY,BUT RATHER ON THE STATIC PRIORITY OF IT,ACCORDING TO THE FORMULA1.
+
+      Data Structures Used by the Scheduler :
+        The runqueue Data Structure :
+          each CPU on the system has a Per-CPU variable is named @runqueues,it is type of struct rq introduced 
+          in <kernel/sched.c>.
+
+          <kernel/sched.c>
+            /**
+             * struct rq - the structure used to represent runqueue
+             * @lock:                  runqueue lock
+             * @nr_running:            number of runnable processes in the runqueue lists
+             * @cpu_load:              CPU load factors based on the average number of processes in the runqueue
+             * @in_nohz_recently:      indicate whether timekeeping in nohz mode recently
+             * @load:                  load weight
+             * @nr_load_updates:       the times that @load updated
+             * @nr_switches:           number of process switches performed by the CPU
+             * @cfs:                   completely fair scheduling runqueue
+             * @rt:                    real time runqueue
+             * @leaf_cfs_rq_list:      leaf of robin tree of the cfs rq
+             * @leaf_rt_rq_list:       leaf of robin tree of the rt rq
+             * @nr_uninterruptible:    number of processes that in TASK_UNINTERRUPTIBLE state in the runqueue
+             * @curr:                  current task
+             * @idle:                  idle task - @swapper mentioned abovde
+             * @next_balance:          the jiffies next balance to occurs
+             * @prev_mm:               memory descriptor of previous task
+             * @clock:                 sched clock,monotonic per cpu clock
+             * @nr_iowait:             number of processes that were previously in the runqueue lists and are now
+             *                         waiting for a disk I/O operation to complete
+             * @rd:                    the root scheduling domain
+             * @sd:                    the base scheduling domain of this CPU
+             * @active_balance:        flag set if some process shall be migrated from this runqueue to another
+             * @push_cpu:              not used
+             * @cpu:                   the cpu this runqueue belongs to
+             * @online:                is the @cpu online?
+             * @avg_load_per_task:     average load for per task
+             * @migration_thread:      the "migration" kernel thread
+             * @migration_queue:       list of processes to be removed from the runqueue
+             * @hrtick_timer:          high-resolution timer
+             * @yld_count:             the times that sys_sched_yield() was called by the task in this runqueue
+             * @sched_count:           the times that schedule() was called by the task in this runqueue
+             * @sched_goidle:          the times that no task can be selected to run thus selected idle process to
+             *                         execute
+             * @bkl_count:             the times that big kernel locked
+             */
+            struct rq {
+                    raw_spinlock_t lock;
+                    unsigned long nr_running;
+                    #define CPU_LOAD_IDX_MAX 5
+                    unsigned long cpu_load[CPU_LOAD_IDX_MAX];
+
+            #ifdef CONFIG_NO_HZ
+                    unsigned char in_nohz_recently;
+            #endif
+                    
+                    struct load_weight load;
+                    unsigned long nr_load_updates;
+                    u64 nr_switches;
+
+                    struct cfs_rq cfs;
+                    struct rt_rq rt;
+
+            #ifdef CONFIG_FAIR_GROUP_SCHED
+                    struct list_head leaf_cfs_rq_list;
+            #endif
+            #ifdef CONFIG_RT_GROUP_SCHED
+                    struct list_head leaf_rt_rq_list;
+            #endif
+
+                    unsigned long nr_uninterruptible;
+
+                    struct task_struct *curr, *idle;
+                    unsigned long next_balance;
+                    struct mm_struct *prev_mm;
+
+                    u64 clock;
+
+                    atomic_t nr_iowait;
+
+            #ifdef CONFIG_SMP
+                    struct root_domain *rd;
+                    struct sched_domain *sd;
+                    ...
+                    int active_balance;
+                    int push_cpu;
+                    int cpu;
+                    int online;
+                  
+                    unsigned long avg_load_per_task;
+
+                    struct task_struct *migration_thread;
+                    struct list_head migration_queue;
+            #endif
+
+                    ...
+            
+            #ifdef CONFIG_SCHED_HRTICK
+                    ...
+
+                    struct hrtimer hrtick_timer;
+            #endif
+
+                    ...
+
+            #ifdef CONFIG_SCHEDSTATS
+                    ...
+                    unsigned int yld_count;
+
+                    unsigned int sched_switch;
+                    unsigned int sched_count;
+                    unsigned int sched_goidle;
+                    ...
+                    unsigned int bkl_count;
+            #endif
+            };
+
+          because each CPU has its own @runqueues,thus a task only existed just one @runqueues of a CPU,but
+          when load balancing occurred,it maybe migrated to another @runqueues of different CPU in the system.
                 
 
     System Calls Related to Scheduling
