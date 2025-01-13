@@ -10077,7 +10077,46 @@ Chapter 7 :
 
           because each CPU has its own @runqueues,thus a task only existed just one @runqueues of a CPU,but
           when load balancing occurred,it maybe migrated to another @runqueues of different CPU in the system.
-                
+
+        Process Descriptor :
+          structure task_struct is defined in <linux/sched.h> used to represents a task.
+          each task correspond to a process normally,but it a process contains several threads,every thread
+          correspond to a task. (in other words,a task correspond to a thread)
+
+          struct task_struct had been introduced in Chapter 3 Processes.
+
+          the members of struc task_struct that related to Linux scheduler :
+            __u32 thread_info->flags         =>  store the TIF_NEED_RESCHED flag,which is set if the scheduler 
+                                                 must be invoked  
+            __u32 thread_info->cpu           =>  logical number of the CPU owning the runqueue to which the
+                                                 runnable process belongs
+            volatile long state              =>  process state
+            int prio                         =>  dynamic priority
+                static_prio                  =>  static priority
+                normal_prio                  =>  normal priority (CFS)
+            struct list_head rt.run_list     =>  real-time runnable list where @current is linked into
+            unsigned int policy              =>  scheduling class (SCHED_NORMAL, SCHED_RR, SCHED_FIFO)
+            cpumask_t cpus_allowed           =>  bit mask of the CPUs that can execute the process
+            unsigned int rt.time_slice       =>  real-time ticks left in the time quantum of the process
+            u64 se.slice_max                 =>  maximum time slice
+            unsigned int rt_priority         =>  real-time priority
+
+            /**
+             * @rt is type of struct sched_rt_entity
+             * @se is type of struct sched_entity,CFS use it to records process times
+             */
+
+          !!  LINUX 2.6.34.1 APPLY CFS ON THE PROCESS SCHEDULING.
+
+          when static function copy_process() defined in <kernel/sched.c> is called for fork a child process,
+          it call to dup_task_struct() to make a copy of the parent's task_struct for child process.
+          so,@rt and @se will be copied as well,thus child has the same time informations as its parent's.
+          !!BUT!!
+            copy_process() call to sched_fork(@child) later to performs scheduling entity setup,almost
+            all fields would be initialized to 0.of course,@se.slice_max is set to 0,and @rt unchanged.
+            copy_process() just assign child to a CPU through sched_fork() but not start it due to child is
+            in TASK_WAKING state,and sched_fork() let child inherits the @normal_prio from its parent as the
+            @prio(dynamic priority).
 
     System Calls Related to Scheduling
                
