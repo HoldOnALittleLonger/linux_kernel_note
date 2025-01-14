@@ -8919,9 +8919,10 @@ Chapter 6 : Timing Measurements
 
               6>  checks if there are some performance events pending and deal with them.
 
-              7>  call to scheduler_tick() to does real-time scheduling,this will cause run-queue clock
+              7>  call to scheduler_tick() to does scheduling,this will cause run-queue clock
                   updating,cpu-load updating.
 
+                             (for real-time process,task_tick_fair() for non-real-time process)
                   it call to task_tick_rt() updates current task's runtime statistics in the run-queue
                   of this CPU.
                   reduce one to current task's real-time time_slice,if it is greater than 0,then returns;
@@ -10117,6 +10118,155 @@ Chapter 7 :
             copy_process() just assign child to a CPU through sched_fork() but not start it due to child is
             in TASK_WAKING state,and sched_fork() let child inherits the @normal_prio from its parent as the
             @prio(dynamic priority).
+
+        Sched Clock Data :
+          sched clock for unstable cpu clocks.
+          create a semi stable clock from a mixture of other events :
+            gtod
+            sched_clock
+            explicit idle events
+
+          <kernel/sched_clock.c>
+            /**
+             * sched_clock_data - structure used to record clock data fro scheduler
+             * @tick_raw:         raw tick,get from TSC
+             * @tick_gtod:        GTOD,gettimeofday relating facility,as base and the unstable clock deltas
+             * @clock:            clock value
+             */
+            struct sched_clock_data {
+                    u64 tick_raw;
+                    u64 tick_gtod;
+                    u64 clock;
+            };
+
+        Sched Class :
+          schedule class defined a set of primitives to describe how to deal with linux scheduling.
+          <linux/sched.h>
+            struct sched_class;
+
+          member @next is a const pointer points to an object is also type of struct sched_class,thus all sched_class
+          are linked.
+
+          the primitives :
+            <specifier>@<type>@<name> => data type describing
+            <specifier>@<type>@r      => return type
+            task: struct task_struct
+            i:    int
+            ui:   unsigned int
+            cpumask*: struct cpumask *
+        
+            /**
+             * "rq" related parameters and "p" related parameters are pass-by-pointer,
+             *  and types can be deduced from their names.
+             */
+
+            enqueue_task            @rq @p i@wakeup
+            dequeue_task            @rq @p i@sleep
+            yield_task              @rq
+            check_preempt_curr      @rq @p i@flags
+            task@r pick_next_task   @rq
+            put_prev_task           @rq @p
+
+          == CONFIG_SMP ==
+            i@r select_task_rq      @p i@sd_flag i@flags
+            pre_schedule            @this_rq @task
+            post_schedule           @this_rq
+            task_waking             @this_rq @task
+            task_woken              @this_rq @task
+            set_cpus_allowed        @p const@cpumask*@newmask
+            rq_online               @rq
+            rq_offline              @rq
+          == CONFIG_SMP - END ==
+
+            set_curr_task           @rq
+            task_tick               @rq @p i@queued
+            task_fork               @p
+            switched_from           @this_rq @task
+            switched_to             @this_rq @task i@running
+            prio_changed            @this_rq @task i@oldprio i@running
+            ui@r get_rr_interval    @rq @task
+           
+          == CONFIG_FAIR_GROUP_SCHED ==
+            moved_group             @p i@on_rq
+          == CONFIG_FAIR_GROUP_SCHED - END ==
+
+          These primitives are setup by scheduler initializing routine.Because Linux 2.6.34.1 introuduced CFS -
+          - Completely Fair Scheduler,thus the sched_class in kernel is set to cfs class in normally.
+
+      Functions Used by the Scheduler :
+        The scheduler_tick() function :
+          <arch/x86/kernel/tsc.c>
+            /**
+             * native_sched_clock - architecture depended sched_clock(),used to returns current time in nanosec units
+             * return:              time data readed from TSC and converted to nanoseconds
+             */
+            u64 native_sched_clock(void);
+
+          #ifndef CONFIG_PARAVIRT
+            unsigned long long
+            sched_clock(void) __attribute__((alias("native_sched_clock")));
+          #endif
+
+          <kernel/sched_clock.c>
+            sched_clock - generic scheduler clock
+              => (jiffies - INITIAL_JIFFIES) * (NSEC_PER_SEC / HZ)
+            /* architecture can overrides this */
+
+          <linux/sched.h>
+            /**
+             * scheduler_tick - called from timer code to updates scheduling related data
+             */
+            extern void scheduler_tick(void);
+
+            what scheduler_tick() does :
+              1>  retrieve cpu id,runqueue of local cpu,the task current running of runqueue.
+              2>  call to sched_clock_tick() to update scheduler clock.
+              3>  acquire runqueue lock.
+              4>  update runqueue clock.
+              5>  update cpu load info of the @runqueue.
+                  /**
+                   * @rq->cpu_load[].
+                   * @rq->calc_load_update is treated as a timer to indicate that 
+                   * @this_rq should go to account the number of active processes.
+                   * (@calc_load_update after(expired) or equal to(timeout) @jiffies)
+                   */
+              6>  call to @curr->sched_class->task_tick(@rq, @curr, 0)
+                  to update run-time statistics of the @current.
+                  if @cfs_rq->nr_running > 1 || !sched_feat(WAKEUP_PREEMPT)
+                  then
+                          check_preempt_tick(@cfs_rq, @curr)
+                          /**
+                           * should @current be preempted?
+                           * new task with higher priority => TRUE
+                           * starving => TRUE
+                           */
+                  task_tick() of cfs will call entity_tick() on all cfs_rq related
+                  to @current->se,that is all @se in the se.@group_node would be
+                  updated. (each @se has a member named @cfs_rq is type of struct cfs_rq)
+                  /**
+                   * @se.sum_exec_time increase and @se.vruntime decrease
+                   * @delta get from scheduler clock substract to @se.exec_start
+                   * @se.exec_start updated to @clock
+                   */
+              7>  release runqueue lock.
+              8>  call to perf_event_task_tick(@curr) signal a performance event associated
+                  with task tick.
+              == CONFIG_SMP ==
+              9>  call to idle_cpu(cpu) to check whether local cpu is idle.
+                  @rq->idle_at_tick = 1 => local cpu is idle
+                                      0 => local cpu is busy
+              10> trigger load balance on "this" runqueue with local cpu.
+                  arise SCHED_SOFTIRQ if it is time to do periodic load balancing.
+              == CONFIG_SMP - END ==
+
+            local cpu maybe idle even its runqueue is not empty(CPU hyper-threading technology)
+
+            !!  update_process_times() call to scheduler_tick(),and task_tick_rt() is called
+                if @current is a real-time process,otherwise,task_tick_fair() is called in normally.
+                and what task_tick_rt() does has introduced in the description what update_process_times()
+                does at early Chapter "Timing Measurements".
+            
+
 
     System Calls Related to Scheduling
                
