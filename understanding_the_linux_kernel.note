@@ -10122,9 +10122,9 @@ Chapter 7 :
         Sched Clock Data :
           sched clock for unstable cpu clocks.
           create a semi stable clock from a mixture of other events :
-            gtod
-            sched_clock
-            explicit idle events
+            TSC
+            GTOD
+            explicit idle event
 
           <kernel/sched_clock.c>
             /**
@@ -10221,8 +10221,16 @@ Chapter 7 :
             what scheduler_tick() does :
               1>  retrieve cpu id,runqueue of local cpu,the task current running of runqueue.
               2>  call to sched_clock_tick() to update scheduler clock.
+                  /**
+                   * sched_clock_tick() call to sched_clock_local(),it calculate scheduler
+                   * clock from TSC, GTOD, Explicit Idle Event .
+                   */
               3>  acquire runqueue lock.
               4>  update runqueue clock.
+                  /**
+                   * call to sched_clock_cpu().in normally,sched_clock_local() will be called,
+                   * except current CPU is not a local CPU,then called to sched_clock_remote().
+                   */
               5>  update cpu load info of the @runqueue.
                   /**
                    * @rq->cpu_load[].
@@ -10249,7 +10257,7 @@ Chapter 7 :
                    * @se.exec_start updated to @clock
                    */
               7>  release runqueue lock.
-              8>  call to perf_event_task_tick(@curr) signal a performance event associated
+              8>  call to perf_event_task_tick(@curr) sign a performance event associated
                   with task tick.
               == CONFIG_SMP ==
               9>  call to idle_cpu(cpu) to check whether local cpu is idle.
@@ -10265,8 +10273,87 @@ Chapter 7 :
                 if @current is a real-time process,otherwise,task_tick_fair() is called in normally.
                 and what task_tick_rt() does has introduced in the description what update_process_times()
                 does at early Chapter "Timing Measurements".
-            
 
+        The try_to_wake_up() function :
+          <kernel/sched.c>
+            /**
+             * try_to_wake_up - try to wake up threads are satisfied condition
+             * @p:              task to wake up
+             * @state:          process state mask
+             * @wake_flags:     wake up flags,used to determine whether should do a
+             *                  synchronous wakeup
+             * return:          1 => woken up
+             *                  0 => task already active
+             */
+            static int try_to_wake_up(struct task_struct *p, unsigned int state,
+                                      int wake_flags);
+
+            !!  @current is always on the run-queue unless the actual re-schedule is
+                in progress,and in such case,just change process state to
+                TASK_RUNNING as well.
+
+            !!  TASK_WAKING state is set by scheduler used to make the process is waking
+                here,this guarantees that nobody will actually run it,and a signal or
+                other external event cannot wake it up and insert it on the runqueue either.
+
+            what try_to_wake_up() does :
+              1>  check scheduler feature whether SYNC_WAKEUPS is disabled,if it is,then
+                  clear WF_SYNC in @wake_flags.
+              2>  retrieve local cpu via get_cpu().
+                  retrieve the runqueue which @p is residing,and lock this_rq,disable
+                  interrupt.
+                  update runqueue clock.
+              3>  check whether @p->state & @state == 1 ?
+                  if @p does not satisfy the condition,then do not wake up it.
+              4>  check if @p is enqueued into a runqueue,if it is,then goto
+                  "out_running"(process is already active,@se on a runqueue).
+                  /**
+                   * task enqueued into a runqueue,then @task->se.on_rq set to 1.
+                   * @task->rq != NULL means this task is resided on @rq,but
+                   * it is not guarantee to the @task had been enqueued into @rq.
+                   */
+              5>  save local CPU id,because on SMP,task maybe migrated to another CPU
+                  by load balancing.
+              == CONFIG_SMP ==
+              6>  if task is already active,then goto "out_activate"
+                  else
+                          fix up the @nr_uninterruptible count of this @rq
+                          set @p tp TASK_WAKING
+                          call to @p->sched_class->task_waking() if it is not NULL
+                          release @rq->lock but local interrupt stay disabled
+                          get CPU id of @p
+                                  if current CPU id is not equal to older,
+                                  must task migrating occurred,set task's cpu to
+                                  current CPU.
+                          retrieve runqueue of this CPU and lock it,then update
+                          its clock.
+                          updates schedule statistic @rq->ttwu_count,and if it is
+                          necessary,update @rq->ttwu_local @rq->ttwu_wake_remote,
+                          too.
+              == CONFIG_SMP - END ==
+            "out_activate":
+              7>  increase schedule statistics @p->se.nr_wakeups.
+                  if WF_SYNC then increase @p->se.nr_wakeups_sync.
+                  if task migrating occurred then increase @p->se.nr_wakeups_migrate.
+                  if no task migrating occurred then increase @p->se.nr_wakeups_local.
+                  else,increase @p->se.nr_wakeups_remote.
+              8>  activate task @p on @rq
+              9>  check whether current in interrupt context.
+                  if it is not,then update average of @current->se.avg_wakeup,
+                  and set @se.last_wakeup to @se.sum_exec_runtime.
+                  /**
+                   * at there,not task_rq_unlock() was called,that is local interrupt
+                   * stay disabled.
+                   */
+            "out_running": /* in this case,return 0 */
+              10> check preempt of @p,if any process can preempt @p,then replace
+                  it.
+              11> set @p to TASK_RUNNING(if @p was preempted,then now,it is replaced back).
+              == CONFIG_SMP ==
+              12> call to @p->sched_class->task_woken() if it is not NULL.
+                  if @rq->idel_stamp != 0,then update @rq->avg_idel.
+              == CONFIG_SMP - END ==
+              13> unlock @rq,enable interrupt then put cpu and return.
 
     System Calls Related to Scheduling
                
