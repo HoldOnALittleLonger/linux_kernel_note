@@ -10079,6 +10079,13 @@ Chapter 7 :
           because each CPU has its own @runqueues,thus a task only existed just one @runqueues of a CPU,but
           when load balancing occurred,it maybe migrated to another @runqueues of different CPU in the system.
 
+          !!  HAVE TO BE AWARE CLEARLY THAT struct rq IS ASSOCIATED TO THE CPU,NOT TO THE PROCESS.WHEN SELECT
+              A CPU FOR PROCESS,THAT IS SELECT A RUNQUEUE OF THE CPU FOR PROCESS,THE PROCESS WILL RESIDE ON IT.
+          !!  HAVE TO BE AWARE CLEARLY THE DIFFERENCE BETWEEN 
+                @rq->curr(CURRENT RUNNING OF RUNQUEUE)
+                @current(THIS THREAD)
+                @p(TASK)
+
         Process Descriptor :
           structure task_struct is defined in <linux/sched.h> used to represents a task.
           each task correspond to a process normally,but it a process contains several threads,every thread
@@ -10309,7 +10316,7 @@ Chapter 7 :
                   "out_running"(process is already active,@se on a runqueue).
                   /**
                    * task enqueued into a runqueue,then @task->se.on_rq set to 1.
-                   * @task->rq != NULL means this task is resided on @rq,but
+                   * @task->rq != NULL means this task is residing on @rq,but
                    * it is not guarantee to the @task had been enqueued into @rq.
                    */
               5>  save local CPU id,because on SMP,task maybe migrated to another CPU
@@ -10317,14 +10324,32 @@ Chapter 7 :
               == CONFIG_SMP ==
               6>  if task is already active,then goto "out_activate"
                   else
-                          fix up the @nr_uninterruptible count of this @rq
+                          fix up the @nr_uninterruptible count of this @rq,
+                          if @p is contributes to load,then decrease @rq->nr_uninterruptible
+                          /* @p is in TASK_UNINTERRUPTIBLE and do not with flag PF_FREEZING */
+
                           set @p tp TASK_WAKING
                           call to @p->sched_class->task_waking() if it is not NULL
                           release @rq->lock but local interrupt stay disabled
-                          get CPU id of @p
+
+                          get CPU id of @p through select_task_rq()
+                          /**
+                           * called with SD_BALANCE_WAKE,schedule balancing take
+                           * place be there.
+                           * which @rq to select follows these  rules :
+                           *   > the CPU is idle - prefer to previously executing CPU
+                           *     and to the local CPU.
+                           *   > if select previously CPU cause lower workload,then
+                           *     select the previous CPU.
+                           *   > if the process has been executed recently,then select
+                           *     the old CPU.
+                           *   > if migrate the process to the local CPU will reduce the
+                           *     unbalance between the CPUs,then select local CPU.
+                           */
                                   if current CPU id is not equal to older,
                                   must task migrating occurred,set task's cpu to
                                   current CPU.
+
                           retrieve runqueue of this CPU and lock it,then update
                           its clock.
                           updates schedule statistic @rq->ttwu_count,and if it is
@@ -10337,18 +10362,30 @@ Chapter 7 :
                   if task migrating occurred then increase @p->se.nr_wakeups_migrate.
                   if no task migrating occurred then increase @p->se.nr_wakeups_local.
                   else,increase @p->se.nr_wakeups_remote.
-              8>  activate task @p on @rq
+              8>  activate task @p on @rq via call to function activate_task().
+                  it enqueue @p into @rq and increase @nr_running of @rq.
               9>  check whether current in interrupt context.
                   if it is not,then update average of @current->se.avg_wakeup,
                   and set @se.last_wakeup to @se.sum_exec_runtime.
                   /**
-                   * at there,not task_rq_unlock() was called,that is local interrupt
+                   * at there,no task_rq_unlock() was called,that is local interrupt
                    * stay disabled.
                    */
             "out_running": /* in this case,return 0 */
               10> check preempt of @p,if any process can preempt @p,then replace
                   it.
-              11> set @p to TASK_RUNNING(if @p was preempted,then now,it is replaced back).
+                  /**
+                   * allow @rq->curr is preempted by @p require to close WAKE_SYNC bit 
+                   * in @wake_flags the parameter of try_to_wake_up().
+                   * preemption is not occurs immediately,it just mark @rq->curr is
+                   * TIF_NEED_RESCHED.
+                   * on SMP,function resched_task() will checks whether task is polling,
+                   * (the target CPU is not actively polling the status of TIF_NEED_RESCHED
+                   *  flag of process)
+                   * if it is not,must send an IPI via smp_send_reschedule() to force
+                   * rescheduling on the target CPU(@task's CPU).
+                   */
+              11> set @p to TASK_RUNNING.(@p is runnable,now)
               == CONFIG_SMP ==
               12> call to @p->sched_class->task_woken() if it is not NULL.
                   if @rq->idel_stamp != 0,then update @rq->avg_idel.
