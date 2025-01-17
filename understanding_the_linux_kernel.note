@@ -10100,7 +10100,7 @@ Chapter 7 :
                                                  runnable process belongs
             volatile long state              =>  process state
             int prio                         =>  dynamic priority
-                static_prio                  =>  static priority
+                static_prio                  =>  static priority,converted from USER NICE VALUE
                 normal_prio                  =>  normal priority (CFS)
             struct list_head rt.run_list     =>  real-time runnable list where @current is linked into
             unsigned int policy              =>  scheduling class (SCHED_NORMAL, SCHED_RR, SCHED_FIFO)
@@ -10282,6 +10282,9 @@ Chapter 7 :
                 does at early Chapter "Timing Measurements".
 
         The try_to_wake_up() function :
+          awake a sleeping or stopped process by setting its state to TASK_RUNNING and inserting it into
+          the runqueue of the local CPU.
+
           <kernel/sched.c>
             /**
              * try_to_wake_up - try to wake up threads are satisfied condition
@@ -10391,6 +10394,90 @@ Chapter 7 :
                   if @rq->idel_stamp != 0,then update @rq->avg_idel.
               == CONFIG_SMP - END ==
               13> unlock @rq,enable interrupt then put cpu and return.
+
+        The recalc_task_prio() function :
+          !!  LINUX 2.6.34.1 NO SUCH FUNCTION.
+              EACH struct rq HAS MEMBER NAMED "cfs_rq",THAT IS THE CFS
+              SCHEDULING,IF THE SCHEDULER IS CFS POLICY,THEN EVERY
+              RUNQUEUE HAS A CFS ENTITY IT ATTACH TO THIS RUNQUEUE.
+
+          because cfs,the priority is related to the weight.to avoid the subversion of
+          "niceness" due to uneven distribution of tasks with abnormal "nice" values
+          across CPUS,the contribution that each task makes to its runqueue's load
+          is weighted according to its scheduling class and "nice" value.
+          /* for SCHED_NORMAL,it just a scaled version of the time slice allaction */
+
+          nice levels are multiplicative with a gentle 10% change for every nice 
+          level changed.i.e. a CPU bound task goes from nice 0 to nice 1,it will
+          get an estimated 10% less CPU time than another task on this CPU.
+
+          the "10% effect" is relative and cumulative :
+            from any nice level >
+              go up 1 level => -10% CPU usage
+              go down 1 level => +10% CPU usage
+              /**
+               * @p1 -10% and @p +10%,then the relative distance between them is 
+               * an estimated 25%.
+               * to achieve this,use a multiplier of 1.25 .
+               */
+          
+          <kernel/sched.c>
+            static const int prio_to_weight[40] = {
+                    88761, 71755, 56483, 46273, 36291, /* [-20, -16] */
+                    28154, 23254, 18705, 14949, 11916, /* [-15, -11] */
+                     9548,  7620,  6100,  4904,  3906, /* [-10, -6] */
+                     3121,  2501,  1991,  1586,  1277, /* [-5, -1] */
+                     1024,   820,   655,   526,   423, /* [0, 4] */
+                      335,   272,   215,   172,   137, /* [5, 9] */
+                      110,    87,    70,    56,    45, /* [10, 14] */
+                       36,    29,    23,    18,    15, /* [15, 19] */
+            };
+          
+          struct task_struct.@static_prio is converted from nice value.
+          struct task_struct.@normal_prio is based on @static_prio.
+          
+          <linux/sched.h>
+            #define MAX_USER_RT_PRIO 100
+            #define MAX_RT_PRIO MAX_USER_RT_PRIO     /* 100 */
+
+            #define MAX_PRIO (MAX_RT_PRIO + 40)      /* 140 */
+            #define DEFAULT_PRIO (MAX_RT_PRIO + 20)  /* 120 */
+
+          <kernel/sched.c>
+            #define NICE_TO_PRIO(nice) (MAX_RT_PRIO + (nice) + 20)
+            #define PRIO_TO_NICE(prio) ((prio) - MAX_RT_PRIO - 20)
+            #define TASK_NICE(p) PRIO_TO_NICE(p->static_prio)
+
+            #define USER_PRIO(p) ((p) - MAX_RT_PRIO)
+            #define TASK_USER_PRIO(p) USER_PRIO((p)->static_prio)
+            #define MAX_USER_PRIO (USER_PRIO(MAX_PRIO))
+
+            /**
+             * __normal_prio - return the priority based on static_prio
+             * @p:             the task
+             * return:         @p->static_prio
+             */
+            static inline int __normal_prio(struct task_struct *p);
+
+            /**
+             * normal_prio - calculate the expected normal priority
+             * @p:           the task
+             * return:       MAX_RT_PRIO - 1 - @p->rt_prioriy => @p is real-time
+             *               __normal_prio(@p) => @p is not real-time
+             */
+            static inline int normal_prio(struct task_struct *p);
+
+            /**
+             * effective_prio - calculate the current priority
+             * @p:              the task
+             * return:          the current priority
+             * # this function set @p->normal_prio to __normal_prio(@p),
+             *   then check if the task has RT policy or boosted to RT
+             *   priority,if it is not,return @normal_prio,otherwise,
+             *   return @prio.in other words,that is keep the priority
+             *   if task is RT or boosted to RT prioriry.
+             */
+            static int effective_prio(struct task_struct *p);
 
     System Calls Related to Scheduling
                
