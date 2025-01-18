@@ -1844,6 +1844,7 @@ Chapter 3 : Processes
         >  thread_info                      /*  the structure is defined in <arch/x86/include/asm/thread_info.h>  */
         >  the Kernel Mode process stack
 
+
       the length of this memory area is usually 8kB(2 pages),kernel stores the 8kB memory area in two consecutive page
       frames with the first page frame aligned to a multiple of 2^13.(turn out to be a problem when littel dynamic memory
       is available,but kernel could to be configured that use 4kB memory area to stores the stack and thread_info)
@@ -1855,12 +1856,29 @@ Chapter 3 : Processes
        *  kernel use this field to assocaited task_struct with thread_info object.
        *  macro "#define task_thread_info(task) ((struct thread_info *)(task)->stack)" is used to retrieve the
        *  thread_info object which associated with current process.
+       *  @current's thread_info => asm("esp") & ~(THREAD_SIZE - 1)
+       */
+
+      /**
+       *           +---------+  -->  high address
+       *           |         |
+       *           | process |
+       *           | kernel  |
+       *           | STACK   |
+       *           |         |
+       *           +---------+  -->  esp /* C Compiler prefer to use ebp instead of esp(convention) */
+       *           |         |           /* so "push $0x1" => "movb $0x1, -2(%ebp)" */
+       *           | process |           /* and the memory unit (%esp) saves caller's %ip when invocation occurred */
+       *           | thread  |           /* when process switch happens,kernel checkout to */
+       *           | info    |           /* the segment contains the process's kernel stack */
+       *           |         |           /* BE AWARE,PROCESS SWITCH IS NOT FUNCTION CALLING! */
+       *           +---------+  -->  low address
        */
 
        /*  <linux/sched.h>
         *    union thread_union {
         *            struct thread_info thread_info;
-        *            unsigned long stack[THREAD_SIZE/sizeof(long)];
+        *            unsigned long stack[THREAD_SIZE / sizeof(long)];
         *    };  /*  task_struct.stack will points to a thread_union object.  */
         *        /*  <arch/x86/include/asm/page_32_types.h>:  #define THREAD_SIZE (PAGE_SIZE << THREAD_ORDER)  */
         */
@@ -8866,7 +8884,7 @@ Chapter 6 : Timing Measurements
                   the function is defined in <kernel/sched.c>,
                   if @user_tick == 1
                           => account_user_time()
-                  else if @current != this_rq()->idel || irq_count() != HARDIRQ_OFFSET
+                  else if @current != this_rq()->idle || irq_count() != HARDIRQ_OFFSET
                           => account_system_time()
                   else
                           => account_idle_time()
@@ -8901,7 +8919,7 @@ Chapter 6 : Timing Measurements
               4>  call to rcu_check_callbacks() to checks whether this CPU is in a non-context-switch
                   quiescent state.
                   if no rcu pending on this CPU,do nothing.
-                  if @user_tick == 1 OR (current CPU is idel AND rcu active AND not in softirq  AND
+                  if @user_tick == 1 OR (current CPU is idle AND rcu active AND not in softirq  AND
                   hardirq_count() <= (1 << HARDIRQ_SHIFT))
                   then note a sched quiescent state and a bottom-half quiescent state.
                   if not in softirq,then note a bottom-half quiescent state only.
@@ -9168,7 +9186,7 @@ Chapter 6 : Timing Measurements
             *                                               ( it := @new_timer->expires)
             *    queue this @new_timer to the tail of the @base,which list to place is depend on
             *    @new_timer->expires - @base->timer_jiffies,use the result to determin time vector.
-            *    wake up idel CPUs to make them check condition to determine need to reevaluate 
+            *    wake up idle CPUs to make them check condition to determine need to reevaluate 
             *    the timer wheel when nohz is active.
             */
            extern void add_timer_on(struct timer_list *timer, int cpu);
@@ -10082,7 +10100,7 @@ Chapter 7 :
           !!  HAVE TO BE AWARE CLEARLY THAT struct rq IS ASSOCIATED TO THE CPU,NOT TO THE PROCESS.WHEN SELECT
               A CPU FOR PROCESS,THAT IS SELECT A RUNQUEUE OF THE CPU FOR PROCESS,THE PROCESS WILL RESIDE ON IT.
           !!  HAVE TO BE AWARE CLEARLY THE DIFFERENCE BETWEEN 
-                @rq->curr(CURRENT RUNNING OF RUNQUEUE)
+                @rq->curr(CURRENT RUNNING TASK OF RUNQUEUE)
                 @current(THIS THREAD)
                 @p(TASK)
 
@@ -10391,7 +10409,7 @@ Chapter 7 :
               11> set @p to TASK_RUNNING.(@p is runnable,now)
               == CONFIG_SMP ==
               12> call to @p->sched_class->task_woken() if it is not NULL.
-                  if @rq->idel_stamp != 0,then update @rq->avg_idel.
+                  if @rq->idle_stamp != 0,then update @rq->avg_idle.
               == CONFIG_SMP - END ==
               13> unlock @rq,enable interrupt then put cpu and return.
 
@@ -10478,6 +10496,129 @@ Chapter 7 :
              *   if task is RT or boosted to RT prioriry.
              */
             static int effective_prio(struct task_struct *p);
+
+        The schedule() function :
+          the linux scheduler enter point.it must to find out a process in rq and assign the CPU
+          to it.it is invoked by several kernel routines directly or in a lzay way(deferred).
+
+          <linux/sched.h>
+            /* __sched - indicates the following text is reside on section ".sched.text" */
+            #define __sched __attribute__((__section__(".sched.text")))
+
+            /**
+             * schedule - the linux scheduler enter point
+             * # asmlinkage __sched schedule(void) { ... } EXPORT_SYMBOL(schedule);  
+            asmlinkage void schedule(void);
+
+          direct invocation :
+            called from @current,because the resource it needs is not available now,the process
+            would be blocked until the resource is available.
+            the following steps @current have to do :
+              1>  enqueue itself into an appropriate wait queue.
+              2>  set process state to TASK_UNINTERRUPTIBLE or TASK_INTERRUPTIBLE.
+              3>  call to schedule().
+              4>  check whether resource is available now. /* selected by scheduler */
+                  if it is not,goto 2>                     /* continues right after 3> */
+                                                           /* scheduler set process to */
+                                                           /* TASK_RUNNING */
+              5>  dequeue itself from the wait queue.
+
+          lazy invocation :
+            invoked by set TIF_NEED_RESCHED flag of @current.
+            a check on the value of this flag is always made before resuming the execution of
+            a User Mode process,schedule() will definitely be invoked at some time in the
+            near future.
+
+            lazy invocation instances :
+              >  scheduler_tick(),@current has used up its quantum of CPU.
+              >  a process is woken up by try_to_wake_up(),and it has higher priority than
+                 @current,then TIF_NEED_RESCHED of @rq->curr is set by resched_task().
+              >  when a sched_setscheduler() system call is issued.
+
+          what to do before context switch :
+            1>  disable preemption.
+                retrieve @rq of this CPU.
+            2>  save @rq->curr in a local variable.
+                release the locks had holden by @prev.
+            3>  call to schedule_debug(@prev) to do time-debugging checks and statistics.
+                if kernel control path is not atomic with preempt off currently AND
+                   @prev is not in exit state
+                   /* do_exit() call to schedule() atomically */
+                then
+                        scheduling bug occurred
+                        call to __schedule_bug(@prev) to print scheduling info
+                else
+                        increase this_rq()->@sched_count
+                        #ifdef CONFIG_SCHEDSTATS
+                        AND @prev->lock_depth >= 0
+                        then
+                                increase this_rq()->@bkl_count
+                                increaase @prev->sched_info.bkl_count
+
+            4>  if scheduler feature HRTICK is enabled
+                then
+                        call to hrtick_clear(@rq) to cancel @rq->hrtick_timer,if it is
+                        active
+            5>  raw spin lock irq to @rq->lock,update @rq's clock,disable TID_NEED_RESCHED of 
+                @prev
+            6>  check if @prev is not in TASK_RUNNING and preemption is disabled,
+                if it is,then check if @prev in signal pending state.
+                if @prev is signal pending,then set @prev to TASK_RUNNING,
+                otherwise,deactivate @prev.
+                set unsigned long pointer @switch_count to @prev->nivcsw.
+            7>  call to pre_schedule(@rq, @prev).
+                it is a wrapper of function pre_schedule() of @prev's sched class.
+            8>  if @rq no running process is exist,then call to idle_balance().
+                idle_balance() is defined in <kernel/sched_fair.c>,which is used to
+                pull tasks from other CPUs if the CPU(its parameter) is going to idle.
+                /* BUT idle_balance() IS A STATIC FUNCTION WITHOUT EXPORT SYMBOL */
+            9>  put @prev task.
+                if @prev is TASK_RUNNING,then have to updates the time data related to scheduling
+                of it.
+                call to sched call put_prev_task() before return.
+            10> pick next task through pick_next_task(@rq).
+                it select the next task from robin-tree of @rq.
+            11> if @prev != @next
+                then
+                        process sched info switch between @prev and @next
+                        sign a performance event about to task sched out
+                        increase @rq->nr_switches
+                        set @rq->curr to @next,it as the current process of @rq
+                        increase *@switch_count /* @prev->nivcsw */
+
+            /**
+             * above are the works did by schedule() before context_switch().
+             * context_switch() finally would call to architecture depend function switch_to().
+             * what the context_switch() does has described in Chapter 3 Processes :: Process Switch.
+             */
+
+          what to do after context switch :
+            12> after context_switch(),update @cpu and @rq of @cpu.
+            13> if @prev == @next,that means no other task in @rq should be selected to run.
+                call to raw_spin_unlock_irq(@rq->lock) to release lock.
+            14> call to post_schedule(@rq).
+                call this function without @rq->lock hold and preempt disabled.
+                it checks if @rq->post_schedule is TRUE?
+                if it is
+                then
+                        acquire @rq->lock with interrupt disabled
+                        if the function post_schedule() of sched class of @rq->curr is not NULL,
+                        then call to it
+                        release @rq->lock and enable interrupt
+                        set @rq->post_schedule to 0
+                /* post_schedule() is correspond to pre_schedule() */
+            15> if reacquire_kernel_lock(@current) < 0 => if failed to reacquire kernel locks
+                then
+                        set @prev := @rq->curr
+                        set @switch_count := &@prev->nivcsw
+                        goto need_resched_nonpreemptible(3>)
+            16> enable preempt without resched.
+            17> if need_resched() is TRUE? => @current's thread flag
+                => (struct thread_info *)(asm("esp") & ~(THREAD_SIZE - 1)) :: TIF_NEED_RESCHED is on
+                   /* process's thread_info object is saved in kernel stack of the process */
+                if it is
+                then
+                        goto need_resched(1>)
 
     System Calls Related to Scheduling
                
