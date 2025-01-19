@@ -10620,5 +10620,152 @@ Chapter 7 :
                 then
                         goto need_resched(1>)
 
+      Runqueue Balancing in Multiprocessor Systems :
+        three types of multiprocessor machines :
+          1>  classic multiprocessor architecture
+                all CPUs share a common set of RAM chips.
+          2>  hyper-threading
+                invented by Intel.
+                a hyper-threaded chip is a microprocessor that executes
+                several threads of execution at once.
+                includes several copies of internal registers,and quickly switches between them.
+                deal with another thread when current thread is stalled for memory access.
+                Linux considers a hyper-threaded physical CPU as several different logical CPUs.
+          3>  NUMA
+                CPUs and RAM chips are grouped in local "nodes"(usually,one CPU with several RAM chips).
+                CPU access to the RAM chips inside the local node is little or no contention,and fast;
+                CPU access to the RAM chips outside to the local node(remote node) is slower.
+                /* Memory arbiter is the bottleneck for Classic Multiprocessor Architecture */
+
+        For SMP,a CPU can only run the runnable process inside the runqueue of its owns,that is,a runnable
+        process is always stored in exactly one runqueue - no runnable process ever appears in two or more
+        runqueues(task bind to CPU,if it remains runnable).
+        /* task bind to CPU may induce a severe performance penaly - CPU overloaded */
+
+        runqueue balancing : if necessay,move the processes in a overloaded runqueue to another of other CPU.
+                             load balancing algorithm should take into consideration the topology of the CPUs
+                             in the system.
+                             since Linux 2.6.7,algorithm based on the notion of "scheduling domains".
+                             /**
+                              * easily tune for all kinds of existing multiprocess architecture,include
+                              * multi-core architecture.
+                              */
+
+        Scheduling Domains :
+
+          <linux/sched.h>
+            /* scheduling domain flags */
+            #ifdef CONFIG_SMP
+
+            #define SD_LOAD_BALANCE         0X0001  /* do load balancing on this domain */
+            #define SD_BALANCE_NEWIDLE      0x0002  /* balance when about to become idle */
+            #define SD_BALANCE_EXEC         0x0004  /* balance on exec */
+            #define SD_BALANCE_FORK         0x0008  /* balance on fork,clone */
+            #define SD_BALANCE_WAKE         0x0010  /* balance on wakeup */
+            #define SD_WAKE_AFFINE          0x0020  /* wake task to waking CPU */
+            #define SD_PREFER_LOCAL         0x0040  /* prefer to keep tasks local to this domain */
+            #define SD_SHARE_CPUPOWER       0x0080  /* domain members share CPU power */
+            #define SD_POWERSAVINGS_BALANCE 0x0100  /* balance for power savings */
+            #define SD_SHARE_PKG_RESOURCES  0x0200  /* domain members share cpu pkg resources */
+            #define SD_SERIALIZE            0x0400  /* only a single load balancing instance */
+
+            #endif
+
+            /* scheduling domain levels */
+            enum sched_domain_level {
+                    SD_LV_NONE = 0,
+                    SD_LV_SIBLING,
+                    SD_LV_MC,
+                    SD_LV_CPU,
+                    SD_LV_NODE,
+                    SD_LV_ALLNODES,
+                    SD_LV_MAX
+            };
+
+            /**
+             * sched_group - structure sched_group used to represent a group of
+             *               sched_domain instances
+             * @next:        next scheduling domain group
+             * @cpu_power:   CPU power of this group,SCHED_LOAD_SCALE being max power
+             *               for a single CPU
+             * @cpumask:     the CPUs this group covers
+             *               NOTE : this filed is variable length alike to
+             *                      struct sched_domain.@span
+             */
+            struct sched_group {
+                    struct sched_group *next;
+                    unsigned int cpu_power;
+                    unsigned long cpumask[0];
+            };
+
+            /**
+             * sched_domain - structure sched_domain represent the scheduling domain used by Linux
+             *                load balancing algorithm
+             * @parent:       parent of this domain
+             * @child:        child of this domain
+             * @groups:       groups this domain belong to
+             * @min_interval: minimum balance interval in ms
+             * @max_interval: maximum balance interval in ms
+             * @busy_factor:  less balancing by factor if busy
+             * @imbalance_pct: no balance until over watermark
+             * @cache_nice_tries: leave cache hot tasks for # tries
+             * @busy_idx:     busy index
+             * @idle_idx:     idle index
+             * @newidle_idx:  new idle index
+             * @wake_idx:     wake index
+             * @forkexec_idx: fork execution iindex
+             * @smt_gain:     SMT Hyper-Threading support - Simulate MultiThreading
+             * @flags:        scheduling domain flag
+             * @level:        scheduling domain level
+             * @last_balance: jiffies for the last balance
+             * @balance_interval: balance interval in ms
+             * @nr_balance_failed: number of balance failed
+             * @last_update:  jiffies for the last scheduling domain info updating
+             * @span:         span of all CPUs in this domain
+             *                NOTE : this filed is variable length.
+             *                       allocated dynamically by attaching extra space to
+             *                       the end of the structure,depending on how many CPUs
+             *                       the kernel has booted up with.
+             *                       # it is also be embedded into static data structures
+             *                         at build time.
+             */
+            struct sched_domain {
+                    /* these fields must be setup */
+                    struct sched_domain *parent;
+                    struct sched_domain *child;
+                    struct sched_group *groups;
+                    unsigned long min_interval;
+                    unsigned long max_interval;
+                    unsigned int busy_factor;
+                    unsigned int imbalance_pct;
+                    unsigned int cache_nice_tries;
+                    unsigned int busy_idx;
+                    unsigned int idle_idx;
+                    unsigned int newidle_idx;
+                    unsigned int wake_idx;
+                    unsigned int forkexec_idx;
+                    unsigned int smt_gain;
+                    int flags;
+                    enum sched_domain_level level;
+
+                    /* runtime fields */
+                    unsigned long last_balance;
+                    unsigned int balance_interval;
+                    unsigned int nr_balance_failed;
+
+            #ifdef CONFIG_SCHEDSTATS
+                    ...
+            #endif
+            #ifdef CONFIG_SCHED_DEBUG
+                    ...
+            #endif
+                
+                    unsigned long span[0];
+            };
+        
+                
+               
+                
+
     System Calls Related to Scheduling
                
