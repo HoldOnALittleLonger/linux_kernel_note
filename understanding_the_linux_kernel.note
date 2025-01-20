@@ -8681,6 +8681,9 @@ Chapter 6 : Timing Measurements
              !!  IF THE TICK DEVICE HAVE NONE OF CLOCK EVENT DEVICE NOW,THEN CAN NOT SET IT AS AN ONESHOT
                  TICK DEVICE,THUS ITS WORK MODE WILL AUTOMATICALLY SET TO TICKDEV_MODE_PERIODIC.
 
+             !!  CONFIG_NO_HZ => dynamic clock (nohz)
+                                 allow to stop periodic clock when system is in idle state
+
           <kernel/time/tick-common.c>
             /**
              * tick_handle_periodic - the common periodic tick handler
@@ -10652,6 +10655,48 @@ Chapter 7 :
                               */
 
         Scheduling Domains :
+          essentially,a scheduling domain is a set of CPUs whose workloads should be kept balanced by the
+          kernel.
+          scheduling domains are hierarchically organized :
+                  the top scheduling domain {
+                          span all CPUs in the system
+
+                          child scheduling domain {
+                                  span CPU0, CPU1, CPU2
+
+                                  child scheduling domain {
+                                          span CPU0
+                                  }
+
+                                  child scheduling domain {
+                                          span CPU1, CPU2
+                                  }
+
+                          }
+
+                          child scheduling domain {
+                                  span CPU3
+                          }
+
+                          child scheduling domain {
+                                  span CPU4, CPU5, CPU6, CPU7
+
+                                  ...
+                          }
+                          
+                          ...
+                  }
+          every scheduling domain is partitioned in one or more groups,each of which represents a subset
+          of the CPUs of the scheduling domain.workload balancing is always done between groups of a 
+          scheduling domain.
+          /**
+           *
+           * @phys_domains @sched_group_phys     group1                group2
+           * tsd : { CPU0, CPU1, CPU2, CPU3 } => csd1 : { CPU0, CPU 1} csd2 : { CPU2, CPU3 }
+           * @p->CPU0
+           * balance @p : move @p to CPU2
+           * => if and only if group1.workload > group2.workload
+           */          
 
           <linux/sched.h>
             /* scheduling domain flags */
@@ -10762,10 +10807,119 @@ Chapter 7 :
                 
                     unsigned long span[0];
             };
-        
-                
-               
-                
+
+          <kernel/sched.h>
+            /**
+             * static_sched_group - structure static_sched_group used to
+             *                      define per-CPU variable @sched_group_phys
+             * @sg:                 the group @cpus belong to
+             * @cpus:               cpu bitmap
+             */
+            struct static_sched_group {
+                    struct sched_group sg;
+                    DECLARE_BITMAP(cpus, CONFIG_NR_CPUS);
+            };
+
+            /**
+             * static_sched_domain - structure static_sched_domain used to
+             *                       define per-CPU variable @phys_domains
+             * @sd:                  the scheduling domain @span belong to
+             * @span:                cpu bitmap
+             */
+            struct static_sched_domain {
+                    struct sched_domain sd;
+                    DECLARE_BITMAP(span, CONFIG_NR_CPUS);
+            }
+
+            /* phys_domains - represent physical CPUs scheduling domain */
+            static DEFINE_PER_CPU(struct static_sched_domain, phys_domains);
+
+            /* sched_group_phys - represent the group of physical CPUs scheduling domain */
+            static DEFINE_PER_CPU(struct static_sched_group, sched_group_phys);
+
+          @phys_domains => the top scheduling domain  /* span all physical CPUs */
+          @sched_group_phys => the group of the top scheduling domain
+
+          The rebalance_tick() function :
+            !!  LINUX 2.6.34.1 HAS NO SUCH FUNCTION WAS DEFINED.
+                INSTEAD,WORKLOAD REBALANCING IS TRIGGERED IN FUNCTION scheduler_tick() IF
+                NECESSARY WITH CONFIG_SMP DEFINED.
+                FUNCTION trigger_load_balance(@rq, @cpu) IS USED TO TRIGGER REBALANCING.
+                /* @cpu => smp_processor_id() @rq => cpu_rq(@cpu) */
+
+            /* based on cfs */
+            <kernel/sched_fair.c>
+              /**
+               * trigger_load_balance - trigger softirq SCHED_SOFTIRQ to mark load 
+               *                        rebalance
+               * @rq:                   this rq
+               * @cpu:                  the cpu is processing scheduler_tick()
+               *
+               * # to check if this @cpu is need to be rebalanced.
+               *   if @jiffies time_after_eq @rq->next_balance AND
+               *      cpu_rq(@cpu)->sd != NULL
+               *   then
+               *           raise_softirq(SCHED_SOFTIRQ);
+               * ! if defined CONFIG_NO_HZ,the checking will be more complicated.
+               *   it is the place where to nominate a new idle load balancing owner,
+               *   or decide to stop the periodic load balancing if the whole system
+               *   is idle.
+               */
+              static inline void trigger_load_balance(struct rq *rq, int cpu);
+
+              #ifdef CONFIG_NO_HZ
+              /**
+               * nohz - idle load balancing recorder when periodic ticking is stopped
+               * @load_balancer:        load balancer for nohz mode
+               * @cpu_mask:             cpumask for idle CPUs
+               * @ilb_grp_nohz_mask:    mask of groups of scheduling domains the CPUs
+               *                        inside them appropriate to be nominated as
+               *                        @load_balancer
+               */
+              static struct {
+                      atomic_t load_balancer;
+                      cpumask_var_t cpu_mask;
+                      cpumask_var_t ilb_grp_nohz_mask;
+              } nohz ____cacheline_aligned = {
+                      .load_balancer = ATOMIC_INIT(-1),
+              };
+              ...
+              #endif
+
+              what trigger_load_balance() to does with CONFIG_NO_HZ :
+                1>  if @rq recently in nohz mode AND this cpu is not idle at this tick
+                    then
+                            set @rq->in_nohz_recently := 0
+                            check if @nohz.load_balancer == cpu
+                            /* this cpu is nominated to does load balancing for all CPUs */
+                                    clear this cpu from @nohz.cpu_mask
+                                    set @nohz.load_balancer := -1
+                                    /* this cpu is no longer be the load balancer,busy now */
+                            check if @nohz.load_balancer == -1
+                                    find a new idle load balancing cpu
+                                    if @ilb < @nr_cpu_ids /* unfound */
+                                            call to resched_cpu(@ilb)
+                                            /* set TIF_NEED_RESCHED for cpu_rq(@ilb)->curr */
+                2>  if @rq is idle at this tick => this cpu is idle AND
+                       @nohz.load_balancer == @cpu AND
+                       cpumask_weight(@nohz.cpu_mask) == num_online_cpus()
+                    then
+                            resched_cpu(@cpu)
+                            return
+                            /**
+                             * this cpu is idle and doing idle load balancing for all the
+                             * cpus with ticks stopped.
+                             */
+                3>  if @rq is idle at this tick AND
+                       @nohz.load_balancer != @cpu AND
+                       cpumask_test_cpu(@cpu, @nohz.cpu_mask)
+                    then
+                            just return
+                            /**
+                             * this cpu is idle and the idle load balancing is done by someone,
+                             * no need to raise the SCHED_SOFTIRQ.
+                             */
+                           
 
     System Calls Related to Scheduling
                
