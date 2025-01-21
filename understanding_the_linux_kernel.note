@@ -10195,7 +10195,7 @@ Chapter 7 :
             task@r pick_next_task   @rq
             put_prev_task           @rq @p
 
-          == CONFIG_SMP ==
+          #ifdef CONFIG_SMP
             i@r select_task_rq      @p i@sd_flag i@flags
             pre_schedule            @this_rq @task
             post_schedule           @this_rq
@@ -10204,7 +10204,7 @@ Chapter 7 :
             set_cpus_allowed        @p const@cpumask*@newmask
             rq_online               @rq
             rq_offline              @rq
-          == CONFIG_SMP - END ==
+          #endif /*CONFIG_SMP */
 
             set_curr_task           @rq
             task_tick               @rq @p i@queued
@@ -10214,9 +10214,9 @@ Chapter 7 :
             prio_changed            @this_rq @task i@oldprio i@running
             ui@r get_rr_interval    @rq @task
            
-          == CONFIG_FAIR_GROUP_SCHED ==
+          #ifdef CONFIG_FAIR_GROUP_SCHED
             moved_group             @p i@on_rq
-          == CONFIG_FAIR_GROUP_SCHED - END ==
+          #endif /* CONFIG_FAIR_GROUP_SCHED */  
 
           These primitives are setup by scheduler initializing routine.Because Linux 2.6.34.1 introuduced CFS -
           - Completely Fair Scheduler,thus the sched_class in kernel is set to cfs class in normally.
@@ -10287,13 +10287,13 @@ Chapter 7 :
               7>  release runqueue lock.
               8>  call to perf_event_task_tick(@curr) sign a performance event associated
                   with task tick.
-              == CONFIG_SMP ==
+              #ifdef CONFIG_SMP
               9>  call to idle_cpu(cpu) to check whether local cpu is idle.
                   @rq->idle_at_tick = 1 => local cpu is idle
                                       0 => local cpu is busy
               10> trigger load balance on "this" runqueue with local cpu.
                   arise SCHED_SOFTIRQ if it is time to do periodic load balancing.
-              == CONFIG_SMP - END ==
+              #endif /* CONFIG_SMP */
 
             local cpu maybe idle even its runqueue is not empty(CPU hyper-threading technology)
 
@@ -10345,7 +10345,7 @@ Chapter 7 :
                    */
               5>  save local CPU id,because on SMP,task maybe migrated to another CPU
                   by load balancing.
-              == CONFIG_SMP ==
+              #ifdef CONFIG_SMP
               6>  if task is already active,then goto "out_activate"
                   else
                           fix up the @nr_uninterruptible count of this @rq,
@@ -10379,7 +10379,7 @@ Chapter 7 :
                           updates schedule statistic @rq->ttwu_count,and if it is
                           necessary,update @rq->ttwu_local @rq->ttwu_wake_remote,
                           too.
-              == CONFIG_SMP - END ==
+              #endif /* CONFIG_SMP */
             "out_activate":
               7>  increase schedule statistics @p->se.nr_wakeups.
                   if WF_SYNC then increase @p->se.nr_wakeups_sync.
@@ -10410,10 +10410,10 @@ Chapter 7 :
                    * rescheduling on the target CPU(@task's CPU).
                    */
               11> set @p to TASK_RUNNING.(@p is runnable,now)
-              == CONFIG_SMP ==
+              #ifdef CONFIG_SMP
               12> call to @p->sched_class->task_woken() if it is not NULL.
                   if @rq->idle_stamp != 0,then update @rq->avg_idle.
-              == CONFIG_SMP - END ==
+              #endif /* CONFIG_SMP */
               13> unlock @rq,enable interrupt then put cpu and return.
 
         The recalc_task_prio() function :
@@ -10919,7 +10919,171 @@ Chapter 7 :
                              * this cpu is idle and the idle load balancing is done by someone,
                              * no need to raise the SCHED_SOFTIRQ.
                              */
-                           
+
+          The run_rebalance_domains() function :
+            function run_rebalance_domains() defined in <kernel/sched_fair.c> is the softirq handler
+            for SCHED_SOFTIRQ which is registered by function sched_init() defined in <kernel/sched.c>.
+            if necessay,trigger_load_balance() may raise such softirq from scheduler_tick().
+
+            <kernel/sched_fair.c>
+              /**
+               * run_rebalance_domains - ISR for softirq SCHED_SOFTIRQ
+               *                         it is used to deal with workload rebalancing
+               * @h:                     softirq action
+               */
+              static void run_rebalance_domains(struct softirq_action *h);
+
+              what run_rebalance_domains() does :
+                1>  retrieve local CPU id.
+                    use the CPU id to retrieve @runqueues.
+                    declare a enum type cpu_idle_type variable named @idle,
+                    if @this_rq->idle_at_tick => T
+                    then @idle := CPU_IDLE       /* this cpu is idle */
+                    else @idle := CPU_NOT_IDLE   /* this cpu is busy */
+                                  /* the possible values for such enum type */
+
+                2>  call to auxiliary routine rebalance_domains(@this_cpu, @idle).
+                #ifdef CONFIG_NO_HZ
+                3> if this cpu is the owner for idle load balancing,then do the
+                   balancing on behalf of the other idle cpus whose ticks are stopped.
+                   if @this_rq->idle_at_tick AND @nohz.load_balancer == this_cpu
+                   then
+                           for each cpu in the @nohz.cpu_mask
+                                   check if balance cpu is this cpu
+                                           T => continue to next cycle
+                                   check if need_resched() is true,that is @rq->curr
+                                   has flag TIF_NEED_RESCHED
+                                           break
+                                   call to rebalance_domains(the approriate cpu, CPU_IDLE)
+                                   let the @cpu to does the scheduling domain rebalancing
+                                   /**
+                                    * let the @cpu does load balancing,because it is idle
+                                    * now,so scheduler can migrate some tasks in the same
+                                    * group of another CPU(runqueues) to this cpu.
+                                    */
+
+                                   update local variable @rq through cpu_rq(@balance_cpu)
+                                   check if @this_rq->next_balance time after @rq->next_balance
+                                   then
+                                           update @this_rq->next_balance to @rq->next_balance
+                #endif /* CONFIG_NO_HZ */
+
+          The rebalance_domains() function :
+            this function checks each scheduling domain to see if it is due to be balanced,
+            and initiates a balancing operation if so.
+
+            <kernel/sched_fair.c>
+              /**
+               * rebalance_domains - auxiliary routine of run_rebalance_domains(),
+               *                     does the real rebalancing for scheduling domains
+               * @cpu:               the cpu to does rebalancing
+               * @idle:              cpu state => CPU_IDLE OR CPU_NOT_IDLE
+               * # balancing paramters are set up in arch_init_sched_domains().
+               */
+              static void rebalance_domains(int cpu, enum cpu_idle_type idle);
+
+              what rebalance_domains() does :
+                1>  retrieve the runqueue associated with @cpu.
+                    initializes local variable @next_balance to @jiffies + 60 * HZ
+                    as the record.
+                    initializes local variable @balance to 1.
+                    initializes local variable @update_next_balance to 0.
+                2>  traverse all domains through macro for_each_domain(the cpu, the scheduling domain).
+                    this macro function is defined in <kernel/sched.c>,it traverse up to the top
+                    scheduling domain.
+                3>  in the cycle of for each domain : (the initial value of @sd is cpu_rq(@cpu)->sd)
+                      if @sd->flags & SD_LOAD_BALANCE => F
+                      then
+                              continue to next cycle
+                              /* this scheduling domain does not need load balancing */
+
+                      set local variable @interval to @sd->balance_interval
+                      check if @idle != CPU_IDLE is true
+                      then
+                              set @interval *= @sd->busy_factor
+                              /* @cpu is not idle,then set @interval to an empirical value */
+                      convert @interval(ms) to jiffies
+                      check if @interval is zero,then set @it to 1
+                      check if @interval > HZ * NR_CPUS / 10,if it is,set @interval to the result
+
+                      set local variable @need_serialize to @sd->flags & SD_SERIALIZE
+                      /* indicator used to tell whether need to lock the balancing spin lock */
+                      try to lock spin lock @balancing if @need_serialize is TRUE,if failed to
+                      lock,then goto out /* serializing required but failed to acquire lock */
+
+                      check if @jiffies time after or equal to @sd->last_balance + @interval
+                      => T    /* it is time to do rebalancing */
+                              call to load_balance(@cpu, @rq, @sd, @idle, &@balance)
+                              if the return value is TRUE,then update @idle CPU_NOT_IDLE
+                              set @sd->last_balance to @jiffies
+                              /**
+                               * return value is TRUE,means the tasks had pulled over,
+                               * so the @cpu is no longer idle,or one of SMT siblings is
+                               * not idle.
+                               */
+                      if @need_serialize is TRUE,then unlock the spin lock
+                  out:
+
+                      check if @next_balance time after @sd->last_balance + @interval
+                      => T
+                              update @next_balance to @sd->last_balance + @interval
+                              set @update_next_balance to 1
+
+                      check if @balance is false
+                      => T
+                              break  /* stop the load balance at this level */
+                              /**
+                               * @balance is past by address to load_balance(),if @balance
+                               * is false now,then there is another CPU in the sched group
+                               * which is doing load balancing more actively.
+                               */
+                      next cycle :
+                4>  check if @update_next_balance is T
+                    => T
+                            set @rq->next_balance to @next_balance
+                            /* the next timepoint to does workload balancing for @rq */
+
+          The load_balance() function :
+            this function called by rebalance_domains() to check this_cpu to ensure it is 
+            balanced within domain.if imbalance have detected,then attempt to move tasks.
+
+            <kernel/sched_fair.c>
+              /**
+               * load_balance - check if this cpu is balanced,try to move tasks if imbalance
+               *                detected
+               * @this_cpu:     this cpu to check
+               * @this_rq:      runqueue of this cpu
+               * @sd:           the domain at current level
+               * @idle:         idle state of this cpu
+               * @balance:      indicator used to tell caller if there is anoter CPU active
+               * return:        the number of tasks they have moved
+               */
+              static int load_balance(int this_cpu, struct rq *this_rq,
+                                      struct sched_domain *sd, enum cpu_idle_type idle,
+                                      int *balance);
+
+          The move_tasks() function :
+            the function move tasks from a busiest runqueue to another lower-load runqueue
+            within scheduling domains.
+
+            <kernel/sched_fair.c>
+              /**
+               * move_tasks - migrate tasks
+               * @this_rq:    this rq of this cpu
+               * @this_cpu:   this cpu is the cpu nomimated to does load balancing
+               * @busiest:    the busiest runqueue in the same scheduling domain
+               * @max_load_move:  the maximum number of tasks allowed to be migrated
+               * @sd:         the scheduling domain of current level
+               * @idle:       state of this cpu
+               * @all_pinned: indicator used to tell whether all tasks pinned by CPU
+               *              affinity
+               * return:      if total load moved is greater than zero
+               * # this function call to the schedule class associated load balance
+               *   routine,for cfs,it is load_balance_fair().
+               */
+              static int move_tasks(struct rq *this_rq, int this_cpu, struct rq *busiest,
+                                    unsigned long max_load_move, struct sched_domain *sd,
+                                    enum cpu_idle_type idle, int *all_pinned);
 
     System Calls Related to Scheduling
                
