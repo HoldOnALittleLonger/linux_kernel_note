@@ -10686,6 +10686,9 @@ Chapter 7 :
                           
                           ...
                   }
+          !!  base domain => the scheduling domain at the bottom of a scheduling domain
+                             it usually span one CPU
+                             
           every scheduling domain is partitioned in one or more groups,each of which represents a subset
           of the CPUs of the scheduling domain.workload balancing is always done between groups of a 
           scheduling domain.
@@ -11062,6 +11065,169 @@ Chapter 7 :
                                       struct sched_domain *sd, enum cpu_idle_type idle,
                                       int *balance);
 
+              what load_balance() does :
+                1>  initializes local variables :
+                      @all_pinned := 0 => whether the tasks is pinned on a CPU
+                      @active_balance := 0 => indicate balancing is active
+                      @sd_idle := 0 => indicates the scheduling domain at this level is idle
+                      @ld_moved := unspecified => tell how many tasks load_balance() moved
+                2>  get per-CPU variable @load_balance_tmpmask is type of cpumask_var_t to
+                    @cpus.
+                    copy @cpus to @cpu_active_mask(activated cpus in this system).
+                                  /* defined in <kernel/cpu.c> with EXPORT_SYMBOL */
+                3>  check if this cpu is idle AND
+                             @sd->flags set SD_SHARE_CPUPOWER AND
+                             @sd->parent unset SD_POWERSAVINGS_BALANCE
+                    then
+                            @sd_idle := 1 => this scheduling idle is idle now
+                                             even there maybe slibing is busy
+                            /**
+                             * parent sd enabled power savings policy.
+                             * idle sibling can pick up load irrespective of busy siblings.
+                             * idle sibling percolate up state as CPU_IDLE.
+                             */
+                4>  increase @sd->lb_count[@idle].
+                                  /* load balance statistics */
+           redo:
+                5>  call to update_shares(@sd),update @sd->last_update and call to walk_tg_tree() with
+                    @tg_nop(@down) @tg_shares_up(@up) @sd(@tree),if necessary.
+                    /**
+                     * walk_tg_tree() => iterate full tree
+                     *                   call to @down when first entering a node
+                     *                   call to @up when leave it for the final time
+                     * tg_shares_up(task group, the data)
+                     * =>  re-compute the task group their per cpu shares over the given domain
+                     */
+                6>  find the busiest group through find_busiest_group(),@balance will pass to it.
+                    check if *@balance => false
+                    then
+                            goto out_balanced /* no busiest group */
+                    check if @group => true
+                    then
+                            increase @sd->ld_nobusyg[@idle]
+                            goto out_balanced
+                7>  find busiest runqueue through find_busiest_queue().
+                    check if @busiest => false
+                    then
+                            increase @sd->lb_nobusyq[@idle]
+                            goto out_balanced
+                8>  add @imbalance(set by find_busiest_queue()) to @sd->lb_imbalance[@idle]
+                    set @ld_moved to zero ready for moving
+                9>  check if @busiest->nr_running > 1
+                    then
+                            do tasks moving :  /* another task in @busiest */
+                                    disable local interrupt
+                                    lock @this_rq and @busiest
+                                    call to move_tasks(@this_rq, @this_cpu, @busiest,
+                                                       @imbalance, @sd, @idle, &@all_pinned)
+                                    set @ld_moved to the return value
+                                    release locks
+                                    enable local interrupt
+                            check if @ld_moved => true AND
+                                     @this_cpu != smp_processor_id()
+                            then
+                                    set TIF_NEED_RESCHED for cpu_rq(@this_cpu)->curr
+                                    /**
+                                     * some other cpu did the load balance.
+                                     * task moved,so it is possible to encounter the case
+                                     * @this_cpu != smp_processor_id()
+                                     * @this_cpu is selected to do load balance,
+                                     * but another one have done it.
+                                     */
+                            check if @all_pinned => true
+                            then
+                                    /* all tasks on this runqueue were pinned by CPU affinity */
+                                    call to cpumask_clear_cpu() to remove the cpu of
+                                    @busiest from @cpus
+                                    check if @cpus is NULL
+                                    then
+                                            goto redo
+                                            /**
+                                             * after removed the cpu of @busiest,we
+                                             * encountered no cpu is working for
+                                             * loadl balance.
+                                             * we need re-do it.
+                                             */
+                                    else
+                                            goto out_balanced
+                10> check if @ld_moved => zero
+                    then
+                            update load balance statistics
+                            /**
+                             * failed to done load balance,no tasks moved even there
+                             * is a busiest runqueue.
+                             */
+                            if need to active balance for @sd,then acquire @busiest->lock with
+                            local interrupt disabled,and check if the @curr task on @busiest
+                            cpu cannot be moved to @this_cpu,then release lock and enable
+                            local interrupt,set @all_pinned to 1(can not be moved),finally
+                            goto out_one_pinned.
+
+                            if @busiest do not active balance,then set @busiest->active_balance
+                            to 1(some task of @busiest need to be moved),and push @this_cpu to
+                            @busiest->push_cpu,finally,set @active_balance to 1.
+
+                            release @busiest->lock and enable local interrupt.
+                            check if @active_balance => true
+                            then
+                                    wake up @busiest->migration_thread
+                                    /**
+                                     * the @migration_thread walks the chain of the scheduling domain,
+                                     * from the base domain of the @busiest to the top domain,looking
+                                     * for an idle CPU.if found,invoke move_tasks() to move one
+                                     * process into the idle runqueue.
+                                     */
+                            set @sd->nr_balance_failed := @sd->cache_nice_tries + 1
+                    else
+                            set @sd->nr_balance_failed to 0
+                            /* @ld_moved > 0 => task moved */
+                11> check if @active_balance => false
+                    then
+                            set @sd->balance_interval to @sd->min_interval
+                            /**
+                             * time interval for @sd to balance
+                             */
+                    else
+                            check if @sd->balance_interval < @sd->max_interval
+                            then
+                                    set @sd->balance_interval *= 2
+                12> check if @ld_moved => zero AND
+                             @sd_idle => zero AND
+                             @sd->flags set @sd_SHARE_CPUPOWER AND
+                             @sd'parent does not set SD_POWERSAVINGS_BALANCE
+                    then
+                             /**
+                              * no task moved,and this sd is not idle
+                              * domain members share power and parent does not
+                              * enable power savings
+                              */
+                             set @ld_moved to -1
+                13> goto out
+    out_balanced:
+                14> increase @sd->ld_balanced[@idle]
+                    set @sd->nr_balance_failed to zero
+                    /* load is balanced */
+  out_one_pinned:
+                15> tune up the balancing interval
+                    check if @sd_idle => false AND
+                             @sd->flags set SD_SHARE_CPUPOWER AND
+                             @sd'parent does not set SD_POWERSAVINGS_BALANCE
+                    then
+                            set @ld_moved to -1   /* members share power */
+                    else
+                            set @ld_moved to zero /* move tasks failed */
+             out:
+                16> check if @ld_moved => true /* negative number also is T */
+                    then
+                            call to update_shares(@sd) to update @last_update,
+                            if necessary
+                    return @ld_moved
+                           /**
+                            * -1 => cpu power sharing
+                            * 0  => failed to move tasks
+                            * positive => moved tasks
+                            */
+
           The move_tasks() function :
             the function move tasks from a busiest runqueue to another lower-load runqueue
             within scheduling domains.
@@ -11086,4 +11252,4 @@ Chapter 7 :
                                     enum cpu_idle_type idle, int *all_pinned);
 
     System Calls Related to Scheduling
-               
+
