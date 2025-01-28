@@ -10574,7 +10574,11 @@ Chapter 7 :
             8>  if @rq no running process is exist,then call to idle_balance().
                 idle_balance() is defined in <kernel/sched_fair.c>,which is used to
                 pull tasks from other CPUs if the CPU(its parameter) is going to idle.
-                /* BUT idle_balance() IS A STATIC FUNCTION WITHOUT EXPORT SYMBOL */
+                /**
+                 * pull through move_tasks(),the parameter @idle of it is set to
+                 * CPU_NEWLY_IDLE.
+                 * BUT idle_balance() IS A STATIC FUNCTION WITHOUT EXPORT SYMBOL
+                 */
             9>  put @prev task.
                 if @prev is TASK_RUNNING,then have to updates the time data related to scheduling
                 of it.
@@ -11230,7 +11234,7 @@ Chapter 7 :
 
           The move_tasks() function :
             the function move tasks from a busiest runqueue to another lower-load runqueue
-            within scheduling domains.
+            within scheduling domains(usually,the current load balancing CPU).
 
             <kernel/sched_fair.c>
               /**
@@ -11251,5 +11255,126 @@ Chapter 7 :
                                     unsigned long max_load_move, struct sched_domain *sd,
                                     enum cpu_idle_type idle, int *all_pinned);
 
+              what move_tasks() does :
+                1>  get the best priority of this rq.
+                    that is,the priority of @this_rq->curr.
+                2>  enter do-while cycle,endup if @load_moved is false OR @max_load_move
+                    is less than @total_load_moved.
+                3>  in the do-while cycle :
+                      call to
+                        load_balance_fair(@this_rq, @this_cpu, @busiest,
+                                          @max_load_move - @total_load_moved,
+                                          @sd, @idle, @all_pinned, &@this_best_prio)
+                      update @total_load_moved to @total_load_moved add @load_moved
+
+                #ifdef CONFIG_PREEMPT
+                      check if @idle is CPU_NEWLY_IDLE AND 
+                               @this_rq->nr_running > 0
+                      then
+                              break
+                              /**
+                               * if @idle is equal to CPU_NEWLY_IDLE,it represents
+                               * this function is called from idle_balance(),which is
+                               * called by schedule().
+                               * the CPU entering idle(rq->nr_running == 0),then pull
+                               * tasks.rq->nr_running is zero before,and now,it at least
+                               * one task is running.
+                               */
+                      check if @this_rq->lock or @busiest->lock is contended
+                      then
+                              /* contended => lock->break_lock <-> T */
+                              break
+                              /**
+                               * another process is waiting for the task.
+                               * we have finished once load_balance_fair(),thus
+                               * can free the locks.
+                               */
+                #endif 
+                4>  return @total_load_moved > 0
+
+          The load_balance_fair() function :
+            suppose CONFIG_FAIR_GROUP_SCHED defined.
+
+            <kernel/sched_fair.c>
+              /**
+               * load_balance_fair - load balance for cfs
+               * @this_rq:           the load balance runqueue
+               * @this_cpu:          the load balance cpu
+               * @busiest:           the busiest runqueue of this scheduling domain
+               * @max_load_move:     the maximum number of tasks this function should move
+               * @sd:                the current level scheduling domain
+               * @idle:              cpu state
+               * @all_pinned:        all pinned indicator
+               * @this_best_prio:    the best priority of @this_rq
+               * return:             number of moved tasks
+               */
+              static
+              unsigned long load_balance_fair(struct rq *this_rq, int this_cpu, struct rq *busiest,
+                                              unsigned long max_load_move, struct sched_domain *sd,
+                                              enum cpu_idle_type idle, int *all_pinned,
+                                              int *this_best_prio);
+
+              what load_balance_fair() does :
+                1>  retrieve the busiest CPU,acquire RCU read lock,update h load for this
+                    busiest CPU.
+                2>  traverse all entry in the @task_groups,each is a task group.
+                      retrieve this busiest CPU's cfs_rq
+                      update h load and load weight for this busiest cfs_rq
+                      
+                      check if the @task_weight of the busiest cfs_rq is zero
+                      T =>
+                              continue to next entry
+
+                      updae remain load
+                      /**
+                       * @rem_load = @rem_load_move * @busiest_weight
+                       *             # initialized to @max_load_move before enter cycle
+                       * @rem_load = div_u64(@rem_load, @busiest_h_load + 1)
+                       *                                # prevent zero
+                       */
+
+                      call to balance_tasks() to pull tasks
+                      /**
+                       * balance_tasks() defined in the same file.
+                       * it traverse all tasks in the busiest cfs_rq.
+                       *
+                       * function can_migrate_task() is used to check if the tasks
+                       * in the @busiest runqueue are able to be migrated to another.
+                       * # do not migrate :
+                       *     1>  task is running
+                       *     2>  disallowed CPU @this_cpu
+                       *     3>  hardware cache hot on remote CPU of the task
+                       * # aggressive to migrate :
+                       *     1>  cold cache
+                       *     2>  too many balance attempts have failed
+                       *
+                       * function pull_task() is used to set the @cpu of a task,which
+                       * is defined in the same file.
+                       * # of course,the runqueue of the task it resides to be changed,too.
+                       *   and if necessary,set TIF_NEED_RESCHED for the task.
+                       *
+                       * in the cycle,it may modifies @this_best_prio if there is a new
+                       * process pulled from busiest rq to this rq which has higher prio
+                       * than @this_rq->curr.
+                       *
+                       * #ifdef CONFIG_PREEMPT
+                       * it will checks @idle if equal to CPU_NEWLY_IDLE,if it is,then
+                       * break cycle and return.(for schedule(),just leave current CPU
+                       * is not idle as well,dont care about other sibling domains)
+                       * #endif 
+                       *
+                       * it will set @allpinned to 1,if the tasks pinned on the target
+                       * CPU which we wish to pull tasks from it.
+                       */
+                      check if @moved_load is zero
+                      T =>
+                              continue to next entry
+
+                      convert @moved_load to the number of tasks pulled
+                      @rem_load_move -= @moved_load
+                      break cycle if @rem_load_move less than zero
+                3>  release RCU read lock
+                4>  return @max_load_move - @rem_load_move
+                      
     System Calls Related to Scheduling
 
