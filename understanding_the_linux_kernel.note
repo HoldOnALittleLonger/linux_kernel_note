@@ -11375,6 +11375,128 @@ Chapter 7 :
                       break cycle if @rem_load_move less than zero
                 3>  release RCU read lock
                 4>  return @max_load_move - @rem_load_move
-                      
+
+    CFS Completely Fair Scheduler :
+      The new "desktop" process scheduler implemented by Ingo Molnar and merged in Linux 2.6.23.
+      CFS basically models an "ideal, precise, multi-tasking CPU" on real hardware.
+
+      ideal - precise - multi-tasking CPU :
+        suppose a CPU has 100% power,and each task running on it at precise equal speed,in parallel,
+        if there is nr_running tasks are present,then each at the 1/nr_running speed;if there just
+        2 tasks running,then each at 50% physical CPU power.
+        but there just one task can running at the same in the actual hardware.thus,introduced a
+        new property "virtual runtime"(schedule entity @vruntime).
+        
+      vruntime : virtual runtime
+        specifies when the task's timeslice would start execution on the ipmtCPU.
+        in practice,it is the task's actual runtime normalized to the total number of
+        running tasks.
+        /**
+         * "when" is not "how long the time it would running on the CPU".
+         */
+
+        on ipmtCPU,all tasks have the same @vruntime,ipmtCPU is able to runs all tasks at the same
+        time with equal speed,whatever how many the tasks present.
+
+      pick up policy :
+        always pick up the task has smallest @vruntime as the next runnable task.CFS always split up
+        CPU times as close to ipmtCPU times as possible.
+        CFS uses an rbtree to saves all tasks in this runqueue,thus,the left-most leaf contains the
+        task has smallest @vruntime,the total number of running tasks in the runqueue is accounted
+        through the @rq->cfs.load value(sum of weights of the tasks in this runqueue).
+        /**
+         * therefore,we can have known that CFS use the system load to does task scheduling,guarantees
+         * system load of the task's as equal to each other as possible.
+         */
+
+        CFS picked up taskA to run ->
+        ... scheduling occurred(schedule tick) or task scheduled CPU usage ->
+        taskA's vruntime += the time just spent using the physical CPU
+                            /* max(the smallest CFS timeslice, actually spent) */
+        ->
+        vruntime of taskA get higher,then it is no longer the left-most leaf,if necessary.
+                                                /* taskA preempted by another */
+
+      the minimum CFS timeslice granularity :
+        it is 1ms => 10 * 10^5 ns
+        if this time is too long,then brings lower interactivity;if it is too short,then a lot of
+        CPU times are spent on task switch.
+
+      CFS scheduling policies :
+        SCHED_NORMAL    -  regular tasks
+        SCHED_BATCH     -  batch jobs(can run longer and make better use of caches at cost of interactivity)
+        SCHED_IDLE      -  tasks even weaker than +19,but not a true idle timer scheduler
+
+      CFS scheduling class :
+        CFS scheduling class is implemented in <kernel/sched_fair.c>,the APIs in such file are included
+        by a static sched_class object is named @fair_sched_class defined in the same file.
+
+        all APIs manipulate the CFS structure is type of "struct cfs_rq" which is defined in
+        <kernel/sched.c>,and the structure "struct rq" contains a member named @cfs.
+
+      The structure cfs_rq :
+        <kernel/sched.c>
+          /**
+           * cfs_rq - structure used to represent CFS scheduling
+           * @load:              load weight,contains two member @weight @inv_weight
+           *                     both are unsigned long
+           * @nr_running:        number of processes in running
+           * @exec_clock:        scheduler clock
+           * @min_vruntime:      minmum value of virtual runtime
+           * @tasks_timeline:    rbtree of tasks
+           * @rb_leftmost:       left-most leaf for O(1) access
+           * @tasks:             tasks list(linked task_struct)
+           * @balance_iterator:  balance iterator,used to traverses scheduler queue
+           *                     !! UNUSED,AND REMOVE IN RECENT KERNEL
+           * @curr:              currently running entity on this cfs_rq
+           * @next:              next entity on this cfs_rq
+           * @last:              the last running entity on this cfs_rq
+           * @nr_spread_over:    scheduling statistic
+           * @rq:                the runqueue associated to this cfs_rq
+           * @leaf_cfs_rq_list:  ties together list of leaf cfs_rq's in a cpu
+           * @tg:                group that owns this runqueue
+           * @task_weight        the part of @load.weight contributed by tasks
+           * @h_load:            h_load = weight * f(tg)
+           *                     f(tg) is the recursive weight fraction assigned
+           *                     to this group
+           * @shares:            this cpu's part of tg->shares
+           * @rq_weight:         @load.weight at the time set shares                    
+           */
+          struct cfs_rq {
+                  struct load_weight load;
+                  unsigned long nr_running;
+                  u64 exec_clock;
+                  u64 min_vruntime;
+                  struct rb_root tasks_timeline;
+                  struct rb_node *rb_leftmost;
+                  struct list_head tasks;
+                  struct list_head *balance_iterator;
+                  struct sched_entity *curr, *next, *last;
+                  unsigned int nr_spread_over;
+          #ifdef CONFIG_FAIR_GROUP_SCHED
+                  struct rq *rq;
+                  struct list_head leaf_cfs_rq_list;
+                  struct task_group *tg;
+          #ifdef CONFIG_SMP
+                  unsigned long task_weight;
+                  unsigned long h_load;
+                  unsigned long shares;
+                  unsigned long rq_weight;
+          #endif
+          #endif
+          };
+
+      About group scheduling :
+        CFS operates on individual tasks and strives to provide fair CPU tiem to each task.
+        sometimes,it may be desirable to group tasks and provide fair CPU time to each such
+        task group.
+        /* CONFIG_FAIR_GROUP_SCHED */        
+
+        two mutually exclusive mechanisms to group tasks for CPU bandwidth control
+        proposes:
+          1>  based on user id(CONFIG_USER_SCHED)
+          2>  based on "cgroup" pseudo filesystem(CONFIG_CGROUP_SCHED)
+          
+
     System Calls Related to Scheduling
 
