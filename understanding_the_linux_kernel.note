@@ -4072,6 +4072,10 @@ Chapter 4 : Interrupts and Exceptions
                an Intel interrupt gate that can be accessed by a User Mode process.(DPL = 3)
                the exception handler associated with the vector 3 is activated by means of a System interrupt gate,
                so the assembly language instruction "int3" can be issued in User Mode.
+               !!  MUST BE AWARE THAT,KERNEL SYSTEM CALL MACRO SYSCALL_DEFINE<n>() IS USED TO WRAPPER A SYSTEM CALL
+                   AND THE SYSTEM CALL "sys_<name>()"'S RETURN VALUE MAY DIFFERENCE TO "libc" WRAPPER RETURNS.
+                   ANYWAY,THE USER SPACE PROGRAM JUST TO KNOWS WHAT "libc" RETURNS AS WELL.
+                   /* IT IS DEPRECATE TO INVOKE SYSTEM CALL FROM KERNEL */
 
           >  Trap gate
                an Intel trap gate that cannot be accessed by a User Mode process.(DPL = 0)
@@ -11497,6 +11501,98 @@ Chapter 7 :
           1>  based on user id(CONFIG_USER_SCHED)
           2>  based on "cgroup" pseudo filesystem(CONFIG_CGROUP_SCHED)
           
-
     System Calls Related to Scheduling
+      Non root user can only lower the priorities of processes it owns to.
+
+      The nice() System Call :
+        <kernel/sched.c>
+          /**
+           * sys_nice - system call nice() used to lower priority of a process of a non-root
+           *            user
+           *            only root user can set new nice value for all processes in the system
+           * @increment: increment value
+           *             used to determine what nice it will be
+           * return:     0 => succced
+           *             -EPERM => permisson deny OR capability unsatisfied
+           * # @increment := -40 if @increment < -40
+           *   @increment := +40 if @increment > +40
+           */
+          SYSCALL_DEFINE1(nice, int, increment);
+
+        !!  function set_user_nice() used to set @current's nice,it convert nice to process
+            priority(and CFS load weight.
+            if @current is enqueued into a runqueue,then have to check process preemption,
+            set TIF_NEED_RESCHED if necessary.
+        !!  system call nice() only used for backward compatibility,it has been replaced by the
+            setpriority() system call.
+
+      The getpriority() and setpriority() System Calls :
+        <kernel/sys.c>
+          /**
+           * getpriority - system call getpriority() used to retrieve the lowest nice(high-prio)
+           *               field value among all processes in a given group
+           * @which:       which class?
+           *                 PRIO_PROCESS - select the processes according to their process ID
+           *                 PRIO_PGRP    - select the processes according to their group ID
+           *                 PRIO_USER    - select the processes according to their user ID
+           * @who:         value of pid OR pgrp OR uid
+           * return:       nice value of the target
+           *               -EINVAL => invalid @which
+           *               -ESRCH  => no such process existed
+           */
+          SYSCALL_DEFINE2(getpriority, int, which, int, who);
+
+          /**
+           * setpriority - system call setpriority() used to setup the nice value of process or
+           *               processes
+           * @which:       which class?(same as getpriority())
+           * @who:         pid OR pgrp OR uid
+           * @niceval:     new nice value,and would be converted to priority or load weight
+           * return:       0 => succeed to set priority
+           *               -EINVAL   =>  invalid @which
+           *               -EPERM    =>  permisson deny
+           *               -EACCESS  =>  exceed system resource limition OR capability unsatisfied
+           * # of course,if necessary,set TIF_NEED_RESCHED.
+           */
+          SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval);
+
+      The sched_getaffinity() and sched_setaffinity() System Calls :
+        <kernel/sched.c>
+          /**
+           * sched_getaffinity - get the cpu affinity of a process
+           * @pid:               process ID
+           * @len:               length in bytes of the buffer @user_mask_ptr
+           * @user_mask_ptr:     the buffer will saves the cpumask about the process
+           *                     @pid
+           * return:             min(@len, cpumaks_size()) => succed to get affinity
+           *                     -EINVAL => @len is invalid,it must be too small
+           *                     -ENOMEM => failed to allocate memory for cpumask_var_t object
+           *                     -EFAULT => failed to copy result to user space buffer
+           *                     -ESRCH  => no such process
+           */
+          SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
+                          unsigned long __user *, user_mask_ptr);
+
+          /**
+           * sched_setaffinity - set the cpu affinity for a process
+           * @pid:               process ID
+           * @len:               length in bytes of the buffer @user_mask_ptr
+           * @user_mask_ptr:     the buffer saves the given cpumask from user space
+           * return:             0 => succeed to set cpu affinity for @pid
+           *                     -ENOMEM => failed to allocate memory for cpumask_var_t object
+           *                     -EFAULT => failed to copy cpumask from user space
+           *                     -ESRCH  => no such process
+           *                     -EPERM  => permission deny
+           *                     -EINVAL => cpumask disabled all CPUs OR
+           *                                (PF_THREAD_BOUND AND @pid != @current AND
+           *                                 @pid is not allowed on the given CPUs)
+           */
+          SYSCALL_DEFINE3(sched_setaffinity, pid_t, pid, unsigned int, len,
+                          unsigned long __user *, user_mask_ptr);
+
+        !!  routines find_process_by_pid() and find_process_by_vpid() is used to search the
+            target.
+            /* @pid = 0 means @current process */ 
+        !!  CPU switch(if necessary) dealt with by @migration_thread of the runqueue @pid is
+            residing now.
 
