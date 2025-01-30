@@ -1779,6 +1779,8 @@ Chapter 3 : Processes
          *    struct files_struct *files;
          *    struct signal_struct *signal;
          */
+        !!  the routine task_lock() lock up task_struct.@alloc_lock,task_unlock() does the reverse.
+                                                        /* concurrent protection of mm */
 
     Process State :
       the @state field of the process descriptor describes what is currently happening to the process.
@@ -11501,7 +11503,7 @@ Chapter 7 :
           1>  based on user id(CONFIG_USER_SCHED)
           2>  based on "cgroup" pseudo filesystem(CONFIG_CGROUP_SCHED)
           
-    System Calls Related to Scheduling
+    System Calls Related to Scheduling :
       Non root user can only lower the priorities of processes it owns to.
 
       The nice() System Call :
@@ -11595,4 +11597,146 @@ Chapter 7 :
             /* @pid = 0 means @current process */ 
         !!  CPU switch(if necessary) dealt with by @migration_thread of the runqueue @pid is
             residing now.
+
+    System Calls Related to Real-Time Processes :
+      If a process want to becomes a real-time process,it must have the CAP_SYS_NICE capability to modifies
+      the values of the task_struct.@rt_priority and task_struct.@police inside its task descriptor.
+
+      The sched_getscheduler() and sched_setscheduler() system calls :
+        <kernel/sched.c>
+          /**
+           * sys_sched_getscheduler - get thread's scheduling policy
+           * @pid:                    the process
+           * return:                  the policy value
+           *                          -EINVAL => @pid < 0
+           *                          -ESRCH  => no such process
+           *                          -EPERM  => permission deny # security checking (security_task_getscheduler())
+           */
+          SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid);
+
+          /**
+           * sys_sched_setscheduler - set/change the scheduler policy and RT priority
+           * @pid:                    process ID
+           * @policy:                 scheduling policy
+           *                            SCHED_FIFO
+           *                            SCHED_RR
+           *                            SCHED_NORMAL
+           *                            SCHED_BATCH
+           *                            SCHED_IDLE
+           * @param:                  scheduler parameter
+           *                          <linux/sched.h>
+           *                            struct sched_param {
+           *                                    int sched_priority;
+           *                            };
+           * return:                  0 => succeed to set/change scheduler
+           *                          -EINVAL => invalid @policy OR invalid @sched_priority
+           *                          -EFAULT => copy from user failed
+           *                          -ESRCH  => no such process
+           *                          -EPERM  => permission deny(maybe resource limition over)
+           * # if @p->sched_reset_on_fork is set,@policy will disable SCHED_RESET_ON_FORK.
+           *   this function can not be called to in interrupt context.
+           *   for safely change the policy of a task,the runqueue it is residing must be locked up.
+           *   # dealt with by __sched_setscheduler().
+           *   # before entery __sched_setscheduler(),rcu_read_lock() is called to indicates a RCU read-side
+           *     critical section is started.
+           * # after priority and scheduler settings are accomplished,check the runqueue to determine whether
+           *   allows preemption.
+           * # the fourth parameter of __sched_setscheduler() is named @user with boolean type,if the caller
+           *   is a real user in the system,then it is true;otherwise,false(i.e. shutdown, etc.),in
+           *   this case,should call this function from sched_setscheduler_nocheck().
+           *   # the "user" is a temporary created high priority thread worker.
+           */
+          SYSCALL_DEFINE2(sched_setscheduler, pid_t, pid, int, policy, struct sched_param __user *, param);
+
+          !!  the valid @sched_priority for SCHED_FIFO and SCHED_RR is between 1..MAX_USER_RT_PRIO - 1(99).
+              the valid @sched_priority for SCHED_NORMAL, SCHED_BATCH and SCHED_IDLE is 0.
+          !!  the user must have CAP_SYS_NICE capability to modify scheduler.
+              /* -EPERM */
+          !!  DISALLOWED TASKS MOVE OUT SCHED_IDLE,IF THE TASK IS SCHED_IDLE NOW,THEN CAN NOT MODIFY IT.
+              /* -EPERM */
+          !!  DO NOT ALLOW REALTIME TASKS INTO GROUPS THAT HAVE NO RUNTIME ASSIGNED.
+              /* -EPERM, if defined CONFIG_RT_GROUP_SCHED */ 
+          !!  allow unprivileged RT tasks to decrease priority,but disallowed increase priority.
+                    /* non root user */
+          !!  for modify a task's priority,have to dequeue it from the runqueue,and enqueue it again later.
+          !!  @p->pi_lock would be locked with irqsave during adjusting runqueue.
+
+      The sched_getparam() and sched_setparam() system calls :
+        <kernel/sched.c>
+          /**
+           * sys_sched_getparam - get the RT priority of a thread
+           * @pid:                process ID
+           * @param:              scheduler parameter bufffer
+           * return:              0 => succeed to get parameter
+           *                      -EINVAL => @pid < 0 OR @param == NULL
+           *                      -ESRCH  => no such process
+           *                      -EPERM  => permission deny
+           *                      -EFAULT => copy to user failed
+           * # RCU read-side critical section starts before find_procees_by_pid().
+           */
+          SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param);
+
+          /**
+           * sys_sched_setparam - set the RT priority of a thread
+           * @pid:                process ID
+           * @param:              new parameter
+           * return:              0 => succeed to set parameter
+           *                      error values are same as do_sched_setscheduler(),it was called
+           *                      by sys_sched_setscheduler()
+           * # because this function only modifies the real-time priority for @pid,thus,the argument
+           *   of @policy paramter of __sched_setscheduler() is -1,in this case,keep @p->policy
+           *   unchanged.
+           */
+          SYSCALL_DEFINE2(sched_setparam, pid_t, pid, struct sched_param __user *, param);
+
+      The sched_yield() system calls:
+        <kernel/sched.c>
+          /**
+           * sys_sched_yield - yield processor time
+           * # this function updates runqueue statistics of the rq which @current is residing now,
+           *   call to scheduling class API yield_task(this_rq()) to does some scheduler depended works.
+           *   finally,it enable preemption without rescheduling,then call to schedule().
+           */
+          SYSCALL_DEFINE0(sched_yield);
+
+          !!  even @current has yielded processor time,it stay in TASK_RUNNING state.
+              scheduling class API yield_task() may let @it go to the end of this runqueue.
+              /* this system call mainly used by real-time process with SCHED_FIFO */
+
+      The sched_get_priority_min() and sched_get_priority_max() system calls :
+        <kernel/sched.c>
+          /**
+           * sys_sched_get_priority_min - get minimum priority of the corresponding policy
+           * @policy:                     the policy to query
+           * return:                      minimum priority of @policy
+           *                              -EINVAL => invalid @policy
+           */
+          SYSCALL_DEFINE1(sched_get_priority_min, int, policy);
+
+          /**
+           * sys_sched_get_priority_max - get maximum priority of the corresponding policy
+           * @policy:                     the policy to query
+           * return:                      maximum priority of @policy
+           *                              -EINVAL => invalid @policy
+           */
+          SYSCALL_DEFINE1(sched_get_priority_max, int, policy);
+
+      The sched_rr_get_interval() system call :
+        <kernel/sched.c>
+          /**
+           * sys_sched_rr_get_interval - return the default timeslice of a process
+           * @pid:                       process ID
+           * @interval:                  user space buffer
+           * return:                     0 => succeed to query default timeslice
+           *                             -EINVAL => @pid < 0
+           *                             -EPERM  => permission deny
+           *                             -EFAULT => copy to user failed
+           */
+          SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid, struct timespec __user *, interval);
+
+          !!  @time_slice is get from scheduling class API get_rr_interval()/* for real-time process */
+              in jiffies,function jiffies_to_timespec() convert jiffies to timespec.
+              before process finding,have to sign a RCU read-side critical section,and,have to acquire
+              runqueue lock before call to scheduling class API.
+          !!  timespec value "0" means the timeslice is infinity(real time process only,SCHED_FIFO).
 
