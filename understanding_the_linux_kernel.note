@@ -706,8 +706,10 @@ Chapter 2 : Memory Addressing
 
     regular paging :
       start with 80386,a page handles 4kB memory.
+
     32bit linear address : Directory(10bit), Table(10bit), Offset(12bit)
                            (most significant) (middle)     (least significant)
+
     translation of linear address(based on type of translation table) :
       the physical address of the Page Directory in use is stored in a control register named cr3.
       get Page Directory from cr3 ->
@@ -770,6 +772,7 @@ Chapter 2 : Memory Addressing
 
       Page Size flag :
         Page Directory entry only,if it = 1,then entry refers to a 2MB- or 4MB-long page frame.
+                                                                   /*  PAE  */
 
       Global flag :
         Page Table entry only,this flag was introduced in the Pentium Pro to prevent frequently used pages from being
@@ -11740,3 +11743,213 @@ Chapter 7 :
               runqueue lock before call to scheduling class API.
           !!  timespec value "0" means the timeslice is infinity(real time process only,SCHED_FIFO).
 
+Chapter 8 : Memory Management
+    Page Frame Management :
+      Linux adopt 4kB page frame size as the standard memory allocation unit.
+      The reasons :
+        1>  Page Fault exceptions issued by the paging circuitry are easily interpreted.
+            (page existed but disallow process accesses to,or page is not exist)
+
+        2>  Although both 4kB and 4MB are multiples of all disk block sizes,trasfers of data
+            between main memory and disks are in most cases more efficient when the smaller size
+            is used.
+
+      Kernel Memory Layout :
+        0  0x1000                                 _end
+        +-------------------------------------------------------+- - - - -+------------+
+        |  |                |        |            |             |         |            |
+        |  |  Dynamic       |        |            |  Dynamic    |         | Unmapped   |
+        |  |  Memory        |        |            |  Memory     |         |   High     |
+        |  |                |        |            |             |         |  Memory    |
+        |  |                |        |            |             |         |            |
+        +-------------------------------------------------------+- - - - -+------------+
+         |                      |          |
+         |                      |          |
+         |                      |          |
+         +----------+-----------+          |
+                    |                      V
+                    |                  Reversed Kernel
+                    V
+             Reserved Hardware
+
+      Page Descriptors :
+        Kernel must keep track of the status of each page frame.
+        The pages inside a page frame are belong to a process,or contain Kernel Code,or contain Kernel Data.
+        The pages inside a page frame are dynamic memory or free.
+
+        !  A page frame in dynamic memory is free,if it does not contain any useful data.
+           A page frame in dynamic memory is not free,if the page fram contains data of a User Mode process,
+           data of software cache,dynamically allocated kernel data structures,buffered data of a device
+           driver,code of a kernel modul,etc.
+
+        struct page :
+          State information of a page frame is kept in a page descriptor of type @page.
+          <linux/mm_types.h>
+            /**
+             * page - structure page represent a physical page
+             * @flags:        atomic flags,32 flags describe the status of the page frame
+             * @_count:       usage count,-1 unused(free page)
+             * @_mapcount:    count of ptes mapped in mms to show when page is mapped
+             *                AND limit reverse map searches
+             *                # Number of Page Table entries that refer to the page frame
+             *                  (-1 if none)
+             * @insue:
+             * @objects:      
+             *                SLUB data
+             * @private:      mapping-private opaque data,usually used for buffer_heads if
+             *                PagePrivate set;used for swp_entry_t if PageSwapCache;
+             *                indicates order in the buddy system if PG_buddy is set
+             * @mapping:      if low bit clear,points to inode address_space,or NULL
+             *                if page mapped as anonymous memory,low bit is set,and
+             *                it points to anon_vma object
+             * @ptl:          split pt lock
+             * @slab:         SLUB: pointer to slab
+             * @first_page:   compound tail pages
+             * index:         offset within mapping
+             * @freelist:     SLUB: freelist req. slab lock
+             * @lru:          pageout list
+             * @virtual:      kernel virtual address,NULL if not kmapped
+             * debug_flags:   atomic bitops,page debug flags
+             * @shadow:       pointer to a status block,NULL if not tracked
+             */
+            struct page {
+                    unsigned long flags;
+                    atomic_t _count;
+                    union {
+                            atomic_t _mapcount;
+                            struct {
+                                    u16 insude;
+                                    u16 objects;
+                            };
+                    };
+                    union {
+                            struct {
+                                    unsigned long private;
+                                    struct address_space *mapping;
+                            };
+            #if USE_SPLIT_PTLOCKS
+                            spinlock_t ptl;
+            #endif
+                            struct kmem_cache *slab;
+                            struct page *first_page;
+                    };
+                    union {
+                            pgoff_t index;
+                            void *freelist;
+                    };
+                    struct list_head lru;
+            #if defined(WANT_PAGE_VIRTUAL)
+                    void *virtual;
+            #endif
+            #ifdef CONFIG_WANT_PAGE_DEBUG_FLAGS
+                    unsigned long debug_flags;
+            #endif
+            #ifdef CONFIG_KMEMCHECK
+                    void *shadow;
+            #endif
+            };
+
+          All page descriptors are stored in the @mem_map array :
+            <mm/memory.c>
+            #ifndef CONFIG_NEED_MULTIPLE_NODES
+              /* max_mapnr - the maximum number of page mapping */
+              unsigned long max_mapnr;
+              /* mem_map - array used to saves all mapped pages(memory) */
+              struct page *mem_map;
+
+              EXPORT_SYMBOL(max_mapnr);
+              EXPORT_SYMBOL(mem_map);
+            #endif
+            /**
+             * these definitions also are existed in <mm/nommu.c> for the
+             * case that no Memory Management Unit is available.
+             */ 
+
+          Macro virt_to_page() is defined in <arch/x86/include/asm/page.h> used to
+          get the linear address associated with the page descriptor :
+            #define virt_to_page(kaddr)    pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
+
+          Macro pfn_to_page() is defined in <asm-generic/memory_model.h> used to
+          get the page descriptor associated with the page frame number @pfn :
+            #define __pfn_to_page(pfn)    (mem_map + ((pfn) - ARCH_PFN_OFFSET))
+            #define pfn_to_page    __pfn_to_page
+
+          Page Flags for struct page.flags :
+            <linux/page-flags.h>
+              enum pageflags {
+                      PG_locked,                /* page is locked,do not touch */
+                      PG_error,
+                      PG_referenced,
+                      PG_uptodate,
+                      PG_dirty,
+                      PG_lru,
+                      PG_active,
+                      PG_slab,
+                      PG_owner_priv_1,          /* owner use.if pagecache,fs may use */
+                      PG_arch_1,
+                      PG_reserved,
+                      PG_private,               /* if pagecache,has fs-private data */
+                      PG_private_2,             /* if pagecache,has fs aux data */
+                      PG_writeback,             /* page is under writeback */
+              #ifdef CONFIG_PAGEFLAGS_EXTENDED
+                      PG_head,                  /* a head page */
+                      PG_tail,                  /* a tail page */
+              #else
+                      PG_compound,              /* a compound page */
+              #endif
+                      PG_swapcache,             /* swap page: swp_entry_t in private */
+                      PG_mappedtodisk,          /* has blocks allocated on-disk */
+                      PG_reclaim,               /* to be reclaimed asap */
+                      PG_buddy,                 /* page is free,on buddy lists */
+                      PG_swapbacked,            /* page is backed by RAM/swap */
+                      PG_unevicatable,          /* page is "unevictable" */
+              #ifdef CONFIG_MMU
+                      PG_mlocked,               /* page is vma mlocked */
+              #endif
+              #ifdef CONFIG_ARCH_USES_PG_UNCACHED
+                      PG_uncached,              /* page has been mapped as uncached */
+              #endif              
+              #ifdef CONFIG_MEMORY_FAILURE
+                      PG_hwpoison,              /* hardware poisoned page,do not touch */
+              #endif
+                      __NR_PAGEFLAGS
+
+                      /* Filesystems */
+                      PG_checked = PG_owner_priv_1,
+                      PG_fscache = PG_private_2,        /* page backed by cache */
+                      /**
+                       * these two page bits are conscripted by FS-Cache to maintain local
+                       * caching state,they are set on pages belonging to the netfs's inodes
+                       * when those inodes are being locally cached.
+                       */
+
+                      /* XEN */
+                      PG_pinned = PG_owner_priv_1,
+                      PG_savepinned = PG_dirty,
+
+                      /* SLOB */
+                      PG_slob_free = PG_private,
+
+                      /* SLUB */
+                      PG_slub_frozen = PG_active,
+                      PG_slub_debug = PG_error,
+              };
+
+              !!  page flag operations are defined in same file with these format :
+                    Page<Name without "PG_" prefix>(page descriptor pointer)
+                    SetPage<Name without "PG_" prefix>(page descriptor pointer)
+                    ClearPage<Name without "PG_" prefix>(page descriptor pointer)
+
+                    Page  => return the value of corresponding bit
+                    Set   => enable corresponding bit
+                    Clear => disable corresponding bit
+
+                    e.g.
+                            PageError(pdp);
+                            SetPageError(pdp);
+                            ClearPageError(pdp);
+
+                  each macro is correspond to a static inline function in <linux/page-flags.h>.
+            
+
+          
