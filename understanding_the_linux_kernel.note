@@ -11950,6 +11950,226 @@ Chapter 8 : Memory Management
                             ClearPageError(pdp);
 
                   each macro is correspond to a static inline function in <linux/page-flags.h>.
+
+      Non-Uniform Memory Access(NUMA) :
+        NUMA,the access times for different memory locations from a given CPU may vary,the physical
+        memory of the system is partitioned in several nodes.
+
+        The time for CPUs to access the pages in a single node is same,but in the case several nodes
+        are existed,it is different.
+        For minimize the number of accesses to costly nodes,Kernel carefully selecting where the Kernel
+        data structures that are most often referenced by the CPU are stored.
+        /**
+         * the Kernel make use of NUMA even for some peculiar uniprocessor systems that have huge "holes"
+         * inthe physical address space.
+         */
+
+        ! physical memory inside each node can be split into several zones.
+
+        Each node has a descriptor of type "pg_data_t" :
+          <linux/mmzone.h>
+            /**
+             * pglist_data(pg_data_t) - structure used to represent a memory node
+             * @node_zones:             array of zone descriptors of the node
+             * @node_zonelists:         array of zonelist data structures used by the page allocator
+             * @nr_zones:               number of zones in the node
+             * @node_mem_map:           array of page descriptors of the node
+             * @node_page_cgroup:       cgroup data used for memory resource control
+             * @bdata:                  used in the kernel initialization phase
+             * @node_size_lock:         memory chip hotplug support
+             * @node_start_pfn:         page frame number of the start for this node
+             * @node_present_pages:     total number of physical pages
+             * @node_spanned_pages:     total size of physical page range,including holes
+             * @node_id:                node id
+             * @kswapd_wait:            kernel thread kswapd wait queue
+             * @kswapd:                 task structure for kswapd
+             * @kswapd_max_order:       logarithmic size of free blocks to be created by kswapd
+             */
+            typedef struct pglist_data {
+                    struct zone node_zones[MAX_NR_ZONES];
+                    struct zonelist node_zonelists[MAX_ZONELISTS];
+                    int nr_zones;
+            #ifdef CONFIG_FLAT_NODE_MEM_MAP
+                    struct page *node_mem_map;
+            #ifdef CONFIG_CGROUP_MEM_RES_CTLR
+                    struct page_cgroup *node_page_cgroup;
+            #endif
+            #endif
+            #ifndef CONFIG_NO_BOOTMEM
+                    struct bootmem_data *bdata;
+            #endif
+            #ifdef CONFIG_MEMORY_HOTPLUG
+                    spinlock_t node_size_lock;
+            #endif
+                    unsigned long node_start_pfn;
+                    unsigned long node_present_pages;
+                    unsigned long node_spanned_pages;
+                    int node_id;
+                    wait_queue_head_t kswapd_wait;
+                    struct task_struct *kswapd;
+                    int kswapd_max_order;
+            } pg_data_t;
+            /* on NUMA,each node has a pg_data_t structure to describe its memory layout. */
+
+            #ifndef CONFIG_NEED_MULTIPLE_NODES
+
+            /* contig_page_data - node descriptor for node 0,used for single node */
+            extern struct pglist_data contig_page_data;
+            #define NODE_DATA(nid)    (&contig_page_data)
+            #define NODE_MEM_MAP(nid)    mem_map
+
+            #else
+
+            #include <asm/mmzone.h>
+            /**
+             * CONFIG_NEED_MULTIPLE_NODES - NUMA
+             *         in this case,an array @node_data is defined in <arch/x86/include/asm/mm_zone64.h>,
+             *         macro NODE_DATA(nid) <-> @node_data[@nid]
+             */
+
+            #endif
+
+          ! even NUMA is not configured for Kernel,it stay use a single pg_data_t object to includes all
+            system physical memory.
+          ! pg_data_t.@node_zones is initialized at boot time with the address of all zone descriptors
+            designate to this node.
+
+      Memory Zones :
+        Real computer architectures have hardware constraints that may limit the way page frames can be used.
+          80x86 :
+            1> DMA(Direct Memory Access) processor for old ISA buses have a strong limition :
+                 they are able to address only the first 16MB of RAM
+            2> In modern 32-bit computers with lots of RAM,the CPU cannot directly access all physical memory
+               because the linear address space is too small
+
+          Linux Kernel have to deal with these two kind of problems.
+          Linux partitions the physical memory of  every memory node into three zones.
+            80x86 UMA :
+              ZONE_DMA => contains page frames of memory below 16MB
+              /* ISA compatible */
+              ZONE_NORMAL => contains page frames of memory at and above 16MB and below 896MB
+              /* Access through linear address */
+              ZONE_HIGH => contains page frames of memory at and above 896MB
+              /* Cannot access through linear address > 4GB */
+              /* 64-bit ZONE_HIGH is different to 32-bit */
+
+            /* for use of ZONE_HIGH,Kernel have to makeup temporary memory mapping or permanent memory mapping */
+
+        struct zone :
+          <linux/mmzone.h>
+            /**
+             * zone - structure zone represent memory zone inside a memory node
+             * @watermark:        zone watermarks,access with *_wmark_page(zone) macros
+             * @lowmem_reserve:   low memory reserve used to avoid totally wasting several GB of ram
+             *                    when going to allocate will be freeable or/and it will be released
+             *                    eventually
+             *                    this array is recalculated at runtime if the sysctl_lowmem_reserve_ratio
+             *                    sysctl changes
+             *                    (low-on-memory critical situations)
+             * @node:             NUMA node id
+             * @min_unmapped_pages:        minimum number of pages unmapped
+             * @min_slab_pages:            minimum number of pages for slab allocator
+             * @pageset:                   per-CPU pageset
+             *                             used to implement special caches of single page frames
+             * @lock:                      concurrent protection
+             * @all_unreclaimable:         all pages pinned
+             * @span_seqlock:              memory hotplug support
+             * @free_area:                 blocks of free page frames in this zone
+             * @lru_lock:                  LRU mechanism lock
+             * @lru:                       LRU zones to represent inactive pages and active pages
+             *                             for memory cache
+             * @pages_scanned:             since last reclaim,how many pages scanned
+             * @flags:                     zone flags
+             * @vm_stat:                   zone statistics
+             * @prev_priority:             holds the scanning priority for this zone([12, 0])
+             * @wait_table:                holding the hash table of wait queues of processes waiting
+             *                             for one of the pages of the zone
+             * @wait_table_hash_nr_entries:        size of the hash table
+             * @wait_table_bits:                   power-of-2 order of the size of the wait queue
+             *                                     hash table
+             *                                     @wait_table_size == (1 << wait_table_bits)
+             * @zone_pgdat:                which node this zone belongs to
+             * @zone_start_pfn:            page frame number of the start of this zone
+             * @spanned_pages:             total size of zone in pages,including holes
+             * @present_pages:             amount of memory(excluding holes)
+             * @name:                      rarely used,the conventional name are "DMA",
+             *                             "Nonrmal",or "HighMem"
+             */
+            struct zone {
+                    unsigned long watermark[NR_WMARK];
+                    unsigned long lowmem_reserve[MAX_NR_ZONES];
+            #ifdef CONFIG_NUMA
+                    int node;
+                    unsigned long min_unmapped_pages;
+                    unsigned long min_slab_pages;
+            #endif
+                    struct per_cpu_pageset __percpu *pageset;
+                    spinloc_t lock;
+                    int all_unreclaimable;
+            #ifdef CONFIG_MEMORY_HOTPLUG
+                    seqlock_t span_seqlock;
+            #endif
+                    struct free_area free_area[MAX_ORDER];
+
+                    ...
+
+                    spinlock_t lru_lock;
+                    struct zone_lru {
+                            struct list_head list;
+                    } lru[NR_LRU_LISTS];
+
+                    ...
+
+                    unsigned long pages_scanned;
+                    unsigned long flags;
+
+                    atomic_long_t vm_stat[NR_VM_ZONE_STAT_ITEMS];
+
+                    int prev_priority;
+
+                    ...
+
+                    wait_queue_head_t *wait_table;
+                    unsigned long wait_table_hash_nr_entries;
+                    unsigned long wait_table_bits;
+
+                    struct pglist_data *zone_pgdat;
+                    unsigned long zone_start_pfn;
+
+                    unsigned long spanned_pages;
+                    unsigned long present_pages;
+
+                    const char *name;
+
+            } ____cacheline_internodealigned_in_smp;
+
+            each page descriptor contains a link to the memory node and a link to the zone inside memory
+            node that including this page.the links are not saved as pointers as usually,they are
+            encoded as indices stored in the high bits of the page.@flags field.
+            /**
+             * the number of @flags that characterize a page frame is limited,thus it is always possible
+             * to reserve the most significant bits of the @flags field to encode the proper memory node 
+             * and zone number.
+             */
+
+           <linux/mm.h>
+           static inline struct zone *page_zone(struct page *page)
+           {
+                   return &NODE_DATA(page_to_nid(page))->node_zones[page_zonenum(page)];
+                          /**
+                           * page_to_nid() retrieve @nid from @page->flags
+                           * NODE_DATA() retrieve node structure from @nid
+                           * page_zonenum() retrieve @zonenum from @page->flags
+                           */
+           }
+
+           ! memory allocation function must determines which memory zone should be selected by
+             zone class indicator ZONE_DMA / ZONE_NORMAL / ZONE_HIGH .
+             select DMA if only if ZONE_NORMAL have no free space to available.
+             pg_data_t.@zonelists linked zone descriptors,one allocation request operates on a 
+             zonelist,the first one is the 'goal' of the allocation,the other zones are fallback
+             zones,in decreasing priority.
+
             
 
           
