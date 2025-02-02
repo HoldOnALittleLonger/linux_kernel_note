@@ -12169,7 +12169,229 @@ Chapter 8 : Memory Management
              pg_data_t.@zonelists linked zone descriptors,one allocation request operates on a 
              zonelist,the first one is the 'goal' of the allocation,the other zones are fallback
              zones,in decreasing priority.
+             /**
+              * Page Allocator selected ZONE1,and found out the page frames presented can not
+              * satisfied the requestion,then go to search the fallback zones via @zonelists.
+              * # Number of free page frames currently is less than required.
+              */
 
+      The Pool of Reserved Page Frames :
+        memory allocation requests can be satisfied in two different ways :
+          1> required memory is available now,return immediately
+          2> required memory is not available now,block wait for memory reclaiming
+
+        inside blocking-forbidden critical region or interrupt context,the kernel control path
+        should issues "atomic memory allocation" requests(GFP_ATOMIC flag of memory allocator).
+        "atomic memory allocation" never blocks,if there is not enough memory available,just
+        fails.
+        /**
+         * for minimize the likelihood of GFP_ATOMIC failed event,kernel reserves a pool
+         * of page frames for atomic memory allocation requests,to be used only on
+         * "low-on-memory" conditions.
+         */
+
+        the amount of the reserved memory(in kilobytes) :
+          <mm/page_alloc.c>
+            int min_free_kbytes = 1024;
+          /* it can be modified during runtime via sysctl */
+          /**
+           * Its value depends on the number of page frames inclued in the ZONE_DMA and ZONE_NORMAL
+           * memory zones :
+           *         reserved pool size = floor(sqrt(16 * directly mapped memory)) (kilobytes)
+           * ! can not lower than 128 or greater than 65536
+           */
+          ZONE_DMA and ZONE_NORMAL memory zones contribute to the reserved memory with a number of
+          page frames proportional to their relative sizes.(X : Y)
+          /**
+           * struct zone.@lowmem_reserve[MAX_NR_ZONES] indicates how many page frames of the memory zone
+           * contributes to reserved memory.
+           */
+
+      The Zoned Page Frame Allocator :
+        zoned page frame allocator : (kernel subsystem)
+          handles the memory allocation requests for groups of contiguous page frames.
+          /* requests for allocation and deallocation of dynamic memory */
+
+        ! it search a memory zone that includes a group of contiguous page frames that can
+          satisfy the request.
+
+        buddy system :
+          handles page frames allocation inside a specified memory zone.
+
+        performance optimization :
+          cache a small number of page frames for quickly satisfy the allocation request of
+          single page frames.
+
+        Zoned Page Frame Allocator :
+          { Zone Allocator }
+          |   |   |
+          |   |   | ZONE_DMA Memory Zone {
+          |   |   +-------->per-CPU page frame cache
+          |   |   |             |
+          |   |   |             V
+          |   |   +-------->buddy system
+          |   |     }
+          |   |
+          |   |     ZONE_NORMAL Memory Zone {
+          |   +----------->per-CPU page frame cache
+          |   |                |
+          |   |                V  
+          |   +----------->buddy system
+          |         }
+          |
+          |         ZONE_HIGHMEM Memory Zone {
+          +--------------->per-CPU page frame cache
+          |                    |
+          |                    V
+          +--------------->buddy system
+                    }
+
+        Requesting and Releasing Page Frames :
+          /**
+           * The implementations for memory layout are under "mm" directory.
+           * Architecture depended implementations are under <arch/x86/...>.
+           */
+
+          <linux/gfp.h>
+            /**
+             * alloc_pages - allocate contiguous page frames
+             * @gfp_mask:    GFP mask
+             * @order:       number of contiguous page frames = 2^@order
+             * return:       succeed => page descriptor pointer of the first page frame
+             *               failed => NULL
+             */
+            static inline struct page *
+            alloc_pages(gfp_t gfp_mask, unsigned int order);
+
+            /**
+             * alloc_page - just allocate one page frame
+             */
+            #define alloc_page(gfp_mask)  alloc_pages(gfp_mask, 0)
+
+            /**
+             * __get_free_pages - get free contiguous page frames
+             * @gfp_mask:         GFP mask
+             * @order:            the number of page frames = 2^@order
+             * return:            succeed => linear address of the first page frame
+             *                    failed  => 0
+             */
+            extern unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order);
+
+            /**
+             * __get_free_page - just get a free page frame
+             */
+            #define __get_free_page(gfp_mask)  __get_free_pages((gfp_mask), 0)
+
+            /**
+             * get_zeroed_page - get a page frame filled with zero
+             * @gfp_mask:        GFP mask
+             * return:           succeed => linear address of the page frame
+             *                   failed => 0
+             */
+            extern unsigned long get_zeroed_page(gfp_t gfp_mask);
+
+            /**
+             * __get_dma_pages - get pages from ZONE_DMA
+             */
+            #define __get_dma_pages(gfp_mask, order)  __get_free_pages((gfp_mask) | GFP_DMA, (order))
+
+            GFP bitmasks :
+              each flag has a corresponding binary bit in @gfp_t.
+              VM => Virtual Memory Area
+
+              /* zone modifiers */
+              __GFP_DMA                ZONE_DMA
+              __GFP_HIGHMEM            ZONE_HIGH
+              __GFP_DMA32              ZONE_DMA32
+              __GFP_MOVABLE            Page is movable(page migration mechanism or reclaimed)
+              GFP_ZONEMASK (__GFP_DMA | __GFP_HIGHMDEM | __GFP_DMA32 | __GFP_MOVABLE)
+
+              /**
+               * __GFP_DMA  = 1 => memory allocation search from ZONE_DMA
+               * __GFP_HIGH = 0 => memory allocation search from ZONE_DMA and ZONE_NORMAL
+               * __GFP_HIGH = 1 => memory allocation search from ZONE_DMA,ZONE_NORMAL and ZONE_HIGH
+               *                   |
+               *                   +-> # in order of prefence
+               */
+
+              /* action modifiers */
+              __GFP_WAIT               Can wait and reschedule(suspend caller,if necessary)
+              __GFP_HIGH               Should access emergency pools
+              __GFP_IO                 Can start physical IO
+              __GFP_FS                 Can call down to low-level FS
+              __GFP_COLD               Cache-cold page required
+              __GFP_NOWARN             Suppress page allocation failure warning
+              __GFP_REPEAT             Try hard to allocate the memory(attempt _might_ fail)
+              __GFP_NOFAIL             The VM implementation _must_ retry infinitely
+                                       (deprecated)
+              __GFP_NORETRY            The VM implementation _must_ not retry indefinitely
+              __GFP_COMP               Add compound page metadata
+              __GFP_ZERO               Return zeroed page on success
+              __GFP_NOMEMALLOC         Do not use emergency reserves
+              __GFP_HARDWALL           Enforce hardwall cpuset memory allocs
+              __GFP_THISNODE           No fallback,no policies
+              __GFP_RECLAIMABLE        Page is reclaimable
+
+              __GFP_NOTRACK            Do not track with kmemcheck
+                                       #ifdef CONFIG_KMEMCHECK => 0x200000u
+                                       #else => 0
+                                       #endif
+
+            Linux Predefined GFP bitmasks combinations :
+              __GFP_BITS_SHITF          22
+              __GFP_BITS_MASK           1 << __GFP_BITS_SHIFT - 1
+
+              GFP_NOWAIT                GFP_ATOMIC & ~__GFP_HIGH
+              GFP_ATOMIC                __GFP_HIGH
+              GFP_NOIO                  __GFP_WAIT
+              GFP_NOFS                  __GFP_WAIT | __GFP_IO
+              GFP_KERNEL                __GFP_WAIT | __GFP_IO | __GFP_FS
+              GFP_TEMPORARY             __GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_RECLAIMABLE
+              GFP_USER                  __GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_HARDWALL
+              GFP_HIGHUSER              __GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_HARDWALL | \
+                                        __GFP_HIGHMEM
+              GFP_HIGHUSER_MOVABLE      __GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_HARDWALL | \
+                                        __GFP_HIGHMEM | __GFP_MOVABLE
+              GFP_IOFS                  __GFP_IO | __GFP_FS
+              GFP_THISNODE              __GFP_THISNODE | __GFP_NOWARN | __GFP_NORETRY
+                                        #ifndef CONFIG_NUMA => 0
+              GFP_DMA                   __GFP_DMA
+              GFP_DMA32                 __GFP_DMA32E
+
+              /* makeup all the page movable related flags */
+              GFP_MOVABLE_MASK          __GFP_RECLAIMABLE | __GFP_MOVABLE
+              /* control page allocator reclaim behavior */
+              GFP_RECLAIM_MASK          __GFP_WAIT | __GFP_HIGH | __GFP_IO | __GFP_FS | \
+                                        __GFP_NOWARN | __GFP_REPEAT | __GFP_NOFAIL | \
+                                        __GFP_NORETRY | __GFP_NOMEMALLOC
+              /* control slab gfp mask during early boot */
+              GFP_BOOT_MASK             __GFP_BITS_MASK & ~(__GFP_WAIT | __GFP_IO | __GFP_FS)
+              /* control allocation constraints */
+              GFP_CONSTRAINT_MASK       __GFP_HARDWALL | __GFP_THISNODE
+              /* do not use these(dma32, highmem, ~bits_mask) with a slab allocator */
+              GFP_SLAB_BUG_MASK         __GFP_DMA32 | __GFP_HIGHMEM | ~__GFP_BITS_MASK
+
+            /**
+             * __free_pages - release allocated pages
+             * @page:         the first page's page descriptor of pages to be released
+             * @order:        number of free pages = 2^@order
+             */
+            extern void __free_pages(struct page *page, unsigned int order);
             
+            /**
+             * free_pages - release allocated pages
+             * @addr:       linear address of the first page of pages to be released
+             * @order:      number of free pages = 2^@order
+             */
+            extern void free_pages(unsigned long addr, unsigned int order);
 
-          
+            /* these just free a page frame */
+            #define __free_page(page)  __free_pages((page), 0)
+            #define free_page(addr)  free_pages((addr), 0)
+
+            !!  free pages routines finally call to __free_page_ok(),which is static defined in
+                <mm/page_alloc.c>,if @order is zero,they would call to free_hot_cold_page().
+                before free pages,local interrupt would be disabled until free accomplished.
+                if the argument of the pages to be released are not satisfied condition checking,
+                then just return to caller as well.
+
