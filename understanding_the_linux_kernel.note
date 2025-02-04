@@ -12395,3 +12395,128 @@ Chapter 8 : Memory Management
                 if the argument of the pages to be released are not satisfied condition checking,
                 then just return to caller as well.
 
+      Kernel Mappings of High-Memory Page Frames :
+        linear address corresponding to mapped physical address,that are ZONE_DMA and ZONE_NORMAL.
+        the beginning of high memory is stored in the @high_memory variable,which is defined in
+        <linux/mm.h> a void pointer.
+        for 32-bit system,this variable is set to 896MB,so page frames above 896MB boundary are
+        not generally mapped in the fourth gigabyte of the kernel linear address spaces,and kernel
+        can not access them directly.
+
+        !!  __get_free_pages(GFP_HIGHMEM, 0) returns 0,and kernel will lost track to the pages.
+
+        Resolutions for this problem :
+          1> use alloc_pages() or alloc_page() to request high-memory page frames.
+             return linear address of page descriptor instead to return linear address 
+             of the page frames.
+             /* page descriptor allocated in low memory and forever during the kernel initialization */
+          2> kernel reversed the last 128MB linear address space used to mapping high-memory page frames.
+             this is temporary mapping,by recycling linear addresses the whole high memory can be
+             accessed at different times.
+
+        !! on the system with PAE support have up to 64GB of RAM will be less than 128MB linear address
+           space left for kernel mapping.
+
+        The ways Linux Kernel selected :
+          permanent kernel mapping >
+            establish permanent kernel mapping may block current process if no free page table entry
+            is available.
+
+            kernel mapping use a dedicated Page Table in the master kernel page tables,variable
+              @pkmap_page_table is type of "pte_t *" which is defined in <mm/highmem.c>
+
+            macro LAST_PKMAP <arch/x86/include/asm/pgtable_32_types.h> 
+              number of entries in the page table,has value 512(PAE) OR 1024(non-PAE).
+                                                           /* 2MB once OR 4MB once */
+                                                           /* sizeof(Page Frame) = 4kB */
+
+            macro PKMAP_BASE <arch/x86/include/asm/pgtable_32_types.h>
+              ((FIXADDR_BOOT_START - PAGE_SIZE * (LAST_PKMAP + 1)) & PMD_MASK)
+              /* the page table maps the linear addresses starting from @PKMAP_BASE */
+
+            static page kernel mapping counters array <mm/highmem.c>
+              static int pkmap_count[LAST_PKMAP];
+              /* each element in the array corresponding to a entry in @pkmap_page_table */
+
+            page kernel mapping counter :
+              counter == 0
+                the corresponding Page Table entry does not map any high-memory page frame
+                and is usable
+              counter == 1
+                the corresponding Page Table entry does not map any high-memory page frame,
+                but it cannot be used because the corresponding TLB entry has not been
+                flushed since its last usage
+              counter > 1
+                the corresponding Page Table entry maps a high-memory page frame,which is
+                used by exactly @counter - 1 kernel components
+
+            page kernel mapping track :
+              <mm/highmem.c>
+                /**
+                 * page_address_slot - hash table bucket slot for page kernel mapping
+                 * @lh:                list of @page_address_maps
+                 * @lock:              bucket protector
+                 *
+                 * page_address_htable - page mapping hash table
+                 */
+                static struct page_address_slot {
+                        struct list_head lh;
+                        spinlock_t lock;
+                } ____cacheline_aligned_in_smp page_address_htable[1 << PA_HASH_ORDER];
+
+                /**
+                 * page_address_map - page->virtual association
+                 * @page:             page frame
+                 * @virtual:          virtual linear address mapping
+                 * @list:             list linker
+                 */
+                struct page_address_map {
+                        struct page *page;
+                        void *virtual;
+                        struct list_head list;
+                };
+
+                /* page_address_maps - buffer for all page address mapping */
+                static struct page_address_map page_address_maps[LAST_PKMAP];
+
+            permanent page kernel mapping primitives :
+
+                /**
+                 * page_address - get the mapped virtual address of a page
+                 */
+                page_address
+
+                /**
+                 * kmap - map a page to virtual address
+                 */
+                kmap
+                /**
+                 * kmap_high - map a high memory page frame to virtual address
+                 */
+                kmap_high
+
+                /**
+                 * map_new_virtual - map a new virtual address for a mapped page frame
+                 */
+                map_new_virtual
+
+                /**
+                 * kunmap - unmap a page frame
+                 */
+                kunmap
+
+                /**
+                 * kunmap_high - unmap a high-memory page frame
+                 */
+                kunmap_high
+            
+
+          temporary kernel mapping >
+            establish temporary kernel mapping do not block current process but limit to the number
+            of temporary mappings existed at same time.
+            and a kernel control path use a temporary kernel mapping must ensure that no other
+            kernel control path is using the same mapping.
+            (@it can never block,otherwise the same page table "window" maybe used by others)
+
+          noncontiguous memory allocation
+
