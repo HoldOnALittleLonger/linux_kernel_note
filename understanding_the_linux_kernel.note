@@ -12480,35 +12480,142 @@ Chapter 8 : Memory Management
                 static struct page_address_map page_address_maps[LAST_PKMAP];
 
             permanent page kernel mapping primitives :
+              macro function PageHighMem(__p) is defined in <linux/page-flags.h>,which
+              would be expanded to is_highmem(page_zone(__p)) to determine whether
+              @__p is a page frame in high-memory.
 
+              <linux/mmzone.h>
+                /**
+                 * is_highmem - check whether a given zone descriptor is high-memory zone
+                 * @zone:       zone descriptor
+                 * return:      1 => it is
+                 *              0 => it is not
+                 */
+                static inline int is_highmem(struct zone *zone)
+                {
+                        int zone_off = (char *)zone - (char *)zone->zone_pgdat->node_zones;
+                        return zone_off == ZONE_HIGHMEM * sizeof(*zone) ||
+                               (zone_off == ZONE_MOVABLE * sizeof(*zone) &&
+                                zone_movable_is_highmem());
+                }
+
+              !! FOR SOME PERMANENT PAGE KERNEL MAPPING PRIMITIVES,IF PAGE FRAME IS NOT
+                 IN HIGH-MEMORY,THEN THE ROUTINES FOR HIGH-MEMORY WOULD NOT BE INVOKED.
+                 e.g.  /* PageHighMem(@page) => FALSE */
+                   kmap -> page_address
+                   page_address -> lowmem_page_address
+                   kunmap -> return
+
+              <mm/highmem.c>
                 /**
                  * page_address - get the mapped virtual address of a page
+                 * @page:         the page
+                 * return:        page->virtual
+                 *                NULL => incorrect page descriptor
+                 * # this function traverse page_address_slot to find the
+                 *   page_address_map object which represent this @page.
                  */
-                page_address
+                void *page_address(struct page *page);
 
+              <arch/x86/mm/highmem_32.c>
                 /**
                  * kmap - map a page to virtual address
+                 * @page: the page frame to map
+                 * return:  mapped linera address
+                 *          NULL => failed to map this @page
+                 * # this function call to kmap_high(),which is defined in
+                 *   <mm/highmem.c>.
                  */
-                kmap
+                void *kmap(struct page *page);
+
+              <mm/highmem.c>
                 /**
                  * kmap_high - map a high memory page frame to virtual address
+                 * @page:      the page frame in high-memory to be mapped
+                 * return:     mapped linear address
+                 *             NULL => failed to map this @page
+                 * # this will locks @kmap_lock up before call to page_address(),
+                 *   if @page had been mapped,then return value of page_address()
+                 *   is the virtual address;otherwise,return NULL,in this case,
+                 *   kmap_high() call to map_new_virtual() try to remap @page.
+                 *   before unlock @kmap_lock,it have to updates counter in 
+                 *   @pkmap_count[PKMAP_NR(@vaddr)](increase 1).
+                 *   finally,return @vaddr.
                  */
-                kmap_high
+                void *kmap_high(struct page *page);
 
+                /** 
+                 * last_pkmap_nr - the number in [1, LAST_PKMAP] used by the most recently
+                 *                 page kernel mapping
+                 * # if this number is zero,that means all zero pkmaps in TLB cache must be
+                 *   flushed as well.
+                 */
+                static int last_pkmap_nr;
+                
                 /**
                  * map_new_virtual - map a new virtual address for a mapped page frame
+                 * @page:            the page
+                 * return:           new virtual address of this page frame
+                 *                   0 => failed to map a new virtual address for @page
+                 * # for map a new virtual address,it have to find a usable page table entry.
+                 *   it start a infinity for-cycle :
+                 *     the first step is to traverse all page table entry try to find a usable
+                 *     entry.
+                 *     if @last_pkmap_nr is zero,flush TLB caches for all zero pkmaps.
+                 *     if pkmap_count[@last_pkmap_nr] is zero,an entry is available.
+                 *     if there is no such entry available,then ready to suspend caller.
+                 *       set state of @current to TASK_UNINTERRUPTIBLE
+                 *       enqueue this kernel control path to wait queue
+                 *       unlock @kmap_lock
+                 *       call to schedule()
+                 *     after process switch(completion)
+                 *       lock @kmap_lock
+                 *       check if there is somebody have mapped @page
+                 *       => T
+                 *               just return the mapped virtual address
+                 *       => F
+                 *               goto step1 try to find a usable page table entry again
+                 *   out to for-cycle,map @page by itself(a free page table entry is available)
+                 *     convert @last_pkmap_nr to virtual address
+                 *     call to set_pte_at() to makeup association between @page with @vaddr
+                 *     update counter
+                 *     set @virtual of @page_address_map for this @page frame
+                 *     return @vaddr
                  */
-                map_new_virtual
+                static inline unsigned long map_new_virtual(struct page *page);
 
+              <arch/x86/mm/highmem_32.c>
                 /**
                  * kunmap - unmap a page frame
+                 * @page:   the page frame to unmap
+                 * # this function will call to kunmap_high() which is defined in
+                 *   <mm/highmem.c>.
+                 * ! can not invoke this function in interrupt context.
                  */
-                kunmap
+                void kunmap(struct page *page);
 
+              <mm/highmem.c>
                 /**
                  * kunmap_high - unmap a high-memory page frame
+                 * @page:        the page frame in high-memory to be unmapped
+                 * # what this function does :
+                 *     1> lock @kmap_lock
+                 *        get virtual address of @page,if NULL is got,that is a BUG
+                 *     2> use the virtual address to get PKMAP number via PKMAP_NR(@vaddr)
+                 *     3> decrease @pkmap_count[@nr]
+                 *        check the value of @pkmap_count[@nr]
+                 *        == 0
+                 *                BUG
+                 *                ! A counter must never go down to zero without a TLB flush
+                 *        == 1
+                 *                activate wait queue @pkmap_map_wait through waitqueue_activate()
+                 *     4> unlock @kmap_lock
+                 *        check if return value of waitqueue_activate() is TRUE
+                 *        ==> T
+                 *                call to wake_up(@pkmap_map_wait) to tell others page table entry
+                 *                is available
                  */
-                kunmap_high
+                void kunmap_high(struct page *page);
             
 
           temporary kernel mapping >
