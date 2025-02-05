@@ -12545,10 +12545,10 @@ Chapter 8 : Memory Management
                 void *kmap_high(struct page *page);
 
                 /** 
-                 * last_pkmap_nr - the number in [1, LAST_PKMAP] used by the most recently
+                 * last_pkmap_nr - the number in [0, LAST_PKMAP] used by the most recently
                  *                 page kernel mapping
                  * # if this number is zero,that means all zero pkmaps in TLB cache must be
-                 *   flushed as well.
+                 *   flushed at first.
                  */
                 static int last_pkmap_nr;
                 
@@ -12561,8 +12561,9 @@ Chapter 8 : Memory Management
                  *   it start a infinity for-cycle :
                  *     the first step is to traverse all page table entry try to find a usable
                  *     entry.
-                 *     if @last_pkmap_nr is zero,flush TLB caches for all zero pkmaps.
-                 *     if pkmap_count[@last_pkmap_nr] is zero,an entry is available.
+                 *     if @last_pkmap_nr is zero,flush TLB caches for all zero pkmaps,then set
+                 *     @last_pkmap_nr to LAST_PKMAP(use the last page table entry).
+                 *     if pkmap_count[@last_pkmap_nr] is zero,an entry(@last_pkmap_nr) is available.
                  *     if there is no such entry available,then ready to suspend caller.
                  *       set state of @current to TASK_UNINTERRUPTIBLE
                  *       enqueue this kernel control path to wait queue
