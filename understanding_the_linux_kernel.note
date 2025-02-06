@@ -12420,7 +12420,7 @@ Chapter 8 : Memory Management
         The ways Linux Kernel selected :
           permanent kernel mapping >
             establish permanent kernel mapping may block current process if no free page table entry
-            is available.
+            is available.                      /* thus can not be invoked in interrupt context */
 
             kernel mapping use a dedicated Page Table in the master kernel page tables,variable
               @pkmap_page_table is type of "pte_t *" which is defined in <mm/highmem.c>
@@ -12626,5 +12626,137 @@ Chapter 8 : Memory Management
             kernel control path is using the same mapping.
             (@it can never block,otherwise the same page table "window" maybe used by others)
 
-          noncontiguous memory allocation
+            /* Page Table entry */
+            "window" is reserved fro temporary kernel mapping is quite small,each CPU has its own
+            set of 13 windows,represented by the "enum km_type" data structure.
+            /* it seems like Linux 2.6.34.1 introduced 18 kinds of enum km_type values */
+            
+            <asm-generic/kmap_types.h>
+
+              #ifdef __WITH_KM_FENCE
+              #define KMAP_D(n)  __KM_FENCE_##n ,
+              #else
+              #define KMAP_D(n)
+              #endif
+
+              /**
+               * km_type - kernel mapping type enumerating
+               * # each enumerating value is an index of a fix-mapped linear address.
+               *   (except KM_TYPE_NR)
+               *   because kernel must avoid two kernel control paths using a
+               *   window at same time,each enumerate value in @km_type is dedicated
+               *   to one kernel component and is named after the component.
+               */
+              enum km_type {
+                      KMAP_D(0)        KM_BOUNCE_READ,
+                      KMAP_D(1)        KM_SKB_SUNRPC_DATA,
+                      KMAP_D(2)        KM_SKB_DATA_SOFTIRQ,
+                      KMAP_D(3)        KM_USER0,
+                      KMAP_D(4)        KM_USER1,
+                      KMAP_D(5)        KM_BIO_SRC_IRQ,
+                      KMAP_D(6)        KM_BIO_DST_IRQ,
+                      KMAP_D(7)        KM_PTE0,
+                      KMAP_D(8)        KM_PTE1,
+                      KMAP_D(9)        KM_IRQ0,
+                      KMAP_D(10)       KM_IRQ1,
+                      KMAP_D(11)       KM_SOFTIRQ0,
+                      KMAP_D(12)       KM_SOFTIRQ1,
+                      KMAP_D(13)       KM_SYNC_ICACHE,
+                      KMAP_D(14)       KM_SYNC_DCACHE,
+              /* UML specific,for copy_*_user - used in do_op_one_page */
+                      KMAP_D(15)       KM_UML_USERCOPY,
+                      KMAP_D(16)       KM_IRQ_PTE,
+                      KMAP_D(17)       KM_NMI,
+                      KMAP_D(18)       KM_NMI_PTE,
+                      KMAP_D(19)       KM_TYPE_NR
+              };
+
+            ! "enum fixed_addresses" is defined in <arch/x86/include/asm/fixmap.h>.
+              it defined all "compile-time" special addresses,they has a constant
+              address during "compile-time" but set the physical addresses in the
+              boot process.
+              /**
+               * "compile-time allocated" memory buffers are fixed-size 4kB pages,
+               * they start from the end of virtual address and backwards.
+               *                 (x86_32 0xfffff000)
+               * routine set_fixmap(idx, phys) associate physical memory with fixmap
+               * indices.
+               * ! TLB cache for such buffers would not be flushed across task switches.
+               */
+            ! @fixed_addresses - FIX_KMAP_BEGIN : begin of kmap
+                                 FIX_KMAP_END := FIX_KMAP_BEGIN + (KM_TYPE_NR * NR_CPUS) - 1
+                                                : end of kmap
+              so the kmap memory block size is "4kB * (FIX_KMAP_END - FIX_KMAP_BEGIN)"
+
+            <arch/x86/mm/init_32.c>
+              /**
+               * kmap_pte - page table entry type data object for fixmap
+               * # function kmap_init() in the same file initializes @it to
+               *   kmap_get_fixmap_pte(kmap_vstart),and @kmap_vstart is get from
+               *   __fix_to_virt(FIX_KMAP_BEGIN).
+               *   and variable @kmap_prot is set to PAGE_KERNEL.
+               *                (an object is type of page table entry protection flags)
+               */
+              pte_t *kmap_pte;
+
+            <arch/x86/mm/highmem_32.c>
+              /**
+               * kmap_atomic - establish a kernel fix mapping
+               * @page:        page frame to map
+               * @type:        what kind of kernel fix mapping
+               * return:       NULL => failed to map
+               *               > 0  => linear address for this kmap
+               * # this function call to kmap_atomic_prot() with @kmap_prot to finish
+               *   primary works.
+               */
+              void *kmap_atomic(struct page *page, enum km_type type);
+
+              /**
+               * kmap_atomic_prot - establish a kernel fix mapping with specified
+               *                    page protection flags for single entry
+               * @page:             page frame to map
+               * @type:             what kind of kernel fix mapping
+               * @prot:             entry protection flags
+               * return:            NULL => failed to map
+               *                    > 0  => linear address for this kmap
+               * # if @page is not in high-memory,then just call to page_address() as well.
+               */
+              void *kmap_atomic_prot(struct page *page, enum km_type type, pgprot_t prot);
+
+              what kmap_atomic_prot() does :
+                1> disable page fault trap
+                2> calculate @idx from "@type + KM_TYPE_NR * smp_processor_id()",
+                   calculate @vaddr from __fix_to_virt(FIX_KMAP_BEGIN + @idx).
+
+                3> !! this is a BUG if page table entry for @kmap_pte - @idx is not existed.
+
+                4> call to set_pte() fill a page table entry "@kmap_pte - @idx" with value
+                   returned by mk_pte(page, prot).           (backwards)
+                                                             /**
+                                                              * fill page table entry,no matter
+                                                              * to how linear address grows
+                                                              */
+                5> return @vaddr.
+
+              !! FORBID SLEEP WHEN HOLDING AN ATOMIC KERNEL MAPPING.
+              
+              /**
+               * kunmap_atomic - unmap an atomic kernel mapping
+               * @kvaddr:        kernel mapping virtual address
+               * @type:          what kind of kernel fix mapping
+               * # this function get @vaddr through "@kvaddr & PAGE_MASK",
+               *   use @type to calculate @idx.
+               *   if @vaddr != __fix_to_virt(FIX_KMAP_BEGIN + @idx)
+               *   => T
+               *           BUG_ON(@vaddr < PAGE_OFFSET)
+               *           BUG_ON(@vaddr >= (unsigned long)high_memory
+               *   else
+               *     call to kpte_clear_flush(@kmap_pte - @idx, @vaddr),
+               *     clear and flush a page table entry which has used for
+               *     atomic kernel mapping.
+               *   enable page fault trap.
+               */
+              void kunmap_atomic(void *kvaddr, enum km_type type);
+
+          noncontiguous memory allocations
 
