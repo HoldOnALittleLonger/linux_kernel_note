@@ -12074,7 +12074,8 @@ Chapter 8 : Memory Management
              * @lock:                      concurrent protection
              * @all_unreclaimable:         all pages pinned
              * @span_seqlock:              memory hotplug support
-             * @free_area:                 blocks of free page frames in this zone
+             * @free_area:                 blocks of free page frames in this zone,
+             *                             used by buddy system
              * @lru_lock:                  LRU mechanism lock
              * @lru:                       LRU zones to represent inactive pages and active pages
              *                             for memory cache
@@ -12760,3 +12761,122 @@ Chapter 8 : Memory Management
 
           noncontiguous memory allocations
 
+      The Buddy System Algorithm :
+        a well-known memory management problem -> "external fragmentation"
+          frequent requests and releases of groups of contiguous page frames of different
+          size may lead to a situation in which several small blocks of free page frames
+          are "scattered" inside blocks of allocated page frames.
+          as a result,it may become impossible to allocate a large block of contiguous
+          page frames even if there are enough free pages to satisfy the request.
+
+        the ways to avoid "external fragmentation" :
+          1> use the paging circuitry to map groups of noncontiguous free page frames into
+             intervals of contiguous linear addresses.
+          2> develop a suitable technique to keep track of the existing blocks of free
+             contiguous page frames,avoiding as much as possible the need to split up
+             a large free block to satisfy a request for a smaller one.
+
+          /**
+           * Linux Kernel prefer to 2>
+           * reasons :
+           *   1> in some cases,contiguous page frames are really necessay,because contiguous
+           *      linear addresses are not sufficient to satisfy the request.(i.e. DMA)
+           *                                                                 # it dont care paging
+           *   2> even if contiguous page frame allocation is not strictly necessary,it offers the
+           *      big advantage of leaving the kernel paging tables unchanged.(TLB cache)
+           *   3> large chunks of contiguous physical memory can be accessed by the kernel through
+           *      4MB pages.(PAE support)
+           *      # reduces TLB misses
+           */
+        
+        buddy system algorithm :
+          all free page frames are grouped into 11 lists of blocks that contain groups of
+            1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024
+          contiguous page frames,respectively.
+          the physical address of the first page frame of a block is multiple of the group size.
+          /* e.g. list-16-block : 16 * 2^12(4096,regular page size) */
+          /* 1024 => 4MB chunk of contiguous RAM */
+          /**
+           * contiguous RAM request :
+           *   require a group of X(above) contiguous page frames
+           *
+           * buddy system :
+           *   try to find a free block in list-X
+           *   if found out
+           *           split this block if necessay
+           *           allocate the free block
+           *           split and insert remaining blocks(if existed) to corresponding list
+           *   else
+           *           goto next level and retry(R := X, X *= 2)
+           *
+           *   if all retry have failed 
+           *           failed to allocate page frames         
+           */
+         
+          releasing :
+            kernel attempts to merge pairs of free buddy blocks of size B together into a single
+            block of size 2B.
+            two blocks are considered buddies if :
+              > both blocks have the same size B
+              > they are located in contiguous physical addresses
+              > the physical address of the first page frame of the first block is a multiple
+                2 * B * 2^12
+                /* e.g. 16 * 2^12 <-> 2 * 8 * 2^12 */
+
+              /* this algorithm is iterative : B => 2B => 4B => 8B => ... */
+
+        buddy system data structures :
+          Linux 2.6 use a different buddy system for each zone.
+          so,in 80x86 architecture,there are three kinds of buddy systems :
+            > one for ISA DMA
+            > one for NORMAL
+            > one for HIGH
+
+          each buddy system relies on the following main data structures :
+            @mem_map array has introduced previously,each @zone is concerned with
+            a subset of @mem_map elements
+            /* represented by @zone.zone_start_pfn AND @zone.spanned_pages */
+
+            member @free_area is an array of structure @free_area
+            <linux/mmzone.h>
+              #ifndef CONFIG_FORCE_MAX_ZONEORDER
+              #define MAX_ORDER  11
+              #else
+              #define MAX_ORDER  CONFIG_FORCE_MAX_ZONEORDER
+              #endif
+              
+              #define MIGRATE_UNMOVABLE  0
+              #define MIGRATE_RECLAIMABLE  1
+              #define MIGRATE_MOVABLE  2
+              #define MIGRATE_PCPTYPES  3  /* the number of types on pcp lists */
+              #define MIGRATE_RESERVE  3
+              #define MIGRATE_ISOLATE  4  /* can not allocate from here */
+              #define MIGRATE_TYPES  5
+
+              /* suppose "k" is the idx of @free_area */
+              /**
+               * free_area - structure free_area represent a free area,and the
+               *             free area is composed by 5 kinds of groups of
+               *             page frames each group in different status
+               * @free_list: linker array
+               *             each element represents a linker which collects the
+               *             page descriptors each has the same migrate type and
+               *             associated with the free blocks of 2^k pages
+               *             # the pointers to the adjacent elements in the list
+               *               are stored in the @lru field of page descriptor
+               *               if the page is not free,then @lru represent other
+               *               meaning
+               * @nr_free:   number free blocks of size 2^k pages
+               */
+              struct free_area {
+                      struct list_head free_list[MIGRATE_TYPES];
+                      unsigned long nr_free;
+              };
+
+              struct zone {
+                      ...
+                      struct free_area free_area[MAX_ORDER];  /* 11 lists of blocks */
+                      /* contiguous page frames 2^0 --> 2^10 */
+                      ...
+              };
+          
