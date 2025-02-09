@@ -12789,7 +12789,7 @@ Chapter 8 : Memory Management
            *      # reduces TLB misses
            */
         
-        buddy system algorithm :
+        Buddy System algorithm :
           all free page frames are grouped into 11 lists of blocks that contain groups of
             1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024
           contiguous page frames,respectively.
@@ -12825,7 +12825,7 @@ Chapter 8 : Memory Management
 
               /* this algorithm is iterative : B => 2B => 4B => 8B => ... */
 
-        buddy system data structures :
+        Buddy System data structures :
           Linux 2.6 use a different buddy system for each zone.
           so,in 80x86 architecture,there are three kinds of buddy systems :
             > one for ISA DMA
@@ -12879,4 +12879,144 @@ Chapter 8 : Memory Management
                       /* contiguous page frames 2^0 --> 2^10 */
                       ...
               };
-          
+
+        Allocating a block :
+          static routine __rmqueue() is used to remove an element from the buddy allocator,
+          must call to this routine within struct zone.lock acquired.
+
+          <mm/page_alloc.c>
+            /**
+             * __rmqueue - remove an element from the buddy allocator and then return it
+             * @zone:      the zone to find a page
+             * @order:     order for @free_area
+             * @migratetype:  migrate type for the page to find
+             * return:     NULL => failed to find such page
+             *             pointer to the page descriptor which is the first page frame
+             */
+            static struct page *__rmqueue(struct zone *zone, unsigned int order,
+                                          int migratetype);
+
+            what __rmqueue() does :
+              1> use __rmqueue_smallest() to find an available smallest free page
+                 from the freelists.
+                 /* __rmqueue_smallest() might fallback list-X to list-2X list-4X ... */
+              2> if @page unfound AND @migratetype is not equal to MIGRATE_RESERVE
+                 then
+                         call to __rmqueue_fallback() try to find appropriate page frames
+                         /**
+                          * migrate type fall back and search again.
+                          */
+    
+                         if unfound
+                         then
+                                 set @migratetype to MIGRATE_RESERVE
+                                 /**
+                                  * @migratetype := MIGRATE_RESERVE,it means that
+                                  * only once fallback is be wanted.
+                                  */
+                                 goto 1>
+              3> deal with buddy system tracing.
+              4> return @page.
+
+            what __rmqueue_smallest() does :
+              /* it is a static inline function and defined in the same file */
+
+              1> start a for-cycle ready to traverse the rest of freelists in this
+                 @zone from @order.
+
+                 for (@current_order = order; @current_order < MAX_ORDER; ++@current_order) {
+                         ...
+                 }
+              2> for-cycle :
+                 in cycle,all NULL free area will be skipped.
+                 @page is get through list_entry() with parameters
+                   @free_list[@migratetype].next
+                   struct page
+                   lru
+                 => struct page { lru := list->next }
+              3> for-cycle :
+                 delete @page from @page->lru
+                 clear page buddy for this @page
+                 set @page->private to 0
+                 decrease @nr_free of the @free_area
+              4> for-cycle :
+                 expand @page {
+                        low is @order
+                        high is @current_order
+                        area is the free area where @page frame get from
+                        @size initialized to 1 << high,it means the sizeof
+                        an element in list-X contains @size page frames(contiguous)
+                        
+                        until high <= low
+                          area--
+                          high--
+                          @size >>= 1
+
+                          add @page[@size].lru to @area.free_list[@migratetype]
+                          @area.nr_free++
+                          set page order for @page[size] to high
+
+                        this procedure subdivide the page frames start at
+                        @page to two parts,each size is half of current order,
+                        and add the second part to the free area at order is
+                        "current order - 1",set @private member of the first
+                        page frame of second part to the order.
+
+                        co->current order
+                        @page0 @page1 @page2 ... @pageN (all 2^co page frames)
+                        
+                        each has 2^(co - 1) page frames
+                        part1 : @page0 @page1 ... @page(2^(co - 1) - 1)
+                        part2 : @page(2^(co - 1)) @page(2^(co - 1) + 1) ... @pageN
+
+                        ca->current area
+                                          /* the previous free area */
+                        insert part2 into (--ca)->free_list[@migratetype]
+                        ++ca->nr_free  /* a new element has inserted */
+                        
+                        set first_of(part2)->@private := co
+                 }
+
+              !! if for-cycle finished but no appropriate page frame is found out,
+                 function return NULL.
+
+            what __rmqueue_fallback() does :
+              /**
+               * if __rmqueue_fallback() was called by __rmqueue(),it must be
+               * __rmqueue_smallest() was failed,it turns out free area between
+               * @order to MAX_ORDER,no appropriate page frames.
+               */
+
+              /**
+               * fallbacks - two dimensional array used to represents fallback lists for
+               *             different migrate type
+               *             function __rmqueue_fallback() use this array try to find out
+               *             appropriate page frames
+               */
+              static int fallbacks[MIGRATE_TYPES][MIGRATE_TYPES - 1] = {
+                      [MIGRATE_UNMOVABLE] = { MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE, MIGRATE_RESERVE },
+                      [MIGRATE_RECLAIMABLE] = { MIGRATE_UNMOVABLE, MIGRATE_MOVABLE, MIGRATE_RESERVE },
+                      [MIGRATE_MOVABLE] = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_RESERVE },
+                      [MIGRATE_RESERVE] = { MIGRATE_RESERVE, MIGRATE_RESERVE, MIGRATE_RESERVE },
+              };
+
+              @fallbacks is used when desired block of page frames with @migratetype is not existed,
+              in this case,try to traverse fallback list to find out such block.request for @migratetype
+              can not be satisfied,then we can try to use a substituted migrate type to instead this
+              @migratetype.
+
+              what __rmqueue_fallback() does is use another migrate type from @fallbacks as substitution
+              to traverse free areas from MAX_ORDER - 1 to @order try to find out required page frames.
+
+              if breaking a large block of pages,move all free pages to the preferred allocation list.
+              if falling back for a reclaimable kernel allocation,be more aggressive about taking
+              ownership of free pages.(or @page_group_by_mobility_disabled is TRUE)
+              /**
+               * move freepages block,the freepages will be unlinked from its original LRU and 
+               * insert to @free_list[@migratetype] again.(current migrate type fall backed)
+               * move_freepages_block() also deal with page alignment.
+               * if necessary,modify migrate type of these pages to @migratetype.
+               */
+
+              /* of course,expand() is invoked as same as __rmqueue_smallest() called */
+                 
