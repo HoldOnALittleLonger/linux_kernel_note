@@ -12848,7 +12848,7 @@ Chapter 8 : Memory Management
               #define MIGRATE_UNMOVABLE  0
               #define MIGRATE_RECLAIMABLE  1
               #define MIGRATE_MOVABLE  2
-              #define MIGRATE_PCPTYPES  3  /* the number of types on pcp lists */
+              #define MIGRATE_PCPTYPES  3  /* the number of types on pcp(per-CPU pages) lists */
               #define MIGRATE_RESERVE  3
               #define MIGRATE_ISOLATE  4  /* can not allocate from here */
               #define MIGRATE_TYPES  5
@@ -12944,11 +12944,18 @@ Chapter 8 : Memory Management
                         low is @order
                         high is @current_order
                         area is the free area where @page frame get from
+                        /**
+                         * notice,the @area past to expand() is the address
+                         * of the @free_area[idx page frame come from],thus
+                         * @area points to the element of @free_area[] is the
+                         * last @free_area object between [0, this area].
+                         *                                # list-0 list-X
+                         */
                         @size initialized to 1 << high,it means the sizeof
                         an element in list-X contains @size page frames(contiguous)
                         
                         until high <= low
-                          area--
+                          area--  /* not it points to previous element */
                           high--
                           @size >>= 1
 
@@ -13019,4 +13026,134 @@ Chapter 8 : Memory Management
                */
 
               /* of course,expand() is invoked as same as __rmqueue_smallest() called */
+
+        Freeing a block :
+          !! LINUX 2.6.34.1 HAVE NOT FUNCTION __free_pages_bulk().
+             FUNCTION WITH SUFFIX "_bulk" FOR FREE PAGES IS THE ONLY ONE __free_pcppages_bulk().
+             THAT IS,FREE PAGES HAVE TO BE HANDLED BY __free_pages().
+
+          As described above,struct page.@flags contains the information about what memory zone
+          this page frame is belong to.
+
+          <mm/page_alloc.c>
+            /**
+             * free_hot_cold_page - free a hot page or a cold page
+             * @page:               page frame descriptor
+             * @cold:               indicator for whether @page is cold or hot
+             * # this function is invoked by __free_pages() when @order is given 0,
+             *   that means only one page frame have to free.
+             */
+            void free_hot_cold_page(struct page *page, int cold);
+          
+            what free_hot_cold_page() does :
+              1> get memory zone descriptor @zone from @page.
+
+                 call to kmemcheck_free_shadow() to handle kernel memory check,
+                 if @page->shadow is not NULL,that means this page is tracked,
+                 in this case,@shadow points a status block and status for each
+                 bytes in this page frame,and kmemcheck_free_shadow() will free the
+                 page frames used for kernel memory check.(it get page descriptor
+                 from @page->shadow)
+
+                 if @page is mapped in an anonymous way,then set @page->mapping to
+                 NULL.(check via PageAnon().if page is PAGE_MAPPING_ANON,then @mapping
+                 points to its anon_vma,not a address_space)
+
+                 if @page failed on free_pages_check(),then return.
+                 /**
+                  * TRUE :
+                  *   page_mapcount(page) OR
+                  *   page->mapping != NULL OR
+                  *   page->count != 0 OR
+                  *   page->flags & PAGE_FLAGS_CHECK_AT_FREE
+                  *   {
+                  *           bad_page page
+                  *           return 1
+                  *   }
+                  * Otherwise FLASE(and disable PAGE_FLAGS_CHECK_AT_PREP)
+                  */
+
+                 if @page is not high-memory,then does debug checking.
+
+              2> call to architecture free-page to does some especial works.
+                 call to kernel_map_pages() to does page-alloc debug.
+
+                 set @page->private to @migratetype
+                 disable local interrupt
+                 count virtual memory event with type PGFREE
+
+              3> deal with unmovable,reclaimable,movable on pcp lists only.
+                 free ISOLATE pages back to the allocator because they are 
+                 being offlined but treat RESERVE as movable pages,get them
+                 back if necessary.
+
+                 check if @migratetype == MIGRATE_ISOLATE
+                 T =>
+                         free one page with arguments (@zone, @page, 0, @migratetype)
+                         enable local interrupt
+                         return to caller
+
+              4> if @migratetype is not MIGRATE_ISOLATE
+                 then
+                         get @pcp lists of this CPU
+
+                 /* Memory Page Frame LRU cold/hot cache */
+                 check if @could is TRUE
+                 T =>
+                         add @page->lru to the tail of @pcp->lists[@migratetype]
+                 F =>
+                         add @page->lru to the head of @pcp->lists[@migratetype]
+
+                 increase counter of @pcp
+                 
+                 check if @pcp->count is greater than or equal to @pcp->high
+                 T =>
+                         free pcppages bulk (@zone, @pcp->batch, @pcp)
+                         @pcp->count -= @pcp->batch
+              5> enable local interrupt
+                 return to caller
+
+            /**
+             * __free_pages_ok - free page frames 
+             * @page:            page frame
+             * @order:           order for the block of @page frames
+             * # this function is invoked by __free_pages() when @order
+             *   is greater than 0
+             */
+            static void __free_pages_ok(struct page *page, unsigned int order);
+
+            what __free_pages_ok() does :
+              1> similart to __free_hot_cold_page(),it starts free event tracing,
+                 and does kernel memory checking.
+
+              2> for each page frame in the block,call free_pages_check() on them,
+                 if any bad page frame was detected
+                 then
+                         return to caller
+                         /* bad page frame detected,we can not free it to buddy system */
+
+              3> if @page is not in high-memory,then does debug checking.
+              4> call to architectur depened free-page primitive to does some
+                 especial works.
+              5> call to kernel_map_pages() to does page-alloc debug.
+              6> disable local interrupt
+                 count virtual memory events with type PGFREE,amount of page frames is
+                 "1 << @order"
+              7> call to free_one_page() to release the block of page frames
+              8> enable local interrupt
+                 returb to caller
+
+            !! both free_hot_cold_page() and __free_pages_ok() are called to
+                       __TestClearPageMlocked(@page);
+               but i did not find out such macro is defined in kernel,and i suppose
+               that macro is added into kernel only USE_SPLIT_PTLOCKS defined.
+               and if @page is Mlocked most recently,then have to free page mlock
+               before free page.
+
+            !! __free_pages() does not merge two smaller buddies to a larger one,becasue
+               this work had been done by __rmqueue().
+                                          /* which call to expand() */
+                                    
+
+
                  
