@@ -13150,9 +13150,124 @@ Chapter 8 : Memory Management
                and if @page is Mlocked most recently,then have to free page mlock
                before free page.
 
-            !! __free_pages() does not merge two smaller buddies to a larger one,becasue
-               this work had been done by __rmqueue().
-                                          /* which call to expand() */
+            /**
+             * __free_one_page - release allocated page frames and do block merging
+             * @page:            the page frame
+             * @zone:            which memory zone
+             * @order:           what is the order of free area of @zone
+             * @migratetype:     migrate type
+             * # this function is the main page frame releasing routine,it have to
+             *   take charge of buddy system to merge blocks if necessary.
+             * # free one page,but is able to free more than one page frames. :)
+             */
+            static inline void __free_one_page(struct page *page, struct zone *zone,
+                                               unsigned int order, int migratetype);
+
+            what __free_one_page() does :
+              1> check if @page is compound page
+                 T =>
+                         check if any page frame is bad in this compound page
+                         T =>
+                                 /**
+                                  * number of page frames in this compound page 
+                                  *         1 << @order
+                                  *         if compound order of @page is different to @order,OR
+                                  *         @page->flags & PG_head => TRUE
+                                  *         then,this @page is a bad page.
+                                  * check all page frames in this compound page,if any page with
+                                  * PageTail() => FALSE OR @first_page != @page
+                                  * then it also a bad page.
+                                  */
+                                 just return to caller
+              2> get @page_idx through "pfn of this @page & ((1 << MAX_ORDER) - 1)"
+                                                              # 2047 => 01111111111
+                                       /* pfn - page frame number */
+              3> start a while-cycle until @order >= (MAX_ORDER - 1 := 10)
+                 /**
+                  * dont handle @order-10,because list-10 is the last list-X
+                  * dont handle order < @order,because merge smallers to a large
+                  */
+                 in the while-cycle,it have to find the buddy for this @page,it the buddy is
+                 existed,then merge them,iterative to fallback lists.
+              4> while-cycle {
+                        call to __page_find_buddy() with @page, @page_idx, @order.
+                        the page descriptor of its buddy is calculated from the expression
+                                @page + ((@page_idx ^ (1 << order)) - @page_idx)
+                                /**
+                                 * memory mapping for virtual address is linear,all page frame
+                                 * descriptors are saved in @mem_map.
+                                 */
+                        check if @buddy is @page's buddy through page_is_buddy() with
+                        @page, @buddy, @order
+                               @buddy is the real buddy if only if PG_buddy flag is set in
+                               @buddy->flags AND page order of @buddy is equal to @order
+                        if no buddy is found,then break cycle,because there is no more merging
+                        have to be done.
+
+                        update merging informations :
+                          list_del @buddy from its LRU(@it inserted by expand() formerly)
+                          decrease @nr_free of free area has @order
+                          remove @buddy's order
+                          calculate combined index through __find_combined_index(@page_idx, @order)
+                                  @page_idx & ~(1 << @order)
+                          /* combined_idx - index of page frame after it merged to its buddy */
+                          update @page to @page + (@combined_idx - @page_idx)
+                          /* page frame address for merged page frames(@page and its buddy) */
+
+                          update @page_idx to @combined_idx
+                          @order++
+                 }
+              5> call to set_page_order() to set @page's order to @order,value of @order is the
+                 last while-cycle where no buddy of @page is found.
+                 list add @page->lru to @zone->free_area[@order].free_list[@migratetype]
+                 update @nr_free
+
+        What is Buddy :
+
+          list-X
+                    (same size)
+            page's buddy        page
+            page                page'buddy
+          +--------------------------------+
+          |              |                 |
+          |              |                 |
+          |              |                 |
+          +--------------------------------+
+          <----------- 2^X ---------------->
+          <- 2^(X - 1) ->   <- 2^(X - 1) ->
+
+          allocate sizeof(@page) from list-x
+          but the size of block in list-X is sizeof(@page) * 2
+          thus,split it
+          now,there are two parts,one is @page,another is its buddy
+          before allocating,@page and its buddy should be placed together in list-X
+          but memory request have came and list-(X-1) did not satisfy the request
+          so @page have to get apart with its buddy :(
+          finally,@page is allocated to a kernel control path,and its buddy been
+          expanded to list-(X-1),the @buddy waiting for its buddy come back
+          ... /* more memory request similar to this */
+
+          free @page,release it now
+          because,order of @page is log_2(sizeof(@page)),it has the same size with
+          its buddy,so it will be placed inside list-(X-1)
+          and @page's buddy is expanded to list-(X-1),too
+
+          @page try to find out its buddy in list-(X-1)
+
+          if its buddy is existed(have not been required by other kernel control path)
+          then @page and its buddy can be merged,they can be there together again
+          but list-(X-1) is too small for them,thus they must move to list-X
+          if there also a buddy in list-X,can do the same
+
+          if its buddy is not existed,that means no more buddy have to meet,no more
+          page frame merging have to be done
+          /**
+           * this just for current page frames,because of their buddy is not existed 
+           * is maybe @buddy required by other kernel control path.
+           * after @buddy come back,it will must be go to meet these page frames as
+           * soon as possible. :)
+           */
+
                                     
 
 
