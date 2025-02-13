@@ -13268,7 +13268,76 @@ Chapter 8 : Memory Management
            * soon as possible. :)
            */
 
-                                    
+      The Per-CPU Page Frame Cache :
+        the kernel often requests and releases single page frames,to boost system performance,
+        each memory zone has a per-CPU page frame cache.
+        the cache includes some pre-allocated page frames to be used for single memory requests
+        issued by the local CPU.
+        there are two caches for each memory zone and for each CPU :
+          hot cache
+            stores page frames whose contents are likely to be included in the CPU's hard cache
+          cold cache
+            stores page frames whose contents are not accessed in a long time
+
+        in face,every access to a memory cell of the page frame will result in a line of the
+        hardware cache being "stolen" from another page frame,unless the hardware cache already
+        includes a line that maps the cell of the "hot" page frame just accessed.
+
+        taking a page frame from the "cold" cache is convenient if the page frame is going to
+        be filled with a DMA operation. /* the CPU is not involved and no line will be modified */
+
+        structure per_cpu_pageset :
+          <linux/mmzone.h>
+            /**
+             * per_cpu_pages - per-CPU pre-allocated pages
+             * @cout:          number of pages in the list
+             * @high:          high watermark,emptying needed
+             *                 cache depletion watermark
+             * @batch:         chunk size for buddy add/remove
+             *                 number of page frames
+             * @lists:         lists of pages,one per migrate type stored on the pcp-lists
+             */
+            struct per_cpu_pages {
+                    int cout;
+                    int high;
+                    int batch;
+                    struct list_head lists[MIGRATE_PCPTYPES];
+            };
+
+            /**
+             * per_cpu_pageset - structure per_cpu_pageset represents the set of per-CPU
+             *                   page frame caches
+             * @pcp:             pages pre-allocated for this CPU
+             * @expire:          NUMA expire
+             * @stat_threshold:  threshold defines how large a memory zone is
+             * @vm_stat_diff:    zone statistics
+             */
+            struct per_cpu_pageset {
+                    struct per_cpu_pages pcp;
+            #ifdef NUMA
+                    s8 expire;
+            #endif
+            #ifdef CONFIG_SMP
+                    s8 stat_threshold;
+                    s8 vm_stat_diff[NR_VM_ZONE_STAT_ITEMS];
+            #endif        
+            };
+
+        as described above,each zone descriptor has a member named @pageset which is a pointer of
+        struct per_cpu_pageset and defined with macro __percpu.
+        it is interpreted to an array and each element corresponding to a CPU in the system.
+        actually,an element consists of two per_cpu_pageset object,one for hot cache,another for
+        cold cache.
+
+        /* LINUX 2.6.34.1 ONLY ONE WATERMARK */
+        kernel monitors the watermark @high.
+        if number of page frames in the cache is arrived "high",then kernel release
+        @batch page frames to buddy system.
+        /**
+         * values of @batch and @high essentially depend on the number of page frames included in
+         * the memory zone.
+         * function setup_pageset() set @high to 6 * batch,and set @batch to max(1UL, 1 * batch)
+         */
 
 
-                 
+            
