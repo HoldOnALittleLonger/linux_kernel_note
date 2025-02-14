@@ -13323,8 +13323,28 @@ Chapter 8 : Memory Management
             #endif        
             };
 
-        as described above,each zone descriptor has a member named @pageset which is a pointer of
-        struct per_cpu_pageset and defined with macro __percpu.
+        !! MACRO "__percpu" IS DEFINED IN <linux/compiler.h>,MACRO EXPANDED TO
+             "__attribute__((noderef, address_space(3)))"
+           "noderef" AND "address_space" ARE NOT COMPILER ATTRIBUTES,THEY ARE "Sparse"
+           ATTRIBUTES.
+           AND "Sparse" IS USED TO CHECK LINUX KERNEL CODE ERROR.
+
+        !! in <mm/page_alloc.c>,each CPU has a per-CPU variable is type of struct per_cpu_pageset
+           with name @boot_pageset.
+           before "void __init setup_per_cpu_pageset(void)" is called,only @boot_pageset is available,
+           this function call to alloc_percpu() to allocate cpu cache for @zone->pageset to each
+           populated zone.
+           /* __init specifier,thus each CPU on this system will processes this function */
+           static function setup_pageset() is called by __build_all_zonelists(),the function initializes
+           @boot_pageset to zero,and setup its fields to default values.
+           /**
+            * function setup_pageset() also will be called by setup_per_cpu_pageset(),setup_per_cpu_pageset()
+            * allocate cpu cache for @zone->pageset,and setup_pageset() initializes them.
+            * values of @batch and @high essentially depend on the number of page frames included in
+            * the memory zone.
+            * function setup_pageset() set @high to 6 * batch,and set @batch to max(1UL, 1 * batch)
+            */
+
         it is interpreted to an array and each element corresponding to a CPU in the system.
         actually,an element consists of two per_cpu_pageset object,one for hot cache,another for
         cold cache.
@@ -13333,11 +13353,82 @@ Chapter 8 : Memory Management
         kernel monitors the watermark @high.
         if number of page frames in the cache is arrived "high",then kernel release
         @batch page frames to buddy system.
-        /**
-         * values of @batch and @high essentially depend on the number of page frames included in
-         * the memory zone.
-         * function setup_pageset() set @high to 6 * batch,and set @batch to max(1UL, 1 * batch)
-         */
 
 
-            
+        Allocating page frames through the per-CPU page frame caches :
+          function buffered_rmqueue() allocates page frames in a given memory zone.it makes use of
+          the per-CPU page frame caches to handle single page frame requests.
+
+          <mm/page_alloc.c>
+            /**
+             * buffered_rmqueue - handle page frames request from pre-allocated cache
+             * @preferred_zone:   used for NUMA,used as an argument of zone_statistics()
+             *                    if @preferred_zone->zone_pgdat == @zone->zone_pgdat => NUMA_HIT
+             *                    ...
+             * @zone:             the zone used for this allocation
+             * @order:            how many page frames to be allocated at this allocation
+             * @gfp_flags:        allocator flags
+             * @migratetype:      page frame migrate type
+             * return:            page descriptor pointer
+             *                    NULL => have fault
+             */     
+            static inline
+            struct page *buffered_rmqueue(struct zone *preferred_zone, struct zone *zone, int order,
+                                          gfp_t gfp_flags, int migratetype);
+
+            what buffered_rmqueue() does :
+              again:
+              1> if @order is zero,then only one page frame is required.
+              2> disable local interrupt.
+                 get @pcp from per-CPU pcp cache of this @zone.(this_cpu_ptr(zone->pageset)->pcp)
+                 get page frame list with migrate type @migratetype.
+              3> if page frame list is empty,that means no page frames is cached with @migratetype.
+                 thus,call to rmqueue_bulk() to allocate page frames as cache,and update @pcp->count.
+                                                         /* @batch is the size for this allocation */
+                 check page frame list again,if it stay empty,then we failed to allocating,goto failed.
+              4> if page frame list is not empty,then check if __GFP_COLD is enabled in @gfp_flags.
+                 if "cold" is specified,that means allocation must operate on "cold" cache,
+                 so get page frames from the tail of page frame list;otherwise,get page frames from
+                 the head of page frame list.(list->next)
+              5> due to some page frames is allocated for the request,delete it from its LRU list.
+                 decrease @pcp->count.
+
+              !! BECAUSE LINUX 2.6.34.1 NO FIELD "low" IN PER_CPU_PAGES,SO IF LIST IS EMPTY,THEN HAVE
+                 TO ALLOCATE PAGE FRAMES AS PER-CPU CACHE.
+
+              6> if @order is not zero,that is more than one page frames are required.
+                 /**
+                  * in this case,per-CPU cache can not be used for this allocation.
+                  */
+              7> if __GFP_NOFAIL is enabled,then print warning once if @order > 1.
+                                                                       /* may be failed */
+                 /**
+                  * __GFP_NOFAIL is not to be used in new code!
+                  */
+              8> disable local interrupt.
+                 get page frames through __rmqueue().
+                 enable local interrupt.
+              9> if no page frames is acquired,then goto failed.
+                 otherwise,modify zone page state(@vm_stat_diff[NR_FREE_PAGES] + -(2^@order)).
+
+              public path :
+                count zone virtual memory PGALLOC events,number of events is 2^@order.
+                call to zone_statistics() with @preferred_zone and @zone,which update NUMA statistics.
+                enable local interrupt.
+                
+                check VM BUG,if @page from @zone in a bad range,then this is a BUG.
+
+                call to prep_new_page() to set some field of the @page(first page frame) and
+                process kernel memory checking.
+                AND
+                if __GFP_ZERO is enabled,have to initializes all byte in the pages to zero.
+                if @order >= 1 AND __GFP_COMP is enabled,then have to prepare compound page.
+                this function have to checks all page frames from this allocation,if any checking for
+                a page frame is failed,function returns 1;otherwise return 0.
+                
+                if @prep_new_page() returned 1,jump to label "again" to process allocation again.
+
+              failed:
+                enable local interrupt
+                return NULL
+              
