@@ -13107,8 +13107,15 @@ Chapter 8 : Memory Management
                  increase counter of @pcp
                  
                  check if @pcp->count is greater than or equal to @pcp->high
+                 /**
+                  * per-CPU page cache watermark.
+                  */
                  T =>
                          free pcppages bulk (@zone, @pcp->batch, @pcp)
+                         /**
+                          * free_pcppages_bulk() finally call to __free_one_page() to
+                          * release page frames to per-CPU page frame cache.
+                          */
                          @pcp->count -= @pcp->batch
               5> enable local interrupt
                  return to caller
@@ -13290,15 +13297,17 @@ Chapter 8 : Memory Management
           <linux/mmzone.h>
             /**
              * per_cpu_pages - per-CPU pre-allocated pages
-             * @cout:          number of pages in the list
+             * @count:         number of pages in the list
              * @high:          high watermark,emptying needed
              *                 cache depletion watermark
              * @batch:         chunk size for buddy add/remove
              *                 number of page frames
              * @lists:         lists of pages,one per migrate type stored on the pcp-lists
+             *                 "cold" page frame from @list->prev,and "hot" page frame from
+             *                 @list->next
              */
             struct per_cpu_pages {
-                    int cout;
+                    int count;
                     int high;
                     int batch;
                     struct list_head lists[MIGRATE_PCPTYPES];
@@ -13431,4 +13440,55 @@ Chapter 8 : Memory Management
               failed:
                 enable local interrupt
                 return NULL
-              
+
+        Releasing page frames to the per-CPU page frame caches :
+          function free_hot_cold_page() is used to free per-CPU page frame.
+          this function will call to free_pcppages_bulk() to process the main
+          works.
+
+          <mm/page_alloc.c>
+            /**
+             * free_pcppages_bulk - free a bulk of per-CPU page frames
+             * @zone:               memory zone of the cached page frame
+             * @count:              how many page to free,in normally,it is @batch
+             * @pcp:                the per_cpu_pageset
+             * # this function will processes three of cycles,one for @count
+             *   page frames,one for find out appropriate @pcp->lists,the last one for
+             *   free 3one page frame
+             */
+            static void free_pcppages_bulk(struct zone *zone, int count,
+                                           struct per_cpu_pages *pcp);
+
+            what free_pcppages_bulk() does :
+              /**
+               * this function only be used when @pcp->count >= @pcp->high,that maximum
+               * watermark is arrived at,so have to free the exceeded page frames to
+               * buddy system.
+               * if it is not arrived at watermark,then just release one page frame
+               * and add it to the @pcp->lists[X] then increase @pcp->count as well.
+               */
+              1> acquire @zone->lock.
+                 set @zone->all_unreclaimable and @zone->pages_scanned to zero.
+                 modify zone statistics NR_FREE_PAGES to "origin_value += @batch".
+              2> while-cycle until @coun == 0
+              3> in while-cycle :
+                   do-while cycle : until @list is not empty,that is find out a
+                   list of page frames with appropriate @migratetype.
+                   in each cycle stage,@batch_free will increase 1(initialized to zero)
+                   whenever an empty list is encountered.
+                   if @migratetype == MIGRATE_PCPTYPES,have to reset it to zero and
+                   traverse @pcp->lists again.
+              4> in while-cyle :
+                   from step 3>,we have find out a list of page frames is not empty,now
+                   have to handle page frames free on it.
+
+                   do-while cycle : until @count == 0 OR @batch_free == 0 OR @list is empty
+                   get page descriptor from the tail of LRU.
+                   unlink this @page from LRU.
+                   /* MIGRATE_MOVABLE list may include MIGRATE_RESERVEs */
+                   call to __free_one_page(@page, @zone, 0, page_private(@page)) to free
+                   this page frame.
+                   trace memory page event for per-CPU drain.
+              5> outside to while-cycle
+                 release @zone->lock
+                 return
