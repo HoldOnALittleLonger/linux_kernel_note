@@ -11972,6 +11972,8 @@ Chapter 8 : Memory Management
              * pglist_data(pg_data_t) - structure used to represent a memory node
              * @node_zones:             array of zone descriptors of the node
              * @node_zonelists:         array of zonelist data structures used by the page allocator
+             *                          each zonelist includes all memory zones in current node
+             *                          with the same zone type
              * @nr_zones:               number of zones in the node
              * @node_mem_map:           array of page descriptors of the node
              * @node_page_cgroup:       cgroup data used for memory resource control
@@ -13492,3 +13494,82 @@ Chapter 8 : Memory Management
               5> outside to while-cycle
                  release @zone->lock
                  return
+
+      The Zone Allocator :
+        the zone allocator is the frontend of the kernel page frame allocator.
+        the goals that zone allocator must satisfy :
+          > it should protect the pool of reserved page frames.
+          > it should trigger the page frame reclaiming algorithm when memory is scarce and
+             blocking the current process is allowed;once some page frames have been freed,the
+             zone allocator will retry the allocation.
+          > it should preserve the small,precious ZONE_DMA memory zone,if possible.
+
+        the __alloc_pages() function :
+          macro alloc_pages() ends up invoking alloc_pages_node() and which ends up invoking
+          __alloc_pages().
+          __alloc_pages() is a zone allocator,which is defined in <linux/gfp.h> as a static
+          inline function.
+
+          <linux/gfp.h>
+            /**
+             * __alloc_pages - zone allocator
+             * @gfp_mask:      gfp flags
+             * @order:         will allocate 2^@order page frames
+             * @zonelist:      memory zone list used to find oud appropriate page frames
+             * return:         page descriptor pointer of the first page
+             *                 NULL => failed on allocation
+             * # this function only call to __alloc_pages_nodemask() with NULL node mask
+             */
+            static inline
+            struct page *__alloc_pages(gfp_t gfp_mask, unsigned int order,
+                                       struct zonelist *zonelist);
+
+          <mm/page_alloc.c>
+            /**
+             * __alloc_pages_nodemask - allocate page frames from the zones in a specified
+             *                          NUMA node
+             * @gfp_mask:               gfp flags
+             * @order:                  2^@order pages to allocate
+             * @zonelist:               memory zone list for page frames searching
+             * @nodemask:               mask of NUMA nodes
+             * return:                  page descriptor of the first page frame
+             *                          NULL => failed on allocation
+             * # this function is the "heart" of the zoned buddy allocator
+             */
+            struct page *__alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
+                                                struct zonelist *zonelist, nodemask_t *nodemask);
+
+            what __alloc_pages_nodemask() does :
+              1> get zone_type from @gfp_mask.
+                 get migrate type from @gfp_mask through allocflags_to_migrate().
+                 set @gfp_mask to the gfp allowed mask.
+                 start kernel control path tracing for memory allocation,call to might_sleep_if()
+                 if __GFP_WAIT is enabled.
+              2> call to should_fail_alloc_page(),this will check @gfp_mask and @order whether
+                 satisfied kernel resource requirement.
+                 if the function returned TRUE,then __alloc_pages_nodemask() should returns
+                 NULL immediately.
+              3> check the zones suitable for the @gfp_mask contain at least one valid zone.
+                 it is possible to have an empty zonelist as a result of GFP_THISNODE and a
+                 memoryless node.
+                 /**
+                  * this will check if @zonelist->zonerefs->zone is FALSE,if it is,then return
+                  * NULL.
+                  */
+              4> get first zones from zonelist and save the address to @preferred_zone(local var).
+              5> if @preferred_zone is NULL,then return NULL.
+              6> @preferred_zone is not NULL,then get page from free list.
+                 this is done by function get_page_from_freelist(),call it with arguments
+
+                   @gfp_mask | __GFP_HARDWALL, @nodemask, @order, @zonelist, @high_zoneidx(zone type),
+                   ALLOC_WMARK_LOW | ALLOC_CPUSET, @preferred_zone, @migratetype
+                        
+                 /**
+                  * get_page_from_freelist() traverse all zones in @zonelist try to allocate page frame.
+                  */
+
+              7> if @page is NULL,that means failed on the first allocation,then retry on slow path.
+                 this is done by function __alloc_pages_slowpath() with arguments
+                   @gfp_mask, @order, @zonelist, @high_zoneidx, @nodemask, @preferred_zone, @migratetype
+              8> shutdown tracing
+                 return @page
