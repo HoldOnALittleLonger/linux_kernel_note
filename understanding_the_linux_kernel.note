@@ -12178,6 +12178,18 @@ Chapter 8 : Memory Management
               * # Number of free page frames currently is less than required.
               */
 
+           /**
+            * structure zonelist and structure zoneref are defined in <linux/mmzone.h>.
+            * struct zoneref has two members :
+            *         struct zone *zone /* actual zone */
+            *         int zone_idx      /* idx in zonelist (/
+            * struct zonelist has several members :
+            *         struct zonelist_cache *zlcache_ptr /* zonelist traversing speedup cache */
+            *         struct zoneref _zonerefs[MAX_ZONES_PER_ZONELIST + 1]
+            *                        /* zone reference objects in this zonelist */
+            *         struct zonelist_cache zlcache /* #ifdefined CONFIG_NUMA */
+            */
+
       The Pool of Reserved Page Frames :
         memory allocation requests can be satisfied in two different ways :
           1> required memory is available now,return immediately
@@ -13573,3 +13585,217 @@ Chapter 8 : Memory Management
                    @gfp_mask, @order, @zonelist, @high_zoneidx, @nodemask, @preferred_zone, @migratetype
               8> shutdown tracing
                  return @page
+
+            /**
+             * get_page_from_freelist - traverse memory zones try to find out required page frames
+             * @gfp_mask:               GFP flags
+             * @nodemask:               NUMA node mask
+             * @order:                  exponent
+             * @zonelist:               memory zone list
+             * @high_zoneidx:           the zone type specified in GFP flags
+             * @alloc_flags:            allocation flags
+             * @preferred_zone:         preferred memory zone,generally it is the memory zone of local NUMA node
+             * @migratetype:            page frame migrate type
+             * return:                  page descriptor pointer
+             *                          NULL => faild on allocation
+             */
+            static struct page *
+            get_page_from_freelist(gfp_t gfp_mask, nodemask_t *nodemask, unsigned int order,
+                                   struct zonelist *zonelist, int high_zoneidx, int alloc_flags,
+                                   struct zone *preferred_zone, int migratetype);
+
+            what get_page_from_freelist() does :
+              1> set local variable @classzone_idx to @preferred_zone's idx
+              zonelist_scan:
+              2> ready to scan all memory zones in @zonelist.
+                 for_each_zone_zonelist_nodemask : @zone @zoneref @zonelist @high_zoneidx @nodemask
+                   /**
+                    * allocation can not span several memory zones.
+                    */
+              3> check if NUMA_BUILD is TRUE AND
+                          /* zonelist cache */
+                          @zlc_active is TRUE AND
+                                                                     /* local-var zonelist_cache
+                                                                      * approximation */
+                          zlc_zone_worth_trying(@zonelist, @zoneref, @allowednodes) is FALSE
+                 then
+                         /**
+                          * zlc_zone_worth_trying() does two quickly checkings :
+                          *   1> if the zone is not thought to be full
+                          *   2> if the zone nodes is allowed
+                          */
+                         continue to next cycle
+              4> check if @alloc_flags & ALLOC_CPUSET is TRUE AND
+                          cpuset_zone_allowed_softwall(@zone, @gfp_mask) is FALSE
+                 then
+                          skip current zone and goto try_next_zone
+              5> call to BUILD_BUG_ON(ALLOC_NO_WATERMARKS < NR_WMARK),it is a building-time macro
+                 used for debug.
+              6> check if @alloc_flags & ALLOC_NO_WATERMARKS is TRUE
+                 then
+                         get watermark for current @zone use the idx @alloc_flags & ALLOC_WMARK_MASK
+                         check if this watermark is OK through function zone_watermark_ok()
+                         T =>
+                                 goto try_this_zone
+                         check if @zone_reclaim_mode is zero
+                         then
+                                 goto this_zone_full,this @zone is full and can not reclaim page frames
+                 call to zone_reclaim(@zone, @gfp_mask, @order) try to reclaim page frames.
+                 if this function returned ZONE_RECLAIM_NOSCAN,then try next zone(goto try_next_zone),
+                 because we try to reclaim page frames inside this @zone but did not scan them,thus do not
+                 know how many page frames are available.
+                 if this function returned ZONE_RECLAIM_FULL,then goto this_zone_full.even we want to reclaim
+                 page frames,but there is nothing can be done.
+                 other returned values,check if zone watermark is OK,it is not,then goto this_zone_full.
+                 /**
+                  * free pages is calculated via expression "zone_page_state(@zone, NR_FREE_PAGES) - 2^@order + 1"
+                  * if free pages in this @zone is less than or equal to minimum watermark + low-memory reserve,
+                  * then return 0,that is after allocated 2^@order page frames,the free pages would not satisfy
+                  * memory zone minimum requirement.
+                  * if more free pages are available,then scan free areas from order 0 to order @order - 1
+                  * {
+                  *         free pages -= Nth free area's nr_free << N
+                  *         minimum watermark /= 2 /* require fewer higher order pages to be free */
+                  *         if free pages <= minimum watermark,then return 0
+                  * }
+                  */
+              try_this_zone:
+              7> call to buffered_rmqueue(@preferred_zone, @zone, @order, @gfp_mask, @migratetype).
+                 if we succeed to acquire page frames,then stop traversing and return these page frames.
+              this_zone_full:
+              8> check if NUMA_BUILD is TRUE
+                 then
+                         /* mark zonelist cache for @zonelist that the zone has reference @zoneref is full */
+                         call to zlc_mark_zone_full(@zonelist, @zoneref)
+              try_next_zone:
+              9> check if NUMA_BUILD is TRUE AND
+                          @did_zlc_setup is FALSE AND
+                          /* more than one NUMA nodes are online */
+                          @nr_online_nodes > 1
+                 then
+                         set @allowednodes to the result of zlc_setup(@zonelist, @alloc_flags),to setup zonelist cache
+                         set @zlc_active = 1 to indicate that zonelist cache is activated
+                         set @did_zlc_setup = 1 to indicate that zonelist cache had been setup
+              10> outside to for_each_zone_zonelist_nodemask
+                  check if NUMA_BUILD is TRUE AND
+                           NULL page descriptor is acquired AND
+                           zonelist cache is activated
+                  then
+                          reset @zlc_active to zero and goto zonelist_scan to try again
+              11> return acquired page descriptor
+
+            /**
+             * __alloc_pages_slowpath - allocate page frames from slowpath
+             *                          the meaning of slowpath as its name,we maybe need to
+             *                          waiting for memory reclaim or dirty page writeback .etc
+             *                          until some page frames are available
+             * @gfp_mask:               GFP flags
+             * @order:                  exponent
+             * @zonelist:               memory zones to scan
+             * @high_zoneidx:           zone type specified by GFP flags
+             * @nodemask:               NUMA node mask
+             * @preferred_zone:         preferred memory zone
+             * @migratetype:            migration type of page frames
+             * return:                  page descriptor pointer
+             *                          NULL => failed to allocation on slowpath
+             * # __alloc_pages() call to this function when get_pages_from_freelist() was failed
+             */
+            static inline struct pages *
+            __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order, struct zonelist *zonelist,
+                                   enum zone_type high_zoneidx, nodemask_t *nodemask,
+                                   struct zone *preferred_zone, int migratetype);
+
+            what __alloc_pages_slowpath() does :
+              1> check if @order is greater than or equal to MAX_ORDER
+                 then
+                         print operation warning if __GFP_NOWARN is not enabled
+                         return NULL
+              2> check if NUMA_BUILD is TRUE AND
+                                              /* __GFP_THISNODE | __GFP_NORETRY | __GFP_NOWARN */
+                          @gfp_mask & GFP_THISNODE == GFP_THISNODE
+                 then
+                         /**
+                          * GFP_THISNODE should not cause reclaim since the subsystem(f.e. slab)
+                          * using GFP_THISNODE may choose to trigger reclaim using a large set
+                          * of nodes after it has established that the allowed per node queues
+                          * are empty and that nodes are over allocated.
+                          */
+                         goto nopage
+              restart:
+              3> wake up all kswapd to writeback dirty page frames for recycle memory pages
+              4> get @alloc_flags from @gfp_mask through gfp_to_alloc_flags.
+              5> call to get_page_from_freelist() with arguments
+                   @gfp_mask, @nodemask, @order, @zonelist, @high_zoneidx,
+                   @alloc_flags disabled ALLOC_NO_WATERMARKS, @preferred_zone, @migratetype
+                 because kswapds in this system had been woken up,if we are luck maybe there
+                 are some free page frames are available now
+              6> if page descriptor is not NULL,then goto got_pg.
+              rebalance:
+              7> check if @alloc_flags enabled ALLOC_NO_WATERMARKS
+                 then
+                         try to get page frames through __alloc_pages_high_priority()
+                         if page descriptor is not NULL,then goto got_pg
+              8> if @gfp_mask did not specify __GFP_WAIT,then goto nopage,because we are no times
+                 to waste for waiting page frames available.
+              9> if @current enabled PF_MEMALLOC,then goto nopage,this is for avoid recursion of direct
+                 reclaim.
+                 if current task is doing memory allocating,then should not do it again.
+              10> check if thread flag TIF_MEMDIE is TRUE AND
+                           @gfp_mask disabled __GFP_NOFAIL
+                  then
+                          /**
+                           * TIF_MEMDIE,this thread is recycling memory now,but memory allocation is
+                           * allowed to be fail,then we just report no page frame is available as well
+                           */
+                          goto nopage
+              11> get page frames from __alloc_pages_direct_reclaim(),this function try reclaim memory
+                  pages directly and then try to allocate page frames.
+                  if have got page frames,then goto got_pg
+                  /**
+                   * if some page frames are reclaimed,then @did_some_progress will records the number
+                   * of reclaimed page frames by __alloc_pages_direct_reclaim().
+                   */
+              12> we failed to get page frames in 11> through __alloc_pages_direct_reclaim(),
+                  that means we are running out of options and have to consider going OOM.
+                  check if @did_some_progress is zero
+                  then
+                          check if @gfp_mask enabled __GFP_FS AND
+                                   @gfp_mask disabled __GFP_NORETRY
+                          then
+                                  goto nopage
+                                                         /* allocate pages may out-of-memory */
+                          try to get page frames through __alloc_pages_may_oom()
+                          if have got page frames,then goto got_pg.
+                          check if @order > PAGE_ALLOC_COSTLY_ORDER ADN
+                                   @gfp_mask disabled __GFP_NOFAIL
+                          then
+                                  goto nopage,OOM,just report no page frames are available as well
+
+                          goto restart,because @order is satisied requirement and __GFP_NOFAIL is
+                          specified,thus we have to try again.
+
+              13> update @pages_reclaimed += @did_some_progress for check if we should retry the allocation.
+                  check if should_alloc_retry(@gfp_mask, @order, @pages_reclaimed) is TRUE
+                  then
+                          /* wait for some write requests to complete then retry */
+                          /* these write requests ma submitted by kswapd process */
+                          call to congestion_wait(BLK_RW_ASYNC, HZ / 50) to wait a moment
+                          goto rebalance
+              nopage:
+              14> no page frames are available.
+                  check if @gfp_mask disabled __GFP_NOWARN AND
+                           printk_ratelimit() is TRUE
+                  then
+                          print kernel message KERN_WARNING about memory allocation failed
+                          dump kernel calling stack
+                          print memory figure
+                  return page descriptor,in this case,it must be NULL
+              got_pg:
+              15> check if kernel memory checking is enabled
+                  then
+                          do kernel memor checking for page allocation through 
+                          kmemcheck_pagealloc_alloc(@page, @order, @gfp_mask)
+                  return page descriptor,we finally got some page frames.
+                  
+
+
