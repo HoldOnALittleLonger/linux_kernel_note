@@ -13647,17 +13647,27 @@ Chapter 8 : Memory Management
                  if this function returned ZONE_RECLAIM_FULL,then goto this_zone_full.even we want to reclaim
                  page frames,but there is nothing can be done.
                  other returned values,check if zone watermark is OK,it is not,then goto this_zone_full.
-                 /**
+                 /**  
+                  * zone_watermark_ok(@zone, @order, @mark, @classzone_idx, @alloc_flags)
+                  *
                   * free pages is calculated via expression "zone_page_state(@zone, NR_FREE_PAGES) - 2^@order + 1"
                   * if free pages in this @zone is less than or equal to minimum watermark + low-memory reserve,
                   * then return 0,that is after allocated 2^@order page frames,the free pages would not satisfy
                   * memory zone minimum requirement.
                   * if more free pages are available,then scan free areas from order 0 to order @order - 1
                   * {
+                  *         !! besides the page frames to be allocated,there are at least min / 2^k free page
+                  *            frames in blocks of order at least k,for each k between 1 and the order of the
+                  *            allocation.
                   *         free pages -= Nth free area's nr_free << N
                   *         minimum watermark /= 2 /* require fewer higher order pages to be free */
                   *         if free pages <= minimum watermark,then return 0
                   * }
+                  *
+                  * !! @mark as an argument passed to zone_watermark_ok(),and local variable @min in
+                  *    zone_watermark_ok() is initialized to @mark.
+                  *    if ALLOC_HIGH is enabled,then @min -= @min / 2       => __GFP_HIGHMEM
+                  *    if ALLOC_HARDER is enabled,then @min -= @min / 4     => __GFP_WAIT OR (@current is RT)
                   */
               try_this_zone:
               7> call to buffered_rmqueue(@preferred_zone, @zone, @order, @gfp_mask, @migratetype).
@@ -13731,6 +13741,10 @@ Chapter 8 : Memory Management
                  are some free page frames are available now
               6> if page descriptor is not NULL,then goto got_pg.
               rebalance:
+              /**
+               * allocate without watermarks if the context allows.
+               * GFP_ATOMIC
+               */
               7> check if @alloc_flags enabled ALLOC_NO_WATERMARKS
                  then
                          try to get page frames through __alloc_pages_high_priority()
@@ -13750,6 +13764,25 @@ Chapter 8 : Memory Management
                           goto nopage
               11> get page frames from __alloc_pages_direct_reclaim(),this function try reclaim memory
                   pages directly and then try to allocate page frames.
+                  /**
+                   * address of local variable @did_some_progress is passed to this function.
+                   *
+                   * __alloc_pages_direct_reclaim() might cause this kernel control path to sleep.
+                   * it call to cond_resched() to check whether some other process needs the CPU.
+                   * enabled PF_MEMALLOC in process flags,set @current->reclaim_state->reclaimed_slab = 0.
+                   * call to try_to_free_pages(),and use its return value to set *@did_some_progress.
+                   * after this process is woken up,it clear process @reclaim_state,and disable PF_MEMALLOC,
+                   * call to cond_resched() again.
+                   * check if @order is not equal to zero
+                   * T =>
+                   *         call to drain_all_pages()
+                   * check if @did_some_progess is TRUE
+                   * T =>
+                   *         call to get_page_from_freelist() try allocate memory again
+                   * finally,return a page descriptor pointer.if it got some pages,then the pointer points to
+                   * the first page frame of block of page frames,otherwise,it equal to NULL.
+                   */
+
                   if have got page frames,then goto got_pg
                   /**
                    * if some page frames are reclaimed,then @did_some_progress will records the number
@@ -13762,9 +13795,27 @@ Chapter 8 : Memory Management
                           check if @gfp_mask enabled __GFP_FS AND
                                    @gfp_mask disabled __GFP_NORETRY
                           then
-                                  goto nopage
+                                  check if @oom_killer_disabled
+                                  then
+                                          /**
+                                           * if out-of-memory killer is disabled,then we can not
+                                           * free memory by the way kill some "best" processes.
+                                           */
+                                          goto nopage
                                                          /* allocate pages may out-of-memory */
                           try to get page frames through __alloc_pages_may_oom()
+                                                         /**
+                                                          * this function may will call to out_of_memory()
+                                                          * try to kill some processes for prevent
+                                                          * the situation that no memory is available.
+                                                          */
+                          /**
+                           * before call to out_of_memory(),__alloc_pages_may_oom() will try scannin
+                           * freelist again with very high watermark.
+                           * this is only to catch a parallel oom killing,we must fail if we are 
+                           * still under heavy pressure.
+                           */
+
                           if have got page frames,then goto got_pg.
                           check if @order > PAGE_ALLOC_COSTLY_ORDER ADN
                                    @gfp_mask disabled __GFP_NOFAIL
@@ -13796,6 +13847,3 @@ Chapter 8 : Memory Management
                           do kernel memor checking for page allocation through 
                           kmemcheck_pagealloc_alloc(@page, @order, @gfp_mask)
                   return page descriptor,we finally got some page frames.
-                  
-
-
