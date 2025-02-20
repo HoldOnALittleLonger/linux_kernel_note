@@ -13847,3 +13847,33 @@ Chapter 8 : Memory Management
                           do kernel memor checking for page allocation through 
                           kmemcheck_pagealloc_alloc(@page, @order, @gfp_mask)
                   return page descriptor,we finally got some page frames.
+
+        releasing a group of page frames :
+          all kernel macros and functions that release page frames rely on the __free_pages() function,
+          and which function will call to free_hot_cold_page() if logarithmic size of page frames is zero,
+          call to __free_pages_ok() if logarithmic size of page frames is greater than zero.
+
+      Memory Area Management :
+        memory area,that is sequence of memory cells having contiguous physical addresses and an arbitrary length.
+
+        the Buddy System adopts the page frame as the basic memory area,it works fine if the memory request always
+        be N page frames.but if the memory request require N memory cells(each cell 8bits) and N is not a multiple
+        of page size,then this will let Buddy System try to allocate 0.x page frame or x.y page frames.of course,
+        Buddy System can not do that.(quite wasteful)
+
+        the solution is introduce a new data structure that describe how small memory areas are allocated within
+        the same page frame.
+        a new problem will be introduced - internal fragmentation :
+          it is caused by a mismatch between the size of the memory request and the size of the memory area allocated
+          to satisfy the request.
+        a classical solution(earyly Linux versions) :
+          memory areas whose sizes are geometrically distributed,that is the size depends on a power of 2 rather
+          than on the size of data to be stored.
+          /**
+           * in this way,the internal fragmentation is always smaller than 50%.
+           * kernel creates 13 geometrically distributed lists of free memory areas whose sizes range from
+           *         [32, 131072] (bytes)
+           * Buddy System is invoked for obtain additional page frames needed to store new memory areas,and
+           * for to release page frames that no longer contain memory areas.
+           * # a dynamic list is used to keep track of the free memory areas contained in each page frame.
+           */
