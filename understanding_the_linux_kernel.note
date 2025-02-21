@@ -13877,3 +13877,232 @@ Chapter 8 : Memory Management
            * for to release page frames that no longer contain memory areas.
            * # a dynamic list is used to keep track of the free memory areas contained in each page frame.
            */
+
+      The Slab Allocator :
+        running a memory area allocation algorithm on top of the buddy system is not particularly efficient,
+        a bettery algorithm is derived from the "slab allocator" schema that was adopted for the first time
+        in the Sun Microsystems Solaris 2.4.
+        "slab allocator" based on the following premises :
+          > the type of data to be stored may affect how memory areas are allocated.
+            /**
+             * slab allocator views memory areas as objects consisting of both a set of data structures and
+             * a couple of functions or methods called the 'constructor' and 'destructor'.
+             * to avoid initializing objects repeatedly,the slab allocator does not discard the objects that
+             * have been allocated and then released,but instead saves them in memory.
+             * the later request for such object can be taken from memory without having to be reinitialized.
+             */
+          > the kernel functions tend to request memory areas of the same type repeatedly.
+            /* slab allocator allows the data object to be saved in a cache and reused quickly. */
+          > requests for memory areas can be classified according to their frequency.
+            /**
+             * requests of a particular size that are expected to occur frequently can be handled most efficiently
+             * by creating a set of special-purpose objects that have the right size,thus avoiding internal fragmentation.
+             */
+          > there is another subtle bonus in introduing objects whose sizes are not geometrically distributed :
+              the initial addresses of the data structures are less prone to be concentrated on physical
+              addresses whose values are a power of 2
+          > hardware cache performance creates an additional reason for limiting calls to the buddy system allocator
+            as much as possible.
+            /**
+             * every call to a buddy system function "dirties" the hardware cache,thus increasing the average
+             * memory access time.
+             */
+
+        slab allocator groups objects into caches,each cache is a "store" of objects of the same type.
+        the area of main memory contains a cache is divided into slabs,and each slab consists of one or more
+        contiguous page frames that contain both allocated and free objects.
+
+          [MAIN MEMORY AREA] => {
+                  /* struct kmem_cache */
+                  [CACHE] => {
+                          /* struct kmem_list3 */
+                          [KMEM LIST3] => {
+                                  [SLABS_PARTIAL] => {
+                                          /* struct slab */
+                                          [SLAB] => { PG1 PG2 ... PGn }
+                                                      |
+                                                      +--> { allocated objects | free objects }
+                                                             /*         SAME TYPE          */
+                                          [SLAB] => { PG }
+                                                      ...
+                                          ...
+                                  }
+                                  [SLABS_FULL] => {
+                                          [SLAB]
+                                          [SLAB]
+                                          ...
+                                  }
+                                  [SLABS_FREE] => {
+                                          [SLAB]
+                                          [SLAB]
+                                          ..
+                                  }
+                          }
+                  }
+          }
+
+          !! the basic storage cell is memory unit.and an area of main memory is grouped of some memory cells.
+             if the main memory area has a slab cache,then it must saved some objects of the same type T.
+             and the cache is divided to several slab nodes,every slab node stored some objects have type
+             T.
+
+          /* kernel scan to caches periodically and release the page frames corresponding to empty slabs */
+
+        Cache Descriptor :
+          each cache is described by the kernel data structure "kmem_cache" which is defined in <linux/slab_def.h>.
+          
+          <linux/slab_def.h>
+            /**
+             * kmem_cache - structure represents a kernel memory cache for slab allocator
+             * @array:      per-CPU array of pointers to local caches of free objects
+             * @batchcount: number of objects to be transferred in bulk to or from the local caches
+             * @limit:      maximum number of free objects in the local caches,tunable
+             * @shared:     cache sharing
+             * @buffer_size: cache buffer size
+             * @@reciprocal_buffer_size: reciprocal buffer size
+             * @flags:      slab flags
+             * @num:        objects per slab
+             * @gfporder:   order of page frames per slab
+             * @gfpflags:   force GFP flags
+             * @colour:     number of colors for the slabs
+             * @colour_off: basic alignment offset in the slabs
+             * @slabp_cache: pointer to the general slab cache containing the slab descriptors
+             *               NULL => internal slab descriptors are used
+             * @slab_size:  the size of a single slab
+             * @dflags:     set of flags that describe dynamic properties of the cache
+             * @ctor:       pointer to constructor method associated with the cache
+             * @name:       name of the cache
+             * @next:       next cache descriptor
+             * @nodelists:  array of pointers are type of "struct kmem_list3",each element
+             *              is a slab list object for all objects,and each slab list as
+             *              a node of the slab cache
+             *              # "struct kmem_list3" is defined in <mm/slab.c>
+             * # omitted statistics fields and debug fields
+             */
+            struct kmem_cache {
+            /* per-CPU data, touched during every alloc/free */
+                    struct array_cache *array[NR_CPUS];
+
+            /* Cache tunables.Protected by @cache_chain_mutex */
+                    unsigned int batchcount;
+                    unsigned int limit;
+                    unsigned int shared;
+
+                    unsigned int buffer_size;
+                    u32 reciprocal_buffer_size;
+            /* touched by every alloc & free from the backend */
+                    unsigned int flags;
+                    unsigned int num;
+            /* cache_grou/shrink */
+                    unsigned int gfporder;
+                    gfp_t gfpflags;
+                    size_t colour;
+                    unsigned int colour_off;
+                    struct kmem_cache *slabp_cache;
+                    unsigned int slab_size;
+                    unsigned int dflags;
+                    void (*ctor)(void *obj);
+            /* cache creation/removal */
+                    const char *name;
+                    struct list_head next;
+            /* statistics */
+            #ifdef CONFIG_DEBUG_SLAB
+                    ...
+            #endif
+                    struct kmem_list3 *nodelists[MAX_NUMNODES];
+            };
+            
+            !! CAN NOT PLACE ANY FIELDS AFTER @nodelists[],BECAUSE IT IS EXTENDED
+               DYNAMICALLY ACCORDING TO @nr_node_ids SLOTS INSTEAD OF 'MAX_NUMNODES'.
+
+          <mm/slab.c>
+            /**
+             * kmem_list3 - structure represents a slab list,and each slab list
+             *              is a node of a slab cache
+             * @slabs_partial: list for both free and non-free objects
+             * @slabs_full: list for non-free objects
+             * @slabs_free: list for free objects
+             * @free_objects: number of current free objects
+             * @free_limit: maximum number of free objects in this node
+             * @colour_next: per-node cache coloring
+             * @list_lock:  node concurrent protector
+             * @shared:     shared per node 
+             *              pointer to a local cache shared by all CPUs
+             * @alien:      on other nodes
+             * @next_reap:  used by slab allocator's page reclaiming algorithm
+             * @free_touched: used by slab allocator's page reclaiming algorithm
+             * # @next_reap and @free_touched can be updated withou locking
+             */
+            struct kmem_list3 {
+                    struct list_head slabs_partial;
+                    struct list_head slabs_full;
+                    struct list_head slabs_free;
+                    unsigned long free_objects;
+                    unsigned int free_limit;
+                    unsigned int colour_next;
+                    spinlock_t list_lock;
+                    struct array_cache *shared;
+                    struct array_cache **alien;
+                    unsigned long next_reap;
+                    int free_touched;
+            };
+
+            /**
+             * slab - structure represents a slab object,this structure manages the objs
+             *        in a slab,placed either at the begining of mem allocated for a slab,
+             *        or allocated from an general cache
+             * @list: pointer for one of the three slab list
+             *        # container_of(&slab->list, struct kmem_list3, slabs_free)
+             * @colouroff: offset of the first object in the slab
+             * @s_mem: address of first object(allocated OR free) in the slab
+             * @inuse: number of objects in the slab that are currently used
+             * @free: index of next free object in the slab,or BUFCTL_END if there are no
+             *        free objects left
+             * @nodeid: nodeid in slab cache
+             * # @slab is an abstracted type used to manages all possible data type in kernel
+             *   if we have a "flip" cache,then all objs in this cache must of type "flip",
+             *   and @slab is used to manages them
+             * # slabs are chained into three lists
+             */
+            struct slab {
+                    struct list_head list;
+                    unsigned long colouroff;
+                    void *s_mem;
+                    unsigned int inuse;
+                    kmem_bufctl_t free;
+                    unsigned short nodeid;
+            };
+
+            # suppose @inuse = 16 => idx [0, 15]
+              suppose start = @s_mem
+              &[0] = start
+              &[1] = start + 1 * sizeof(data type)
+              ...
+              &[15] = start + 15 * sizeof(data type)
+
+              if all objects in this slab is allocated,then this slab must be chained into
+              @slabs_full of struct kmem_list3.
+
+              "slab" do not care about the actual data type,it just control how memory in
+              a page frame to be allocated.
+              so,kernel code have to use memory cache corresponding to the actual data type.
+                /* this will create a new slab cache if there is no such data type is cached before */
+                struct kmem_cache *pointer = kmem_cache_create("data", sizeof(@data), 0, GFPFLAGS, NULL);
+
+                /* e.g. */
+                /* pre-allocated slab cache for "struct fs_struct" @fs_cachep is defined in <kernel/fork.c> */
+
+          slab descriptors can be stored in two possible places :
+            1> external slab descriptor
+               stored outside the slab,in one of the general caches not suitable for ISA DMA
+               pointed to by @cache_sizes
+            2> internal slab descriptor
+               stored inside the slab,at the beginning of the first page frames assigned to the slab
+            
+            ! slab allocator selects 2> when the size of the objects is smaller than 512MB or when
+              internal fragmentation leaves enough space for the slab descriptor and the object
+              descriptors inside the slab.
+              struct kmem_cache.@flags & CFLGS_OFF_SLAB => F
+                slab descriptor is stored inside the slab
+              struct kmem_cache.@flags & CFLGS_OFF_SLAB => T
+                slab descriptor is stored outside the slab
