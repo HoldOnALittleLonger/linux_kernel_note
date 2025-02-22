@@ -14020,6 +14020,18 @@ Chapter 8 : Memory Management
             !! CAN NOT PLACE ANY FIELDS AFTER @nodelists[],BECAUSE IT IS EXTENDED
                DYNAMICALLY ACCORDING TO @nr_node_ids SLOTS INSTEAD OF 'MAX_NUMNODES'.
 
+            !! we have to think of where the slab descriptor to be stored.
+               there are two positions used to store slab descriptor :
+                 1> a slab cache used to store slab descriptors
+                 2> store slab descriptor inside to the page frame allocated
+                    for objects
+               if off-slab is disabled,then slab allocator will stores slab descriptor
+               in the page frames that allocated for the objects managed by this slab;
+               otherwise,it stores the slab descriptor in a general cache with the name
+               "size-<memory area size>" in @malloc_sizes,and such memory areas are 
+               initialized by kmem_cache_init().
+               # "memory area size" must greater than or equal to sizeof(struct slab).
+
           <mm/slab.c>
             /**
              * kmem_list3 - structure represents a slab list,and each slab list
@@ -14144,6 +14156,23 @@ Chapter 8 : Memory Management
               used by the remaining parts of the kernel
 
           general caches :
+
+            struct cache_sizes :
+              <linux/slab_def.h>
+                /**
+                 * cache_sizes - size description struct for general caches
+                 * @cs_size:     size of memory area
+                 * @cs_cachep:   slab cache descriptor associated with this cache size
+                 * @cs_dmacachep: DMA slab cache descriptor associated with this cache size
+                 */
+                struct cache_sizes {
+                        size_t cs_size;
+                        struct kmem_cache *cs_cachep;
+                #ifdef CONFIG_ZONE_DMA
+                        struct kmem_cache *cs_dmacachep;
+                #endif
+                };
+
             "kmem_cache" => a first cache whose objects are the cache descriptors of the remaining
                             caches used by the kernel.
                             /* name is "kmem_cache" */
