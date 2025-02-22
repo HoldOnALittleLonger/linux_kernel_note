@@ -13769,6 +13769,11 @@ Chapter 8 : Memory Management
                    *
                    * __alloc_pages_direct_reclaim() might cause this kernel control path to sleep.
                    * it call to cond_resched() to check whether some other process needs the CPU.
+                   *            # cond_resched() not really sched this task,it will check if should resched
+                   *              at first.
+                   *              TIF_NEED_RESCHED is enabled and preempt_counter() & PREEMPT_ACTIVE is F
+                   *                                              it represents a preemption counter
+                   *
                    * enabled PF_MEMALLOC in process flags,set @current->reclaim_state->reclaimed_slab = 0.
                    * call to try_to_free_pages(),and use its return value to set *@did_some_progress.
                    * after this process is woken up,it clear process @reclaim_state,and disable PF_MEMALLOC,
@@ -14087,7 +14092,7 @@ Chapter 8 : Memory Management
               a page frame to be allocated.
               so,kernel code have to use memory cache corresponding to the actual data type.
                 /* this will create a new slab cache if there is no such data type is cached before */
-                struct kmem_cache *pointer = kmem_cache_create("data", sizeof(@data), 0, GFPFLAGS, NULL);
+                struct kmem_cache *pointer = kmem_cache_create("data", sizeof(@data), 0, SLABFLAGS, NULL);
 
                 /* e.g. */
                 /* pre-allocated slab cache for "struct fs_struct" @fs_cachep is defined in <kernel/fork.c> */
@@ -14106,3 +14111,201 @@ Chapter 8 : Memory Management
                 slab descriptor is stored inside the slab
               struct kmem_cache.@flags & CFLGS_OFF_SLAB => T
                 slab descriptor is stored outside the slab
+
+          relationship between cache and slab descriptors :
+            
+            +----------------------------------------------------------------------------------+
+            |                                                                                  |
+            |    Cache Descriptor <-@next-> Cache Descriptor <-@next-> Cache Descriptor ...    |
+            |     ^      ^     ^             ^            ^                    ^     ^         |
+            |     |      |     |             |            |                    |     |         |
+            |     |      v     |             |            |                    v     |         |
+            |     |     FSD    |             |     PSD <--+                   FSD    |         |
+            |     |            |             |                                 ^     |         |
+            |     |     PSD <--+             +---> ESD                         |     |         |
+            |     |                                                            v     |         |
+            |     +---> ESD                                                   FSD    |         |
+            |                                                                        |         |
+            |                                                                 PSD <--+         |
+            |                                                                                  |
+            |    @next: struct kmem_cache.next is type of struct list_head                     |
+            |    FSD : Full Slab Descriptor             (chained by @slabs_full)               |
+            |          FSD1 <-@slabs_full-> FSD2 <-@slabs_full-> ... <-@slabs_full-> FSDn      |
+            |    PSD : Partically Full Slab Descriptor  (chained by @slabs_partial)            |
+            |    ESD : Empty Slab Descriptor            (chained by @slabs_free)               |
+            |          PSDs and ESDs are similar to FSD                                        |
+            +----------------------------------------------------------------------------------+
+
+        General and Specific Caches :
+          there are two types of caches :
+            > general caches
+              used only by the slab allocator for its own purpose
+            > specific caches
+              used by the remaining parts of the kernel
+
+          general caches :
+            "kmem_cache" => a first cache whose objects are the cache descriptors of the remaining
+                            caches used by the kernel.
+                            /* name is "kmem_cache" */
+            @cache_cache => contains the descriptor of "kmem_cache".
+
+            the range of the memory area sizes typically includes 13 geometrically distributed sizes.
+            @malloc_sizes => table of type "cache_sizes",this table includes 26 cache descriptors 
+                             associated with memory area of size(in bytes)
+                               32, 64, 128, 256, 512, 1024, 2048,
+                               4096, 8192, 16384, 32768, 65536, 131072
+                             each size is associated with two caches :
+                               one for ISA DMA allocations
+                               another one for normal allocations
+                             /* @malloc_sizes is an array of struct cache_sizes */
+
+            ! @cache_cache and @malloc_sizes are defined in <mm/slab.c>.
+            ! struct cache_sizes is defined in <linux/slab_def.h>
+              header <linux/kmalloc_sizes.h> defined the memory area sizes
+
+            <linux/slab.h>
+              /**
+               * kmem_cache_init - setup the general caches during system booting
+               * # this function is implemented in <mm/slab.c>,it is called after
+               *   the page allocator have been initialised and before smp_init()
+               */
+              void __init kmem_cache_init(void);
+
+          specific caches :
+            specific caches used by the remaining parts of the kernel code.
+            kernel subsystem is able to creates specific caches for its special purpose.
+            for create a specific cache,must through the kernel API kmem_cache_create().
+
+            <linux/slab.h>
+              /**
+               * kmem_cache_create - create a specific slab cache
+               * @name:              name of the slab cache
+               * @size:              size of objects to be created in this cache
+               * @align:             required alignment for the objects
+               * @flags:             SLAB flags
+               *                       SLAB_POISON
+               *                         poison the slab with a known test pattern (a5a5a5a5)
+               *                         to catch references to uninitialised memory
+               *                       SLAB_RED_ZONE
+               *                         insert 'Red' zones around the allocated memory to check
+               *                         for buffer overruns
+               *                       SLAB_HWCACHE_ALIGN
+               *                         align the objects in this cache to a hardware cacheline
+               * @ctor:              constructor for the objects
+               * return:             pointer to slab cache descriptor
+               *                     NULL => failure
+               * # this function can not be called from interrupt,but it can be interrupted
+               *   @ctor is run when new pages are allocated by the cache
+               *   @name must be valid until the cache is destroyed,and kmem_cache_name() is
+               *   not guaranteed to return the same pointer
+               */
+              struct kmem_cache *kmem_cache_create(const char *name, size_t size, 
+                                                   size_t align, unsigned long flags,
+                                                   void (*ctor)(void *));
+
+              brief description for kmem_cache_create() :
+                global variable @cache_chain is type of struct list_head,mutex @cache_chain_mutex is
+                used to protect @cache_chain from concurrent accessing.
+                @cache_chain is initialized by kmem_cache_init(),which place @cache_cache.next to
+                @cache_chain,of course the kmalloc caches also is created by this function(@malloc_sizes).
+                kmem_cache_create() traverse all slab caches on @cache_chain to see
+                  if there is a slab cache lost its name,then print KERN_ERR message and continue
+                  if @name is duplicated,then cancel to slab cache creating
+                kmem_cache_create() next try to allocate a memory area from @cache_cache through API
+                kmem_cache_zalloc(). /* allocate memory area and fill it with zero */
+                we have described @cache_cache is a slab cache descriptor for slab cache "kmem_cache",
+                thus the object allocated by kmem_cache_zalloc() is type of struct kmem_cache.
+                if succeed to allocate such an object,then go to initialize it and insert it into @cache_chain;
+                otherwise,we failed on create kmem_cache,so goto label "oops",in this case,NULL would be returned.
+
+              /**
+               * kmem_cache_destroy - destroy a slab cache which is allocated via kmem_cache_create() previously
+               * @cachep:             pointer to the slab cache
+               * # must ensure that before kmem_cache_destroy() is called,pointer for @name field of the slab cache
+               *   is valid
+               */
+              void kmem_cache_destroy(struct kmem_cache *cachep);
+
+              brief description for kmem_cache_destroy() :
+                it call to get_onlin_cpus() at first,this will "lock up" all online CPUs,so the another kernel control
+                paths try to process CPU operation after online CPUs were got lock would failed.
+                next,lock @cache_chain_mutex,and unlink @cachep from @cache_chain.(list delete @cachep->next)
+                check if __cache_shrink(cachep) is TRUE,then raise slab-error that "Can't free all objects",in this case
+                chain @cachep again and put online CPUs,we failed to destroy this slab cache.
+                if @cachep is not shrink cache,then call to __kmem_cache_destroy(),this routine is the main procedure
+                to destroy a slab cache.
+                finally,unlock mutex,put online CPUs,and return to caller.
+                /**
+                 * before invoke __kmem_cache_destroy(),have to check if SLAB_DESTROY_BY_RCU flag is enabled in @cachep,
+                 * if it is,then function have to wait on a RCU barrier for synchronization.
+                 */
+
+      Interfacing the Slab Allocator with the Zoned Page Frame Allocator :
+        when the slab allocator creates a new slab,it relies on the zoned page frame allocator to obtain
+        a group of free contiguous page frames.function kmem_getpages() is used to take charge of this.
+                                                     /* get page frames for a slab cache from page allocator */
+
+        /**
+         * kmem_getpages - interface to system's page allocator
+         * @cachep:        which slab cache needs additional page frames
+         *                   @order == @cachep->gfporder
+         * @flags:         GFP flags,these flags will combined with the specific cache
+         *                 allocation flags stored in the @gfpflags field
+         * @nodeid:        NUMA node idx
+         * return:         address of the first page frame(not page descriptor)
+         *                 BAD ADDRESS => failed
+         * # this function need not to hold the cache lock
+         */
+        static void *kmem_getpages(struct kmem_cache *cachep, gfp_t flags, int nodeid);
+
+        what kmem_getpages() does :
+          1> #ifndef CONFIG_MMU,then @flags |= __GFP_COMP.
+             combine @flags with @cachep->gfpflags.
+             if SLAB_RECLAIM_ACCOUNT is enabled in @cachep.flags,then have to enable it in @flags.
+          2> try to get pages on an exact node @nodeid through function alloc_pages_exact_node().
+             /* @order is @cachep->gfporder */
+             
+             /**
+              * if the slab cache has been created with the SLAB_RECLAIM_ACCOUNT flag set,the page frames
+              * assigned to the slabs are accounted for as reclaimable pages when the kernel checks
+              * whether there is enough memory to satisfy some User Mode Request.
+              */
+
+             if failed to get page frames,then return NULL.
+          3> we have got page frames,then set local variable @nr_pages to 1 << @gfporder.
+             check if SLAB_RECLAIM_ACCOUNT is enabled,then have to update zone statistics,
+             add @nr_pages to zone statistics data NR_SLAB_RECLAIMABLE;otherwise add @nr_pages to
+             zone statistics data NR_SLAB_UNRECLAIMABLE.
+          4> for each page frame have got previously,set PG_slab flag for them.
+          5> check if kernel memory checking is enabled AND
+                      @cachep->flags disabled SLAB_NOTRACK
+             T =>
+                     call to kmemcheck_alloc_shadow()
+                     check if @cachep->ctor is not NULL
+                     then
+                             call to kmemcheck_mark_uninitialized_pages()
+                     else
+                             call to kmemchecK_mark_unallocated_page()
+          6> return page_address(page)
+
+        /**
+         * kmem_freepages - do reversal operations what kmem_getpages() did
+         *                  that is free page frames for a slab cache
+         * @cachep:         which slab cache need to free page frames
+         * @addr:           start address of the page frames
+         */
+        static void kmem_freepages(struct kmem_cache *cachep, void *addr);
+
+        brief description for kmem_freepages() :
+          convert @addr to page descriptor.
+          do kernel memory checking,and then update zone statistics data NR_SLAB_RECLAIMABLE
+          or NR_SLAB_UNRECLAIMABLE.
+          for each page frame in the group,clear its PG_slab flag.
+          if @current task is in reclaim state,then update @reclaimed_slab += @nr_freed.
+                                 /**
+                                  * this task is in reclaim state that is it suspended on
+                                  * page frame allocation because there is not enough pages to
+                                  * be allocated by Buddy System(slow path).
+                                  * @nr_freed is initialized to 1 << @cachep->gfporder.
+                                  */
+          call to free_pages() to free page frames.
