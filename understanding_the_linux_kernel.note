@@ -11793,7 +11793,7 @@ Chapter 8 : Memory Management
              *                AND limit reverse map searches
              *                # Number of Page Table entries that refer to the page frame
              *                  (-1 if none)
-             * @insue:
+             * @inuse:
              * @objects:      
              *                SLUB data
              * @private:      mapping-private opaque data,usually used for buffer_heads if
@@ -11818,7 +11818,7 @@ Chapter 8 : Memory Management
                     union {
                             atomic_t _mapcount;
                             struct {
-                                    u16 insude;
+                                    u16 inuse;
                                     u16 objects;
                             };
                     };
@@ -14338,3 +14338,55 @@ Chapter 8 : Memory Management
                                   * @nr_freed is initialized to 1 << @cachep->gfporder.
                                   */
           call to free_pages() to free page frames.
+
+      Allocating a Slab to a Cache :
+        a newly created slab cache does not contain any slab,therefore does not contain any
+        free objects.
+        new slabs are assigned to a slab cache only when both of the following are true :
+          1> a request has been issued to allocate a new object
+          2> the cache does not include a free object
+
+        function cache_grow() is used by slab alloctor for allocate a new slab to a slab cache.
+
+        <mm/slab.c>
+          /**
+           * cache_grow - allocate a new slab for a given slab cache
+           * @cachep:     the slab cache
+           * @flags:      GFP flags used by Buddy System
+           * @nodeid:     NUMA node id used by Buddy System
+           * @objp:       the objects,it usually is the address of page frames contains objects
+           *              # if pass NULL as argument of this parameter,cache_grow() will call to
+           *                kmem_getpages() to allocate new page frames for store the objects
+           * return:      0 => failed
+           *              1 => succeed
+           */
+          static int cache_grow(struct kmem_cache *cachep, gfp_t flags, int nodeid, void *objp);
+
+          brief description of cache_grow() :
+            cache_grow() -> kmem_getpages() /* get a group of page frames needed to store single slab */
+            cache_grow() -> alloc_slabmgmt()
+                            /**
+                             * allocate a new slab descriptor.
+                             * if CFLGS_OFF_SLAB is enabled in the slab cache @flags,then
+                             * the new slab descriptor is allocated from the general cache
+                             * pointed to by the @slabp_cache field of the slab cache;otherwise
+                             * the slab descriptor is allocated in the first page frame of the slab.
+                             */
+            functions page_set_cache() and page_set_slab() is called by function slab_map_pages(),and this
+            function is invoked after alloc_slabmgmt() allocate a slab descriptor successfully by cache_grow().
+            slab_map_pages() traverse all page frames assigned to "this" slab and call to the two functions on
+            them.
+                            @page->lru.next := @the-cache @page->lru.prev := @the-slab
+            /**
+             * @lru of a page frame is used by the Buddy System if only if the page is free.when attempt to 
+             * allocate a page frame,the page would be unlinked from the LRU list.
+             * therefore,PG_slab is set in the page frame if it is assigned to a slab.(not free)
+             */
+    
+            @s_mem field of a slab and @gfporder of the slab cache which contains this slab can be used together
+            to determine the page frames implement this slab.
+    
+            function cache_init_objs() is called by cache_grow() after slab_map_pages() accomplished,this function
+            will call constructor(if existed) on all the objects contained in the new slab.
+            finally,cache_grow() call to list_add_tail() to link the new slab to @slabs_free list,and updates the
+            number of current free objects.
