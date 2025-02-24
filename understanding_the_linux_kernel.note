@@ -14390,3 +14390,94 @@ Chapter 8 : Memory Management
             will call constructor(if existed) on all the objects contained in the new slab.
             finally,cache_grow() call to list_add_tail() to link the new slab to @slabs_free list,and updates the
             number of current free objects.
+
+      Releasing a Slab from a Cache :
+        slab can be destroyed in two cases :
+          1> there are too many free objects in the slab cache
+          2> a timer function invoked periodically determines that
+             there are fully unused slabs that can be released
+
+        function slab_destroy() used to release a slab :
+          <mm/slab.c>
+            /**
+             * slab_destroy - destroy and release all objects in a slab
+             * @cachep:       cache pointer being destroyed
+             * @slab:         slab pointer being destroyed
+             * # @slabp must be unlinked from @cachep before call to this function
+             */
+            static void slab_destroy(struct kmem_cache *cachep, struct slab @slabp);
+
+            ! the page frames will be released and back to Buddy System.
+
+            brief description for slab_destroy() :
+              it get the virtual address of the page frames had assigned to this @slabp.
+              /* @slabp->s_mem - slabp->colouroff */
+
+              function slab_destroy_debugcheck() is called at next,if "DEBUG" is not defined,
+              this function will do nothing.but if "DEBUG" is defined,slab_destroy_debugcheck()
+              will processes the following steps :
+                start a for-cycle
+                for each objects in the slab >
+                  get virtual address of current object
+                  check if @cachep->flags enabled SLAB_POISON
+                  T =>
+                          #ifdef CONFIG_DEBUG_PAGEALLOC
+                          check if @cachep->buffer_size % PAGE_SIZE is zero AND
+                                   off-slab is enabled
+                          T =>
+                                  call to kernel_map_pages(),this will unpoison
+                                  "@buffer_size / PAGE_SIZE" page frames start from
+                                  current object
+                                  /* if page frame poisoned,then unpoison it. */
+                                  /* unpoison a page frame might dump_stack(). */
+                          F =>
+                                  call to check_poison_obj()
+                                  /* check slab corruption */
+                          #else
+                                  call to check_poison_obj()
+                          #endif
+                  check if @cachep->flags enabled SLAB_RED_ZONE
+                  T =>
+                          /**
+                           * redzone1 :
+                           *         (unsigned long long *)(@objp + obj_offset(@cachep) -
+                           *                                sizeof(unsigned long long))
+                           * redzone2 :
+                           *         (unsigned long long *)(@objp + @cachep->buffer_size -
+                           *                                sizeof(unsigned long long))
+                           *   if @cachep->flags enabled SLAB_STORE_USER
+                           *         (unsigned long long *)(@objp + @cachep->buffer_size - 
+                           *                                sizeof(unsigned long long) -
+                           *                                REDZONE_ALIGN)
+                           */
+                          check if redzone1 of @cachep for current object != RED_INACTIVE
+                          T =>
+                                  slab-error : start of a freed object was overwritten
+                          check if redzone2 of @cachep for current object != RED_INACTIVE
+                          T =>
+                                  slab-error : end of a freed object was overwritten
+
+              check if @cachep->flags enabled SLAB_DESTROY_BY_RCU,then release slab through
+              RCU mechanism.
+              /**
+               * convert @slabp to pointer of struct slab_rcu
+               * assign @cachep to @slab_rcu->cachep
+               * assign @addr to @slab_rcu->addr
+               * call_rcu(&@slab_rcu->head, kmem_rcu_free)
+               * # kmem_rcu_free() is defined in <mm/slab.c>,
+               *   which call to kmem_feepages(),and it call to kmem_cache_free() if
+               *   off-slab is enabled.
+               * # struct slab_rcu is defined in the same file and has these members :
+               *           struct rcu_head head
+               *           struct kmem_cache *cachep
+               *           void *addr
+               * # force type converting struct slab to struct slab_rcu is OK.becasue
+               *   we have saved virtual address of page frames,and now we is going to
+               *   release this @slabp,thus re-use the memory it had occupied is OK,we
+               *   no longer need the data of this slab object.
+               */
+              otherwise,release slab through kmem_freepages() to release page frames had assigned
+              to this slab.next,check if off-slab is enabled,then call to kmem_cache_free() to
+              free this slab.
+              /* kmem_cache_destroy() is different to kmem_cache_free() */
+
