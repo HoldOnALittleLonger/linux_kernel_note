@@ -14645,4 +14645,71 @@ Chapter 8 : Memory Management
               kmem_bufctl_t next = slab_bufctl(slab)[slab->free]
               slab->free = next
 
-              /* the initialized value of @free is 0 */
+              /* the initialized value of @free is 0 */ 
+
+      Aligning Objects in Memory :
+        objects managed by the slab allocator are aligned in memory,they are stored in memory cells
+        whose initial physical addresses are multiples of a given constant(alignment factor),it usually
+        is power of 2.
+        /**
+         * the largest alignment factor is allowed in slab is 4096,objs can be referred by their  
+         * physical addresses or linear addresses
+         * in both cases,only the 12 least significant bits of the address may be altered by the
+         * alignment
+         */
+
+        microcomputers access to memory unit which is aligned to the word size will more
+        quickly,thus kmem_cache_create() try to align objects with the alignment factor defined
+        by macro BYTES_PER_WORD.
+        /**
+         * 80x86 a word is 32bits
+         * Linux 2.6.34.1,BYTES_PER_WORD is defined in <mm/slab.c> with value of "sizeof(void *)"
+         */
+        /**
+         * kmem_cache_create() alignment calculating :
+         *   size => object size ; align => caller mandated alignment factor
+         *   
+         *   # this is needed to avoid unaligned accesses for some archs when redzoning is used
+         *     and makes sure any on-slab bufctl's are also correctly aligned
+         *   if size & (BYTES_PER_WORD - 1)
+         *     size += (BYTES_PER_WORD - 1)
+         *     size &= ~(BYTES_PER_WORD - 1)
+         *
+         *   # calculate the final buffer alignment
+         *   if @flags & SLAB_HWCACHE_ALIGN # align in the first-level hardware cache
+         *     ralign = cache_line_size() /* hardware cache line size */
+         *     # if size is too small,then decrease ralign to prevent obj aligning in
+         *       hardware cache line span across two cache lines
+         *       otherwise,obj is aligned in RAM to a multiple of (default)32 OR 64(x86_64)
+         *     while size <= ralign / 2 { ralign /= 2 }
+         *   else
+         *     ralign = BYTES_PER_WORD
+         *
+         *   if @flags & SLAB_STORE_USER
+         *     ralign = BYTES_PER_WORD
+         *
+         *   # adjust object size accordingly for the second redzone is suitably aligned
+         *   if @flags & SLAB_RED_ZONE 
+         *     ralign = REDZONE_ALIGN
+         *     size += REDZONE_ALIGN - 1
+         *     size &= ~(REDZONE_ALIGN - 1)
+         *
+         *   ## if-branch SLAB_STORE_USER and SLAB_RED_ZONE
+         *      redzoing and user store require word alignment or possibly larger,but this
+         *      will be overriden by arch or caller mandated alignment if either is
+         *      greater than BYTES_PER_WORD
+         *   
+         *   if ralign < ARCH_SLAB_MINALIGN # arch mandated alignment
+         *     ralign = ARCH_SLAB_MINALIGN
+         *   if ralign < align # caller mandated alignment
+         *     ralign = align
+         *
+         *   if ralign > __alignof__(unsigned long long) # disable debug if necessary
+         *     flags &= ~(SLAB_RED_ZONE | SLAB_STORE_USER)
+         *
+         *   align = ralign
+         */
+
+        the trade happened at there is trading memory space for access time,it get better
+        cache performance by artificially increasing the object size,thus causing additional
+        internal fragmentation.
