@@ -14713,3 +14713,91 @@ Chapter 8 : Memory Management
         the trade happened at there is trading memory space for access time,it get better
         cache performance by artificially increasing the object size,thus causing additional
         internal fragmentation.
+
+      Slab Coloring :
+        objects of the same size being stored at the same offset within a cache.
+          slab cache {
+                  slab1 { offset0 : obj0, offset1 : obj1 }
+                  slab2 { offset0 : obj0, offset1 : obj1 }
+          }
+
+        objects have the same offset within different slabs will,with a relatively high probability,
+        mapped in the same cache line.
+          hardware cache {
+                  cache line0 { slab1 : offset0 : obj0, slab2 : offset0 : obj0 }
+                  ...
+          }
+          /**
+           * the cache hardware might therefore waste memory cycles transfering two objs from the
+           * same cache line back and forth to different RAM locations.
+           * cache lines except to cache line mapped slab objects are go underutilized.
+           */
+
+        goal fo slab coloring strategy : reduce cache line underutilized.
+        different arbitraty values called colors are assigned to the slab by slab allocator.
+
+        how to place objs in a slab cache to the memory unit when alignment required :
+          choices depend on decisions made for the following variables >
+            @num
+              number of objs that can be stored in a slab.
+            @osize
+              obj size,including alignment bytes.
+            @dsize
+              slab descriptor size plus all object descriptors size,rounded up to the smallest
+              multiple of the hardware cache line size.its value is equal to 0 if the slab and
+              object descriptors are stored outside of the slab.
+            @free
+              number of unused types inside the slab.
+              @free is always samller than @osize but could be greater than a multiple of alignment factor.
+
+          slab size := @num * @osize + @dsize + @free
+
+          slab allocator takes advantage of the @free to color the slab.
+          "color" is used simply to subdivide the slabs and allow the memory allocator to spread objs
+          out among different linear addresses.
+          slabs having different colors store the first object of the slab in different memory locations,
+          while satisfying the alignment constraint.
+
+          number of available colors := @free / align(alignment factor) /* stored in @colour field */
+          /**
+           * colour_0 => 0
+           * ...
+           * colour_N => @free / align(alignment factor) - 1
+           * even the division might results zero,but colour_0 is 0,thus @colour is equal to 1.
+           */
+
+          slab colored with the colour @col >
+            offsetof(obj0, &slab) := @col * align(alignment factor) + @dsize (in bytes)
+
+          colouring essentially leads to moving some of the free area of the slab from the end to
+          the beginning.
+
+          +---------------------------------------------------------------------------+
+          |            |                 |                 |      |      |     |      |
+          | colour_off | slab descriptor | obj descriptors | obj0 | obj1 | ... | objN |
+          |            |                 |                 |      |      |     |      |
+          +---------------------------------------------------------------------------+
+          |            |                 |                 |                          |
+          |            |                 |                 |                          +----> end of slab
+          |            |                 |                 +----> objs
+          |            |                 +----> kmem_bufctl_t objs
+          |            +----> slab
+          +----> virtual address of page frames for this slab
+
+        !! coloring works only when @free is large enough.if no alignment is required for the objects
+           or if the number of unused bytes inside the slab is smaller than the required alignment,
+           the only possible slab coloring is the one that has the colour_0.
+
+        various colors are distributed equally among slabs of a given object type by storing the
+        current color in a field of the struct kmem_list3 called @colour_next.
+
+        cache_grow() use @colour_next as the colour off for the new created slab,and then increase
+        it for next slab node creating.                                              /* @colour_next++ */
+        /**
+         * colour off of "this" slab is different to previous slab,
+         * if it reached @colour,then @colour_next wraps around again to 0.
+         */
+
+        the field @colouroff of slab descriptor is calculated by alloc_slabmgmt() through the expression
+                @col * align(alignment factor) + @dsize
+                /* if off-slab is disabled */
