@@ -14097,7 +14097,10 @@ Chapter 8 : Memory Management
              * @list_lock:  node concurrent protector
              * @shared:     shared per node 
              *              pointer to a local cache shared by all CPUs
-             * @alien:      on other nodes
+             *              # this field makes the task of migrating free
+             *                objects from a slab local cache to another
+             *                easier
+             * @alien:      slab local caches on other nodes
              * @next_reap:  used by slab allocator's page reclaiming algorithm
              * @free_touched: used by slab allocator's page reclaiming algorithm
              * # @next_reap and @free_touched can be updated withou locking
@@ -14779,7 +14782,7 @@ Chapter 8 : Memory Management
           +---------------------------------------------------------------------------+
           |            |                 |                 |                          |
           |            |                 |                 |                          +----> end of slab
-          |            |                 |                 +----> objs
+          |            |                 |                 +----> objs @s_mem
           |            |                 +----> kmem_bufctl_t objs
           |            +----> slab
           +----> virtual address of page frames for this slab
@@ -14801,3 +14804,125 @@ Chapter 8 : Memory Management
         the field @colouroff of slab descriptor is calculated by alloc_slabmgmt() through the expression
                 @col * align(alignment factor) + @dsize
                 /* if off-slab is disabled */
+
+      Local Caches of Free Slab Objects :
+        implementation of slab allocator for multiprocessor system in Linux 2.6 is differs from the original
+        Solaris 2.4.
+        
+        for reduce spin lock racing and make better use of the hardware caches,slab cache includes a per-CPU
+        data structure consisting of a small array of pointers to freed objects called the "slab local cache".
+        
+        <mm/slab.c>
+          /**
+           * array_cache - structure array_cache represent a slab local cache
+           * @avail:       available freed objects,this field also acts as the index of
+           *               the first free slot in the cache
+           * @limit:       maximum number of the freed objects in slab local cache
+           * @batchcount:  chunk size of local cache refill or emptying
+           * @touched:     is this slab local cache touched by someone recently?
+           *               this member would be reset to zero if drain_array() is called
+           *               on it under the conditions that @touched is TRUE AND non-force drain
+           *               is requested 
+           * @lock:        concurrent protector
+           * @entry:       array of pointers for freed objects in this slab local cache
+           * # purpose of introducing this structure :
+           *     LIFO ordering,to hand out cache-warm objects from _alloc
+           *     reduce the number of linked list operations
+           *     reduce spinlock operations
+           * # local cache descriptor does not include the address of the local cache itself.
+           */
+          struct array_cache {
+                  unsigned int avail;
+                  unsigned int limit;
+                  unsigned int batchcount;
+                  unsigned int touched;
+                  spinlock_t lock;
+                  void *entry[];
+          };
+          /* struct kmem_cache.array[CPUIDX] => slab local cache */
+
+          ! elements in @entry of a slab local cache is possible to be transfered to another
+            slab local cache by the way memcpy(),that is they are stay valid in current slab local
+            cache even transferring accomplished.
+
+          /**
+           * alloc_arraycache - allocate a new slab local cache descriptor
+           * @node:             which NUMA node is used by kmalloc_node() to allocate memory
+           * @entries:          size of @entries
+           *                    the memory to allocate of new descriptor is
+           *                      sizeof(void *) * entries + sizeof(struct array_cache)
+           *                    and the value of @entries also is used to init @limit field
+           * @batchcount:       batch count
+           * @gfp:              GFP flags
+           * return:            pointer of new descriptor
+           *                    NULL to failed
+           */
+          static struct array_cache *alloc_arraycache(int node, int entries, int batchcount, gfp_t gfp);
+
+          function __cpuinit cpuup_prepare() will initialize slab local cache for each slab cache on
+          @cache_chain.during this procedure,struct kmem_cache.nodelists[CURRENT_NODE] is going to be
+          initialized,too.
+          for each slab cache
+            if @shared is equal to 1,then a shard slab local cache will be created
+            and assigned to kmem_list3.@shared.
+            if @use_alien_caches is equal to 1,then an alien slab local cache will be created through
+            alloc_alien_cache(),and the pointer of pointer of the newly created alien slab local cache
+            is assigned to kmem_list3.alien.
+            a new slab local cache for current CPU will be created and assign to
+            @cachep->array[THIS_CPU].
+
+          when create a new slab cache,function setup_cpu_cache() is invoked for setup @array field
+          of the new slab cache corresponding to current smp cpu.
+            if @g_cpucache_up is neither equal to FULL nor NOE
+                    @limit of the local cache is set to
+                    BOOT_CPUCACHE_ENTRIES(expand to 1),@batchcount is set to 1.
+                    /**
+                     * structure arraycache_init is used as a helper for determine how many memory
+                     * to be allocated for slab local cache of the newly created slab cache by
+                     * kmem_cache_create().
+                     * # allocated from general cache.
+                     */
+            /**
+             * if @g_cpucache_up equal to FULL,then enable_cpucache() will be called.
+             * @g_cpucache_up is set to FULL by kmem_cache_init_late() after enable_cpucache() is called
+             * and returned.
+             */
+
+          slab cache can not work without slab local cache anymore,but the initial slab local cache is not
+          useful,thus function do_tune_cpucache() is used to adjust size of slab local cache of the specified
+          slab cache pointed by parameter @cachep for each online CPU.
+          <mm/slab.c>
+            /**
+             * ccupdate_struct - structure as a helper to be used by do_tune_cpucache()
+             * @cachep:          slab cache pointer
+             * @new:             array of pointers used to store new allocated slab local cache in future
+             */
+            struct ccupdate_struct {
+                    struct kmem_cache *cachep;
+                    struct array_cache *new[NR_CPUS];
+            };
+
+          for each online cpu,allocate new array_cache through alloc_arraycache().
+          call do_ccupdate_local() on each cpu with @new of struct ccupdate_struct.do_ccupdate_local() just
+          simply exchange the old slab local cache and the new one in @new[CPUIDX].
+
+          /* cache tunable */
+                                       /* parameters of do_tune_cpucache() */
+          reset @cachep->batchcount to @batchcount
+          reset @cachep->limist to @limit
+          reset @cachep->shared to @shared
+
+          for each online cpu,free entries of the slab local cache in @new[CPUIDX],then free the slab local
+          descriptor.
+
+          !! function do_tune_cpucache() is invoked by function enable_cpucache() with a specified limit
+             from {1, 8, 24, 54, 120} and the batch count is @limit / 2.
+                  /**
+                   * 1 => @buffer_size > 131072
+                   * 8 => @buffer_size > PAGE_SIZE
+                   * 24 => @buffer_size > 1024
+                   * 54 => @buffer_size > 256
+                   * _else_ 120
+                   */
+
+
