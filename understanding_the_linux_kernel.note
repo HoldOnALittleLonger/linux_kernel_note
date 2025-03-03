@@ -14824,7 +14824,7 @@ Chapter 8 : Memory Management
            *               on it under the conditions that @touched is TRUE AND non-force drain
            *               is requested 
            * @lock:        concurrent protector
-           * @entry:       array of pointers for freed objects in this slab local cache
+           * @entry:       array of pointers for _freed_ objects in this slab local cache
            * # purpose of introducing this structure :
            *     LIFO ordering,to hand out cache-warm objects from _alloc
            *     reduce the number of linked list operations
@@ -14840,6 +14840,14 @@ Chapter 8 : Memory Management
                   void *entry[];
           };
           /* struct kmem_cache.array[CPUIDX] => slab local cache */
+
+          /**
+           * array_cache LIFO :
+           *   [0] [1] [2] [3] [4] ... [avail] [inuse] [inuse] ... [inuse]
+           *   allocat new object at @avail,then decrease @avail,
+           *   the number of freed objects has decreased,and the idx for the last freed object
+           *   is @avail.
+           */
 
           ! elements in @entry of a slab local cache is possible to be transfered to another
             slab local cache by the way memcpy(),that is they are stay valid in current slab local
@@ -14925,4 +14933,56 @@ Chapter 8 : Memory Management
                    * _else_ 120
                    */
 
+      Allocating a Slab Object :
+        a slab object is created through function kmem_cache_alloc().
 
+        <mm/slab.c>
+          /**
+           * kmem_cache_alloc - allocate a new slab object from a specified slab cache
+           * @cachep:           slab cache
+           * @flags:            GFP flags
+           * return:            virtual address of the object
+           *                    NULL => failed
+           * # this function actually call to __cache_alloc().
+           */
+          void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags);
+
+          /**
+           * __cache_alloc - allocate an object from slab cache
+           * @cachep:        slab cache
+           * @flags:         GFP flags
+           * @caller:        who called to this routine
+           * return:         virtual address for the object
+           *                 NULL => failed
+           */
+          static __always_inline
+          void *__cache_alloc(struct kmem_cache *cachep, gfp_t flags, void *caller);
+
+          brief description for __cache_alloc() :
+            kmem_cache_alloc() call to this function with @caller = __builtin_return_address(0),
+            the builtin feature used to obtain the ip register for current statement.
+            __cache_alloc() detach gfp allowed flags from @flags,then check if slab should
+            failslab? it is likely result in false.
+            next,process kernel debug checking for object allocating.
+            the primary work to allocate new object will be done by __do_cache_alloc(),
+            __cache_alloc() call to it with local interrupt disabled.
+            function __do_cache_alloc() is defined in the same file and actually it call
+            to ____cache_alloc().if CPU slab local cache is available then try to allocate
+            object from the slab local cache;otherwise,_refill_ "slab local cache" from @cachep
+            and retry allocate object. /* shared -> partial -> free */
+                                       /**
+                                        * for each online CPU,a slab cache has an array_cache
+                                        * corresponding to it,which stores the freed objs
+                                        * in this slab cache.
+                                        */
+            use prefetch primitive to cache @objp to hardware cache.
+            /**
+             * __cache_alloc() would call to kmemleak_alloc_recursive to create kmemleak object
+             * which is metadata for allocated memory block.
+             */
+
+            ! cache_alloc_refill() attempt refill slab local cache as the first method,if no
+              freed object is available in "this" slab cache,then it attempt to grow this slab
+              cache through cache_grow().
+              NULL would be returned if cache_grow() was failed,in the case,kmem_cache_alloc()
+              allocate new object failed.
