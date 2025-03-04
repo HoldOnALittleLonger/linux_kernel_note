@@ -14645,6 +14645,13 @@ Chapter 8 : Memory Management
               inuse++
 
               /* array start from index _zero_ */
+              /**
+               * suppose @free = 3 [0][1][2][3]...[N]
+               * [3] => the fourth element in object descriptor array
+               * @next = [3] => 4
+               * @free = @next = [3] => 4 -> [4] the fifth element
+               * # cache_init_objs(): slab_bufctl(slabp)[i] = i + 1
+               */
               kmem_bufctl_t next = slab_bufctl(slab)[slab->free]
               slab->free = next
 
@@ -14986,3 +14993,84 @@ Chapter 8 : Memory Management
               cache through cache_grow().
               NULL would be returned if cache_grow() was failed,in the case,kmem_cache_alloc()
               allocate new object failed.
+
+      Freeing a Slab Object :
+        function kmem_cache_free() is used to free an object in a slab cache.
+
+        <mm/slab.c>
+          /**
+           * kmem_cache_free - free an allocated object to its slab cache
+           * @cachep:          slab cache
+           * @objp:            address of object
+           * # this function call to __cache_free() for object releasing,and
+           *   during __cache_free() is processing,the local interrupt must be
+           *   disabled
+           */
+          void kmem_cache_free(struct kmem_cache *cachep, void *objp);
+
+          /**
+           * __cache_free - the main routine for free a slab object
+           * @cachep:       slab cache of the object
+           * @objp:         address of object
+           */
+          static inline void __cache_free(struct kmem_cache *cachep, void *objp);
+
+          brief descriptor for __cache_free() :
+            this function will skip calling cache_free_alien() when the platform is not NUMA
+            to avoid cache misses that happen while accessing slabp to get nodeid!
+            get slab local cache,if @avail < @limit,then just place the object into this
+            slab local cache as well;otherwise,call to cache_flusharray at first to get
+            space to place this object.
+
+          /**
+           * cache_flusharray - flush slab local cache for a specified slab cache
+           * @cachep:           slab cache
+           * @ac:               slab local cache for current CPU
+           */
+          static void cache_flusharray(struct kmem_cache *cachep, struct array_cache *ac);
+
+          brief description for cache_flusharray() :
+            retrieve @batchcount from @ac,retrieve kmem_list3 object for current NUMA node from
+            @cachep.
+            before operating to @l3,must acquire spin lock.
+            if @l3 has a shared slab local cache,then attempt to flush elements in @ac to
+            the shared slab local cache of @l3.
+            the maximum number of elements can be moved up is min(@batchcount, shared(@limit - @avail)),
+            after transfering accomplished,the @shared->avail += transferred elements.
+            if @l3 has not a shared slab,then call to free_block() to give back freed object in @ac to
+            slab allocator.                           /* with @nr_objects = @batchcount */
+            finally,update @ac->avail to @ac->avail - @batchcount,and move the remained free objects(valid)
+            in @ac to the beginning of @ac->entries.
+            /* the transferring is start at idx0 to idxN */
+
+          /**
+           * free_block - free a block is group of slab objects back to slab allocator
+           * @cachep:     where the objects come from
+           * @objpp:      array of pointers
+           * @nr_objects: how many objs to be freed
+           * @node:       NUMA node
+           * # require kmem_list's list_lock
+           */
+          static void free_block(struct kmem_cache *cachep, void **objpp, int nr_objects, int node);
+
+          brief description for free_block() :
+            for each object in @objpp,do
+              get @slabp of current obj /* struct page.@lru.prev */
+              call to slab_put_obj(),this function will get the idx of current object and then
+              set object descriptor array[obj-idx] to @slabp->free,set @slabp->free to obj-idx,
+              decrease @inuse of the slab descriptor.
+              /* get object index from object address through obj_to_index() */
+              increase @free_objects field of @l3 becasue slab_put_obj() was called.
+              if @inuse of @slabp became zero due to slab_put_obj(),then have to determine
+              whether should destroy the slab descriptor.
+              @l3->free_objects > @l3->free_limit,no more freed objects are allowed be
+              existed in this @l3,then must destroy the @slabp;otherwise,should add this
+              slab descriptor to the freed slabs list of @l3.
+              if @inuse is not equal to _zero_,that is there must be some objects is allocated
+              and have not released,should chain this slab descriptor to partial list of @l3.
+
+            ! by the way free @entries(objs) back to the slab descriptor they belong to for
+              get space to stores the object which is going to be released by kmem_cache_free().
+          
+
+            
