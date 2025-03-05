@@ -14974,9 +14974,10 @@ Chapter 8 : Memory Management
             the primary work to allocate new object will be done by __do_cache_alloc(),
             __cache_alloc() call to it with local interrupt disabled.
             function __do_cache_alloc() is defined in the same file and actually it call
-            to ____cache_alloc().if CPU slab local cache is available then try to allocate
-            object from the slab local cache;otherwise,_refill_ "slab local cache" from @cachep
-            and retry allocate object. /* shared -> partial -> free */
+            to ____cache_alloc().if CPU slab local cache for "this" slab cache is available,
+            then try to allocate object from the slab local cache;
+            otherwise,_refill_ "slab local cache" from @cachep and retry allocate object.
+                                       /* refill attempt order: shared -> partial -> free */
                                        /**
                                         * for each online CPU,a slab cache has an array_cache
                                         * corresponding to it,which stores the freed objs
@@ -15012,15 +15013,16 @@ Chapter 8 : Memory Management
            * __cache_free - the main routine for free a slab object
            * @cachep:       slab cache of the object
            * @objp:         address of object
+           * # must call to this routine with local interrupt disabled
            */
           static inline void __cache_free(struct kmem_cache *cachep, void *objp);
 
           brief descriptor for __cache_free() :
-            this function will skip calling cache_free_alien() when the platform is not NUMA
-            to avoid cache misses that happen while accessing slabp to get nodeid!
+            this function will skip calling cache_free_alien() when the platform is not
+            NUMA to avoid cache misses that happen while accessing slabp to get nodeid!
             get slab local cache,if @avail < @limit,then just place the object into this
-            slab local cache as well;otherwise,call to cache_flusharray at first to get
-            space to place this object.
+            slab local cache as well;otherwise,call to cache_flusharray to get space to
+            place this object.
 
           /**
            * cache_flusharray - flush slab local cache for a specified slab cache
@@ -15071,6 +15073,65 @@ Chapter 8 : Memory Management
 
             ! by the way free @entries(objs) back to the slab descriptor they belong to for
               get space to stores the object which is going to be released by kmem_cache_free().
-          
 
-            
+      General Purpose Objects :
+        kernel create 13 geometrically distributed lists for free memory areas whose size between
+        [32, 131072](bytes) as the general slab cache.
+        function kmalloc() handles such memory allocating request.
+
+        <linux/slab_def.h>
+          /**
+           * kmalloc - allocate specified size for memory area from general slab cache
+           * @size:    size of memory area
+           * @flags:   GFP flags
+           * return:   pointer to start of the memory area
+           *           NULL => failed
+           */
+          static __always_inline void *kmalloc(size_t size, gfp_t flags);
+
+          brief description for kmalloc() :
+            this function used a GCC builtin function __builtin_constant_p() to check
+            whether @size is a constant(for optimization),if it is,then use a 
+            local variable @i as the idx of 13 lists,and if @size is less than or
+            equal to pre-defined malloc size,allocate memory area from predefined
+            @malloc_sizes[i].cs_cachep or @malloc_sizes[i].cs_dmacachep through
+            kmem_cache_alloc_notrace().                    /* GFP_DMA */
+
+            otherwise,call to __kmalloc() to allocate memory area at runtime,and which
+            just call to __do_kmalloc() with @size, @flags, NULL(caller address) do
+            primary memory allocating.
+
+        <mm/slab.c>
+          /**
+           * __do_kmalloc - the primary routine to allocate memory from general slab cache
+           * @size:         size of memory area
+           * @flags:        GFP flags
+           * @caller:       code address of caller for debug tracking
+           * return:        pointer to the start of allocated memory area
+           *                NULL => failed
+           */
+          static __always_inline void *__do_kmalloc(size_t size, gfp_t flags, void *caller);
+
+          brief description for __do_kmalloc() :
+            this function use @size and @flags to attempt find out an appropriate general slab
+            cache.if unfound,return ZERO_OR_NULL_PTR(@cachep).
+            if such slab cache is existed,then call to __cache_alloc() on it.
+
+        function kfree() handles memory area free which is acquired through kmalloc().
+        
+        <linux/slab.h> <mm/slab.c>
+          /**
+           * kfree - free an object acquired through kmalloc() previously
+           * @objp:  virtual address of the object
+           * # this function call to __cache_free() to release object
+           * # the slab cache descriptor is get from struct page.@lru.@next
+           */
+          void kfree(const void *objp);
+
+        ! some common kmalloc functions provided by all allocators :
+            krealloc - kfree /* resize allocated memory area */
+                             /* if new-size less than current,then no realloc */
+                             /* if reallocated,then copy memory and kfree the old one */
+            kzalloc - kzfree /* __GFP_ZERO */
+            ksize : get the actual amount of memory allocated for a given object
+                            /* struct kmem_cache.@obj_size request CONFIG_DEBUG_SLAB */
