@@ -15135,3 +15135,136 @@ Chapter 8 : Memory Management
             kzalloc - kzfree /* __GFP_ZERO */
             ksize : get the actual amount of memory allocated for a given object
                             /* struct kmem_cache.@obj_size request CONFIG_DEBUG_SLAB */
+
+      Memory Pools :
+        new feature introduced in Linux 2.6,allow kernel component to allocate some dynamic
+        memory to be used only in "low-on-memory" emergencies.
+        memory pools are not reserved page frames!
+                             /* for atomic page request */
+        /**
+         * reserved dynamic memory can be used only by a specific kernel component in a special
+         * circumstance that all usual memory allocation requests are doomed to fail.
+         */
+
+        the memory unit handled by memory pool is referred to "memory element".
+        often,a memory pool is stacked over the slab allocator-that is,it is used to keep a
+        reserve of slab objects.howevery,a memory pool can be used to allocate every kind of
+        dynamic memory,from whole page frames to small memory areas allocated with kmalloc().
+
+        <linux/mempool.h>
+          typedef void *(mempool_alloc_t)(gfp_t gfp_mask, void *pool_data);
+          typedef void (mempool_free_t)(void *element, void *pool_data);
+
+          /**
+           * mempool_t - structure mempool_s represent a memory pool
+           * @lock:      concurrent protector
+           * @min_nr:    number of elements at *@elements
+           * @curr_nr:   current number of elements at *@elements
+           * @elements:  element pointer array
+           * @pool_data: memory pool specified data used by specific component
+           * @alloc:     function to allocate dynamic memory from mempool
+           * @free:      function to free dynamic memory back to mempool
+           * @wait:      wait queue used when the memory pool is empty
+           */
+          typedef struct mempool_s {
+                  spinlock_t lock;
+                  int min_nr;
+                  int curr_nr;
+                  void **elements;
+
+                  void *pool_data;
+                  mempool_alloc_t *alloc;
+                  mempool_free_t *free;
+                  wait_queue_head_t wait;
+          };
+
+          ! @min_nr stores the initial number of memory elements in the memory pool,that is the
+            owner of this memory pool is sure to obtain @min_nr memory elements from the memory
+            allocator.
+            @curr_nr is always lower than or equal to @min_nr.
+          ! @alloc and @free interface with the underlying memory allocator to get and release
+            a memory element,respectively.
+          !! if the memory elements are slab objects,then @alloc and @free generally are the
+             functions mempool_alloc_slab() and mempool_free_slab(),respectively.
+             in this case,@pool_data is the slab cache descriptor.
+             /* alloc slab : kmem_cache_alloc ; free slab : kmem_cache_free */
+
+          /**
+           * mempool_create - create a memory pool
+           * @min_nr:         initial number of memory elements would in this mempool
+           * @alloc_fn:       allocate function
+           * @free_fn:        free function
+           * @pool_data:      kernel component specific data
+           * return:          pointer to memory pool
+           *                  NULL => failed
+           * # this function actually call to _node_ version with node -1
+           * # mempool_create_node() will pre-allocate the guaranteed number of memory elements+
+           *   through @pool->@alloc()
+           */
+          extern mempool_t *mempool_create(int min_nr, mempool_alloc_t *alloc_fn,
+                                           mempool_free_t *free_fn, void *pool_data);
+
+          ! creating stage :
+              first,use kmalloc_node() to allocate memory pool descriptor.
+              second,use kmalloc_node() to allocate memory element pointer array.
+              third,while until @curr_nr equal to @min_nr,pre-allocate memory elements.
+
+          /**
+           * mempool_resize - resize a mempool
+           * @pool:           memory pool descriptor
+           * @new_min_nr:     new @min_nr
+           * @gfp_mask:       GFP mask
+           * return:          0 => succeed (return 0 maybe @alloc returned NULL)
+           *                  -ENOMEM => failed
+           * # during this function is processing,must no mempool_destory() is called
+           * # this function release spin lock before call to @pool->@alloc()
+           */
+          extern int mempool_resize(mempool_t *pool, int new_min_nr, gfp_t gfp_mask);
+
+          /**
+           * mempool_destroy - destroy a memory pool
+           * @pool:            memory pool descriptor
+           * # this function call to free_pool() to process primary works
+           * # this function only sleeps if the @free_fn function sleeps
+           * ! caller has to guarantee that all elements have been returned to the pool
+           */
+          extern void *mempool_destroy(mempool_t *pool);
+
+          ! free_pool() release all current memory elements and the invoke kfree() twice to
+            free @pool->@elements and @pool,respectively.
+
+          /**
+           * mempool_alloc - allocate a memory element from memory pool
+           * @pool:          memory pool descriptor
+           * @gfp_mask:      GFP mask
+           * return:         virtual address of the obtained element
+           *                 NULL => failed
+           * # this function attempt to allocate underlying memory through
+           *   @alloc method of @pool,if no memory is available,then allocate
+           *   memory from @pool through remove_element()
+           *   if the two strategies are failed,then wait(TASK_UNINTERRUPTIBLE)
+           *   until memory available under the circumstance that __GFP_WAIT is
+           *   enabled and retry allocating after "this" kernel control path is
+           *   woken up(retry allocate from underlying memory allocator)
+           */
+          void *mempool_alloc(mempool_t *pool, gfp_t gfp_mask);
+          
+          ! THIS FUNCTION WOULD ENABLE __GFP_NOMEMALLOC __GFP_NORETRY __GFP_NOWARN
+          ! BEFORE ENTERY WAITING STATE,FUNCTION WOULD CHECK @pool->@curr_nr IS
+            EQUAL TO _ZERO_ AGAIN,THAT IS MAYBE SOME ONE GIVE BACK MEMORY ELEMENT
+            TO MEMORY POOL(NOT ZERO),OTHERWISE,CALL TO io_schedule_timeout(5 * HZ)
+
+          /**
+           * mempool_free - free a memory element
+           * @element:      the memory element
+           * @pool:         the memory pool @element belongs to
+           * # if @curr_nr is less than @min_nr,then give back @element to @pool
+           *   through function add_element(),
+           *   otherwise,free @element through @free method give it back to 
+           *   underlying memory allocator
+           */
+          void mempool_free(void *element, mempool_t *pool);
+
+          ! add_element() and remove_element() : @curr_nr++ OR @curr_nr--
+
+          
