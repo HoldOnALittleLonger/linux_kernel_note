@@ -15267,4 +15267,141 @@ Chapter 8 : Memory Management
 
           ! add_element() and remove_element() : @curr_nr++ OR @curr_nr--
 
-          
+      Noncontiguous Memory Area Management :
+        noncontiguous page frames accessed through contiguous linear addresses,the main
+        advantage of this schema is to avoid external fragmentation,while the disadvantage
+        is that it is necessary to fiddle with the kernel Page Tables.
+        /* sizeof(noncontiguous memory area) must be a multiple of 4096 */
+
+        Linear Addresses of Noncontiguous Memory Areas :
+          normally,for to find out available contiguous linear addresses can look in the
+          area starting from PAGE_OFFSET(usually 0xc0000000,the fourth gigabyte)
+            how fourth gigabyte is used :
+              1> beginning of the area includes the linear addresses that map the first
+                 896MB of RAM.
+                 /**
+                  * the linear address that corresponds to the end of the directly mapped
+                  * physical memory is stored in the @high_memory variable.
+                  */
+              2> the end of the area contains the fix-mapped linear addresses.
+              3> linear addresses start from PKMAP_BASE are used by kernel to map high-memory
+                 page frames.
+              4> the remaining linear addresses can be used for noncontiguous memory areas,
+                 between 1> and 4>,a 8MB safety interval(VMALLOC_OFFSET) is inserted into there.
+                 /* VMALLOC_OFFSET used for capture out-of-bounds memory accesses */
+                 a safety interval of 4kB is inserted between each noncontiguous memory areas.
+          3GB                                                                                              4GB
+          +--------------------------------------------------------------------------------------------------+
+          |                 |     |               |     |              |     |     |            |            |
+          | pysical mapping | 8MB | vmalloc areas | 4kB | vmalloc area | ... | 8kB | PKMAP_BASE | fix-mapped |
+          |                 |     |               |     |              |     |     |            |            |
+          +--------------------------------------------------------------------------------------------------+
+          |                 |     |               |                                |            +--> fix-mapping
+          |                 |     |               |                                +--> high memory page mapping
+          |                 |     |               +--> safety interval
+          |                 |     +--> noncontiguous memory area
+          |                 +--> safety interval
+          +--> PAGE_OFFSET
+
+            macro VMALLOC_START defines the starting address of the linear space reserved for
+            noncontiguous memmory areas,while VMALLOC_END defines its ending address.
+            /**
+             * <arch/x86/include/asm/pgtable_32_typs.h>
+             *   #define VMALLOC_OFFSET (8 * 1024 * 1024)
+             *   #define VMALLOC_START ((unsigned long)high_memory + VMALLOC_OFFSET)
+             *   #define VMALLOC_END (PKMAP_BASE - 2 * PAGE_SIZE)
+             *   /* #define VMALLOC_END (FIXADDR_START - 2 * PAGE_SIZE) no CONFIG_HIGHMEM */
+             */
+        !! WHAT IS struct vm_struct DO THAT IS CONSTRUCT A MAPPING BETWEEN LINEAR ADDRESS AND
+           NONCONTIGUOUS MEMORY.
+
+        Descriptors of Noncontiguous Memory Areas :
+          structure vm_struct is used to present a noncontiguous memory area.
+
+          <linux/vmalloc.h>
+            #define VM_IOREMAP 0x00000001  /* ioremap() and friends */
+            #define VM_ALLOC   0x00000002  /* vmalloc() */
+            #define VM_MAP     0x00000004  /* vmap()ed pages */
+            #define VM_USERMAP 0x00000008  /* suitable for remap_vmalloc_range */
+            #define VM_VPAGES  0x00000010  /* buffer for pages was vmalloc'ed */
+
+            /**
+             * vm_struct - noncontiguous memory area descriptor
+             * @next:      next vm_struct structure(chained together)
+             * @addr:      linear address of the first memory cell
+             * @size:      size of area plus PAGE_SIZE(safety-interval)
+             * @flags:     noncontiguous memory area flags,identifies
+             *             the type of memory mapped by the area
+             * @pages:     page frame array for this memory area
+             * @nr_pages:  number of page frames in @pages
+             * @phys_addr: phsical address,set to 0 unless the area
+             *             has been created to map the I/O shared memory
+             *             of a hardware device
+             * @caller:    who created this memory area
+             */
+            struct vm_struct {
+                    struct vm_struct *next;
+                    void *addr;
+                    unsigned long size;
+                    unsigned long flags;
+                    struct page **pages;
+                    unsigned int nr_pages;
+                    unsigned long phys_addr;
+                    void *caller;
+            };
+
+            /* vmlist_lock - concurrent protector */
+            extern rwlock_t vmlist_lock;
+
+            /* vmlist - the first vm_struct structure */
+            extern struct vm_struct *vmlist;
+        
+            /**
+             * get_vm_area - look for a free range of linear addresses between VMALLOC_START
+             *               and VMALLOC_END,and attempt to create a new vm_area to map these
+             *               linear addresses
+             * @size:        size of memory area
+             * @flags:       flags of memory area
+             * return:       pointer to the vm_area object
+             *               NULL => failed
+             * # this function actually call to __get_vm_area_node() with arguments
+             *     @size, 1, @flags, VMALLOC_START, VMALLOC_END, -1, GFP_KERNEL,
+             *     __builtin_return_address(0)
+             */
+            extern struct vm_struct *get_vm_area(unsigned long size, unsigned long flags);
+
+          <mm/vmalloc.c>
+            /**
+             * __get_vm_area_node - attempt to create a new vm_struct which map to a specified
+             *                      range of linear addresses from a NUMA node
+             * @size:               sizeof memory area
+             * @align:              alignment
+             * @flags:              memory area flags
+             * @start:              searching start address
+             * @end:                searching end address
+             * @node:               NUMA node
+             * @gfp_mask:           GFP flag mask
+             * @caller:             who called to this routine
+             * return:              poiner to vm_struct
+             *                      NULL => failed
+             */
+            static struct vm_struct *__get_vm_area_node(unsigned long size, unsigned long align,
+                                                        unsigned long flags, unsigned long start,
+                                                        unsigned long end, int node, gfp_t gfp_mask,
+                                                        void *caller);
+
+            brief description for __get_vm_area_node() :
+              check @flags at first,if enabled VM_IOREMAP,then set local variable @bit to fls(@size).
+              then
+                @bit := @bit > IOREMAP_MAX_ORDER ? IOREMAP_MAX_ORDER : @bit < PAGE_SHIFT ? PAGE_SHIFT : @bit
+                reset @align to 1ul << @bit
+              next,align @size on PAGE_SIZE,if @size is _zero_ then return NULL.
+              attempt to allocate "vm_struct" object from general purpose slab cache through kzalloc_node(),
+              if failed,then return NULL.
+              update @size to @size plus PAGE_SIZE for safety interval.
+              call to alloc_vmap_area() to allocate a vmap_area,this should be the noncontiguous memory area
+              that vm_struct associated to.
+              if succeed to got vmap_area,then call to insert_vmalloc_vm(),which initializes vm_struct and
+              associate vmap_area with the vm_struct,chained vm_struct into @vmlist.
+              finally,return the vm_struct.
+              /* if failed to got vmap_area,then kfree vm_struct and return NULL! */
