@@ -15290,7 +15290,8 @@ Chapter 8 : Memory Management
                  between 1> and 4>,a 8MB safety interval(VMALLOC_OFFSET) is inserted into there.
                  /* VMALLOC_OFFSET used for capture out-of-bounds memory accesses */
                  a safety interval of 4kB is inserted between each noncontiguous memory areas.
-          3GB                                                                                              4GB
+
+          3GB                           Linear Addresses                                                   4GB
           +--------------------------------------------------------------------------------------------------+
           |                 |     |               |     |              |     |     |            |            |
           | pysical mapping | 8MB | vmalloc areas | 4kB | vmalloc area | ... | 8kB | PKMAP_BASE | fix-mapped |
@@ -15405,3 +15406,177 @@ Chapter 8 : Memory Management
               associate vmap_area with the vm_struct,chained vm_struct into @vmlist.
               finally,return the vm_struct.
               /* if failed to got vmap_area,then kfree vm_struct and return NULL! */
+
+          structure vmap_area is used to present virtual area mapping.
+          <mm/vmalloc.c>
+            /**
+             * vmap_area - structure used to represent mapping of virtual area and linear address
+             * @va_start:  start linear address of the virtual area
+             * @va_end:    end linear address of the virtual area
+             * @flags:     flags =>
+             *                     VM_LAZY_FREE 0x01
+             *                     VM_LAZY_FREEING 0x02
+             *                     VM_VM_AREA 0x04
+             * @rb_node:   address sorted rbtree
+             * @list:      address sorted list
+             * @purge_list: "lazy purge" list
+             * @private:   private data
+             * @rcu_head:  RCU
+             */
+            struct vmap_area {
+                    unsigned long va_start;
+                    unsigned long va_end;
+                    unsigned long flags;
+                    struct rb_node rb_node;
+                    struct list_head list;
+                    struct list_head purge_list;
+                    void *private;
+                    struct rcu_head rcu_head;
+            };
+
+      Allocating a Noncontiguous Memory Area :
+        function vmalloc() is used to allocate virtually contiguous memory,that is,
+        it is contiguous in linear addresses.
+
+        <mm/vmalloc.c>
+          /**
+           * vmalloc - allocate virtually contiguous memory
+           * @size:    size to allocate
+           * return:   linear address for the start of memory area
+           *           NULL => failed
+           * # this function actually call to __vmalloc_node() with arguments 
+           *     @size, 1, GFP_KERNEL | __GFP_HIGHMEM, PAGE_KERNEL, -1, caller-address
+           */
+          void *vmalloc(unsigned long size);
+
+          /**
+           * __vmalloc_node - allocate virtual memory area from a specified NUMA node
+           * @size:           size of memory area
+           * @align:          alignment
+           * @gfp_mask:       GFP flag mask
+           * @prot:           protection mask for the allocated pages
+           *                  @it always set to 0x63,Present,Accessed,Read/Write,Dirty
+           * @node:           NUMA node
+           * @caller:         caller's return address
+           * return:          linear address for the start of memory area
+           *                  NULL => failed
+           * # this function allocate page frames from page allocator to cover @size memory area,
+           *   and then map them in kernel linear address space,using a pagetable protection of @prot
+           */
+          static void *__vmalloc_node(unsigned long size, unsigned long align, gfp_t gfp_mask,
+                                      pgprot_t prot, int node, void *caller);
+
+          brief description for __vmalloc_node() :
+            align @size at first,return NULL if @size is _zero_ OR (@size >> PAGE_SHIFT) > totalram_pages.
+            use __get_vm_area_node() attempt to create a vm_struct object which would be used for establish
+            mapping,return NULL if failed to create.
+            function __vmalloc_area_node() is used to allocate memory area with @size and map them in kernel
+            linear address space.
+            finally,it returns what __vmalloc_area_node() returned.
+
+          /**
+           * __vmalloc_area_node - allocate virtual memory area and map it to kernel linear address space
+           * @area:                the memory area descriptor
+           * @gfp_mask:            GFP flag mask
+           * @prot:                protection flags for allocated pages
+           * @node:                NUMA node
+           * @caller:              who called me?
+           * return:               linear address OR NULL(failed)
+           */
+          static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask, pgprot_t prot, int node,
+                                           void *caller);
+
+          brief description for __vmalloc_area_node() :
+            the page frames would be allocated by page-level allocator is calculated through
+                    (@size - PAGE_SIZE) >> PAGE_SHIFT (=> @nr_pages)
+            local variable @array_size is equal to the result of "@nr_pages * sizeof(struct page *)".
+            @array_size indicates the array of page frame pointers hold how much page frames used to cover the
+            memory area.
+            if @array_size > PAGE_SIZE(32-bit 4096),use __vmalloc_node() to allocate pages array,and enable
+            VM_VPAGES in @area->flags;otherwise,use kmalloc_node() to allocate pages array.
+            @area->pages points to the allocate pages array,and @caller member is set to parameter @caller.
+            but function would return NULL and kfree @area if we failed to allocate pages array!
+            now,array of page frames has been allocated,next,have to allocate element for this array.
+            for each element,call to alloc_page() to allocate page frame if @node < 0;otherwise,use
+            alloc_pages_node() as instead.
+            any NULL page descriptor is got will cause procedure fail,in this case,have to vfree() the
+            been allocated page frames in the pages array.
+            function map_vm_area() is the main routine to map vm_struct to kernel linear address space.if
+            failed to establish mapping,we have to vfree the page frames and return NULL.
+            if mapping has been established,then @addr member of @area must point to the linear address,
+            then return it as well.
+
+          /**
+           * map_vm_area - establish mapping between virtual memory area with kernel linear address
+           * @area:        virtual memory area
+           * @prot:        page protection flag
+           * @pages:       pointer to an array of page frame pointers
+           * return:       0 => succeed
+           *               error code => failed
+           * # this function call to vmap_page_range() to do the primary work
+           *   if this function is failed,then *@pages += error code
+           */
+          int map_vm_area(struct vm_struct *area, pgprot_t prot, struct page ***pages);
+
+          ! start from @area->addr(it is struct vmap_area.va_start)
+            end at @addr + @area->size - PAGE_SIZE
+
+          /**
+           * vmap_page_range - establish mapping between a range of kernel linear address and 
+           *                   given page frames
+           * @start:           start address
+           * @end:             end address
+           * @prot:            page protection flag
+           * @pages:           page frame pointer array
+           * return:           # this function actually call to vmap_page_range_noflush(),thus,
+           *                     if returns what that function returend
+           * # this function will call to flush_cache_vmap() to flush hardware cache for virtual
+           *   mapping(the linear addresses have been point to another,the olds been invalid)
+           */
+          static int vmap_page_range(unsigned long start, unsigned long end, pgprot_t prot,
+                                     struct page **pages);
+
+          /**
+           * vmap_page_range_noflush - routine called by vmap_page_range() to establish mapping
+           * @start:                   start address
+           * @end:                     end address
+           * @prot:                    page protection flag
+           * @pages:                   page frame pointer array
+           * return:                   number of setup page table entries
+           *                           -ENOMEM => failed
+           */
+          static int vmap_page_range_noflush(unsigned long start, unsigned long end, pgprot_t prot,
+                                             struct page **pages);
+
+          brief description for vmap_page_range_noflush() :
+            get kernel Page Global Directory through pgd_offset_k(addr),which is architecture depended
+            macro function,it will be expanded to "@init_mm.pgd + pgd_index(@start)".
+            enter a do-while cycle,endup when @start == @end.
+            in each cycle,get the address of next boundary through macro pgd_addr_end() which is defined
+            in <asm-generic/pgtable.h>,if no next boundary,@end would be returned.
+            call to function vmap_pud_range() to setup Page Upper Directory,and which will call to
+            vmap_pmd_range() to setup Page Middle Directory,then is vmap_pte_range() to setup
+            Page Table Entries(through set_pte_at()).
+            /**
+             * Hierarchy of Page Table of Linux has been descripted in "Paging in Linux".
+             * vmap_pud_range() attempts to get pud_t through pud_alloc() from @init_mm in @pgd,
+             * vmap_pmd_range() attempts to get pmd_t through pmd_alloc() from @init_mm in @pud,
+             * vmap_pte_range() attempts to get pte_t through pte_alloc_kernel() from @pmd
+             *                                  # new Page Table
+             */
+
+         !! BEFORE map_vm_area() IS CALLED AND SUCCEED TO SETUP PAGE TABLE,ALL LINEAR ADDRESSES
+            IN struct vmap_area ARE NO SENSE,WHICH ARE NOT MAPPED IN KERNEL LINEARA ADDRESS SPACE.
+            /**
+             * c3 switch in,but no such linear addresses can not accessed at the kernel code address
+             * segment.
+             */
+
+         !! NOTICE THAT,FUNCTION vmalloc() FIDDLES KERNEL Page Global Directory THAT IS KERNEL
+            "Page Table Entries",IF A PROCESS IN KERNEL MODE ATTEMPT TO ACCESS SUCH LINEAR ADDRESSES
+            WILL CAUSE "Page Fault".BUT "Page Fault" EXCEPTION HANDLER WILL CAPTURE THIS EXCEPTION
+            AND TRY TO FIND OUT SUCH "Page Table Entries" CORRESPONDING TO THE LINEAR ADDRESSES FROM
+            KERNEL "Page Table",IF FOUND OUT,THEN COPIES THEM INTO PROCESS "Page Table",AND RESUME 
+            EXECUTION OF THE PROCESS.
+
+         !! FUNCTION vmalloc_32() ATTEMPT TO ALLOCATE PAGE FRAMES FROM ZONE_DMA AND ZONE_NORMAL.
