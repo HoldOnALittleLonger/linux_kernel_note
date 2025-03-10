@@ -15434,6 +15434,16 @@ Chapter 8 : Memory Management
                     struct rcu_head rcu_head;
             };
 
+            !! function alloc_vmap_area() allocate a region of KVA of the specified size
+               and alignment within the @va_start and @va_end.the function is defined in
+               <mm/vmalloc.c>
+               struct vmap_area object is allocated by kmalloc_node().
+               the searching is processed by walk @vmap_area_root a red-black tree.
+               function free_vmap_area() is used to release a vmap_area object,which is
+               defined in the same file.the deleting is process by rb_erase() and RCU
+               routine rcu_free_va() to update the vmap_area object.
+                       /* kfree that vmap_area object */
+
       Allocating a Noncontiguous Memory Area :
         function vmalloc() is used to allocate virtually contiguous memory,that is,
         it is contiguous in linear addresses.
@@ -15580,3 +15590,88 @@ Chapter 8 : Memory Management
             EXECUTION OF THE PROCESS.
 
          !! FUNCTION vmalloc_32() ATTEMPT TO ALLOCATE PAGE FRAMES FROM ZONE_DMA AND ZONE_NORMAL.
+
+      Releasing a Noncontiguous Memory Area :
+        function vfree() is used to do the reverse to what vmalloc() did,that is,it releases
+        noncontiguous memory areas created by vmalloc() or vmalloc_32().
+        function vunmap() releases memory areas created by vmap().
+
+        <mm/vmalloc.c>
+          /**
+           * vfree - release memory allocated by vmalloc()
+           * @addr:  memory base address
+           * # this function free the virtually contiguous memory area starting at @addr,
+           *   if @addr is NULL,no operation is performed
+           * # this function actually call to __vunmap(@addr, 1)
+           */
+          void vfree(const void *addr);
+
+          /**
+           * vunmap - release virtual mapping obtained by vmap()
+           * @addr:   memory base address
+           * # this function free the virtually contiguous memory area starting at @addr,
+           *   which was created from the page array passed to vmap()
+           * # this function actually call to __vunmap(@addr, 0)
+           */
+          void vunmap(const void *addr);
+
+          !! BOTH THE TWO FUNCTIONS ABOVE CAN NOT BE CALLED WITH IN _INTERRUPT_ CONTEXT.
+
+          /**
+           * __vunmap - routine for release virtual memory area
+           * @addr:     base address
+           * @deallocate_pages: whether deallocate page frames mapped to this memory area
+           */
+          static void __vunmap(const void *addr, int deallocate_pages);
+
+          what __vunmap() does :
+            first,check @addr if valid through "(PAGE_SIZE - 1) & (unsigned long)@addr",if
+            @addr is not valid,then report error and return to caller.
+            call to remove_vm_area() to find out the struct vm_struct corresponding to @addr,
+            the function will unmap linear addresses for the @addr in kernel linear address space,
+            that is,it manipulate Page Table.
+            /**
+             * # this function is NOT safe on SMP machines.
+             * remove_vm_area() call to find_vmap_area() attempt to find out the vmap_area object
+             * for @addr.
+             *
+             * if _FOUND_ AND VM_VM_AREA flag is enabled in @va->flags,then unlink the vm_struct
+             * from @vmlist.next,call to vmap_debug_free_range(),this function will unmap page tables
+             * and force a TLB flush immediately if CONFIG_DEBUG_PAGEALLOC is set.
+             * call to free_unmap_vmp_area(@va) to free and unmap a vmap area,this function will
+             * increase @vmap_lazy_nr by result of "(va_end - va_start) / PAGE_SIZE",if @vmap_lazy_nr
+             * has exceeded maximum limit value,then call to try_purge_vmap_area_lazy() to purges all
+             * lazily-freed vmap areas.(that is,all kernel linear addresses will be recycled)
+             * !! in this stage,function vunmap_page_range() would be called to manipulate kernel
+             *    Page Table.
+             * !! the vmap_area object for these linear addresses would be freed by __free_vmap_area()
+             *    later called by __purge_vmap_area_lazy().
+             *
+             * modify @size member of vm_struct object,subtract PAGE_SIZE(because it had been unlinked
+             * from @vmlist),return @vm.
+             *
+             * if _UNFOUND_,return NULL.
+             */
+            if @deallocate_pages is TRUE,then __vunmap() must deallocate all page frames they have been
+            mapped in the virtual memory area.
+            /**
+             * call __free_page() for each page pointer in struct vm_struct.@area.
+             * if VM_VPAGES is enabled in struct vm_struct.@flags,then call to vfree() to release the
+             * page pointer array,otherwise,call to kfree() to release the page pointer array.
+             */
+            finally,function call to kfree() to free the struct vm_struct object which is found out
+            previously.
+
+          !! vunmap_page_range() -> vunmap_pud_range() -> vunmap_pmd_range() -> vunmap_pte_range ->
+             ptep_get_and_clear() for each Page Table Entry
+             /**
+              * static inline function ptep_get_and_clear() is defined in <arch/x86/include/asm/pgtable.h>.
+              * it call to native_ptep_get_and_clear(),which is defined in <arch/x86/include/asm/pgtable_64.h>,
+              * this function call to native_pte_clear() make a _zero_ pte and use it to instead the old,and
+              * return old one.
+              * # if CONFIG_SMP is defined,just call to native_make_pte() directly.
+              */
+          !! kernel leaves unchanged the entries of the process page tables mapping the fourth gigabyte,
+             because the kernel never reclaims PUD PMD PT rooted at the master kernel Page Global Directory.
+             ONLY _CLEAR_ PTE,NOT RECLAIMING.(ACCESS TO _ZERO_ ENTRY,Page Fault Handler WILL CONSIDER SUCH
+             ACCESSES A BUG,BECAUSE THE MASTER KERNEL PAGE TABLES DO NOT INCLUDE VALID ENTRIES.)
