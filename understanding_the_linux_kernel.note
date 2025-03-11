@@ -2605,7 +2605,7 @@ Chapter 3 : Processes
         the reasons :
           >  when an 80x86 CPU switches from User Mode to Kernel Mode,it fetches the address of the Kernel Mode
              stack from the TSS.
-          >  when a User Mode process attempts to access an I/O port by means of an "in" or "out" instruction,
+          >  when a User Mode process attempt to access an I/O port by means of an "in" or "out" instruction,
              the CPU may need to access an I/O Permission Bitmap stored in the TSS to verify whether the process
              is allowed to address the port.
 
@@ -11355,7 +11355,7 @@ Chapter 7 :
                        *     3>  hardware cache hot on remote CPU of the task
                        * # aggressive to migrate :
                        *     1>  cold cache
-                       *     2>  too many balance attempts have failed
+                       *     2>  too many balance attempt have failed
                        *
                        * function pull_task() is used to set the @cpu of a task,which
                        * is defined in the same file.
@@ -12828,7 +12828,7 @@ Chapter 8 : Memory Management
            */
          
           releasing :
-            kernel attempts to merge pairs of free buddy blocks of size B together into a single
+            kernel attempt to merge pairs of free buddy blocks of size B together into a single
             block of size 2B.
             two blocks are considered buddies if :
               > both blocks have the same size B
@@ -15420,7 +15420,7 @@ Chapter 8 : Memory Management
              * @rb_node:   address sorted rbtree
              * @list:      address sorted list
              * @purge_list: "lazy purge" list
-             * @private:   private data
+             * @private:   private data,in normally,it is the struct vm_struct object's address
              * @rcu_head:  RCU
              */
             struct vmap_area {
@@ -15433,6 +15433,10 @@ Chapter 8 : Memory Management
                     void *private;
                     struct rcu_head rcu_head;
             };
+
+            # [@va_start, @va_end] <=====> @private -> pointer of an object is type of struct vm_struct
+                               struct vmap_area
+                              /* like a bridge */
 
             !! function alloc_vmap_area() allocate a region of KVA of the specified size
                and alignment within the @va_start and @va_end.the function is defined in
@@ -15569,9 +15573,9 @@ Chapter 8 : Memory Management
             Page Table Entries(through set_pte_at()).
             /**
              * Hierarchy of Page Table of Linux has been descripted in "Paging in Linux".
-             * vmap_pud_range() attempts to get pud_t through pud_alloc() from @init_mm in @pgd,
-             * vmap_pmd_range() attempts to get pmd_t through pmd_alloc() from @init_mm in @pud,
-             * vmap_pte_range() attempts to get pte_t through pte_alloc_kernel() from @pmd
+             * vmap_pud_range() attempt to get pud_t through pud_alloc() from @init_mm in @pgd,
+             * vmap_pmd_range() attempt to get pmd_t through pmd_alloc() from @init_mm in @pud,
+             * vmap_pte_range() attempt to get pte_t through pte_alloc_kernel() from @pmd
              *                                  # new Page Table
              */
 
@@ -15675,3 +15679,58 @@ Chapter 8 : Memory Management
              because the kernel never reclaims PUD PMD PT rooted at the master kernel Page Global Directory.
              ONLY _CLEAR_ PTE,NOT RECLAIMING.(ACCESS TO _ZERO_ ENTRY,Page Fault Handler WILL CONSIDER SUCH
              ACCESSES A BUG,BECAUSE THE MASTER KERNEL PAGE TABLES DO NOT INCLUDE VALID ENTRIES.)
+
+
+Chapter 9 : Process Address Space
+    Memory allocating behaviors in Kernel Mode and in User Mode :
+      > if a kernel function makes a request for dynamic memory,it must have a valid reason to issue that
+        request,and there is no point in trying to defer it.
+      > kernel trust itself,all kernel functions are assumed to be error-free,so the kernel does not need
+        to insert any protection against programming errors.
+      > kernel will try to defer dynamic memory allocating request issued by a user process from User Mode,
+        all requests are considered non-urgent.
+      > user programs cannot be trusted,the kernel must be prepared to catch all addressing errors caused
+        by processes in User Mode.
+
+    The Process's Address Space :
+      the address space of a process consists of all linear addresses that the process is allowed to use,
+      each process sees a different set of linear addresses.
+      kernel use new resource named "memory region" to represents process's address space,which is characterized
+      by an initial linear address,a length,and some access rights.both initial address and length must be 
+      multiples of 4096,this requirement is made for efficiency.
+            /* data identified by each memory region completely fills up the page frames allocated to it */
+
+      situations in which a process gets new memory regions :
+        1> process fork /* child get new memory regions,copy-on-write */
+        2> process does exec syscall
+        3> process does memory mapping on a file
+        4> kernel decide to expand the size of process User Mode stack
+           /* all stack spaces had been used */
+        5> process create IPC Shared Memory
+        6> process expand its heap
+
+      syscalls related to the process's memory regions changing :
+        brk                   changes the heap size of the process
+        execve                loads a new executable file,thus changing the process address space
+        _exit                 terminates the current process and destroys its address space
+        fork                  creates a new process,and thus a new address space
+        mmap, mmap2           creates a memory mapping for a file,thus enlarging the process address space
+        mremap                expands or shrinks a memory region
+        remap_file_pages      creates a non-linear mapping for a file        [[deprecated]]
+        munmap                destroys a memory mapping for a file,thus contracting the process address space
+        shmat                 attaches a shared memory region
+        shmdt                 detaches a shared memory region
+
+      Page Fault Exception Handler is essential for the kernel to identify the memory regions currently owned
+      by a process which cause Page Fault.
+      this allows the Page Fault Exception Handler to efficiently distinguish between two types of invalid
+      linear addresses that cause it to be invoked :
+        1> caused by programming errors
+        2> caused by a missing page
+           /**
+            * the linear address belongs to the process address space,but corresponding page frames are
+            * not existed.(for process,the linear addresses which no page frames mapped to it are invalid)
+            * "demand paging" : kernel provides the missing page frame and lets the process continue.
+            */
+        
+      
