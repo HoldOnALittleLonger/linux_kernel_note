@@ -15692,6 +15692,10 @@ Chapter 9 : Process Address Space
       > user programs cannot be trusted,the kernel must be prepared to catch all addressing errors caused
         by processes in User Mode.
 
+      ! "interval" - "memory region"
+        when process attempt to get additional page frames,instead,it will gets the right to
+        use a new range of linear addresses,which become part of its address space,that is the interval.
+
     The Process's Address Space :
       the address space of a process consists of all linear addresses that the process is allowed to use,
       each process sees a different set of linear addresses.
@@ -15732,5 +15736,188 @@ Chapter 9 : Process Address Space
             * not existed.(for process,the linear addresses which no page frames mapped to it are invalid)
             * "demand paging" : kernel provides the missing page frame and lets the process continue.
             */
+
+    The Memory Descriptor :
+      linux introduced a structure mm_struct as the descriptor of address space of the process.
+      @mm member of process descriptor is the memory descriptor pointer of that process.
+
+      <linux/mm_types.h>
+        /**
+         * structure vm_area_struct is defined in the same header,which is a part of process
+         * virtual memory space that has a special rule for Page Fault handlers.
+         * it defines a memory "virtual memory mapping" memory area.
+         * it is differ from vm_struct,the structure vm_struct defines noncontiguous memory area,
+         * which is a part of memory allocator.
+         */
+
+        /**
+         * mm_struct - structure collected all information related to the process address space,
+         *             mm_struct is the memory descriptor of a process
+         * @mmap:      list of VMAs,that is memory region objects
+         * @mm_rb:     root of the red-black tree of memory region objects
+         * @mmap_cache: last find_vma() result,that is the last referenced memory region object
+         * @get_unmapped_area: routine used to searches an available linear address interval
+         *                     in the process address space
+         * @unmap_area: routine used to release a linear address interval
+         * @mmap_base: base of mmap area,identifies the linear address of the first allocated
+         *             anonymous memory region or file memory mapping
+         * @task_size: size of task vm(virtual memory) space
+         * @cached_hole_size: if non-zero,the largest hole below @free_area_cache
+         * @free_area_cache:  first hole of size @cached_hole_size or larger,address from there
+         *                    the kernel will look for a free interval of linear addresses in the
+         *                    process address space
+         * @pgd:       process Page Global Directory
+         * @mm_users:  how many users with user space,secondary usage counter
+         *             the number of lightweight processes that share the mm_struct data structure
+         * @mm_count:  how many references to "struct mm_struct",main usage counter
+         *             all users counted by @mm_users are treated as one unit in @mm_count
+         *             kernel deallocate this mm_struct when detected this member becomes _ZERO_
+         * @map_count: number of VMAs
+         * @mmap_sem:  memory region read/write semaphore
+         * @page_table_lock: protects page tables and some counters
+         * @mmlist:    list of maybe swapped mm's,these are globally strung together off @init_mm.mmlist,
+         *             and protected by @mmlist_lock
+         *             this member is used to chain all memory descriptors
+         * @hiwater_rss: high-watermask of RSS usage,maximum number of page frames ever owned by the process
+         * @hiwater_vm:  high-water virtual memory usage,maximum number of page frames ever included in the 
+         *               memory regions of the process
+         * @total_vm -- @env_end: the meanings are consist to their names
+         *                        except @def_flags and @nr_ptes,all are linear addresses in the process
+         *                        address space
+         *                        @def_flags: the default access rights for the memory regions
+         *                        @nr_ptes: how much Page Table Entry the process address space occupied
+         *                                  this member is increased by function __pte_alloc(),as
+         *                                  described in earily Chapter,a new Page Table Entry is necessay
+         *                                  when building mapping between linear addresses and page frames
+         *                                  # this member is initialized to _ZERO_ by mm_init()
+         *                                    (Copy-On-Write)
+         * @saved_auxv: used when starting the execution of an ELF program,for /proc/<pid>/auxv
+         * @rss_stat:  special counter for RSS statistics,protected by @page_table_lock
+         * @binfmt:    linux binary file format
+         * @cpu_vm_mask: bit mask for lazy TLB switches
+         * @context:   architecture-specific MM context
+         * @faultstamp: last value of global fault stamp as seen by this process,
+         *              how long it has been since this task got the token
+         * @token_priority: token priority
+         * @last_interval: last interval
+         * @flags:     swap flags,must use atomic bitops to access the bits
+         * @core_state: coredump support
+         * @ioctx_lock: lock used to protect the list of asynchronous I/O contexts
+         * @ioctx_list: asynchronous I/O context hash list
+         * @owner:     who has this mm_struct
+         * @exe_file:  store reference to file /proc/<pid>/exe symlink points to
+         * @num_exe_file_vmas: number of virtuam memory areas that exe file has
+         * @mmu_notifier_mm: memory management unit notifier
+         */
+        struct mm_struct {
+                struct vm_area_struct *mmap;
+                struct rb_root mm_rb;
+                struct vm_area_struct *mmap_cache;
+        #ifdef CONFIG_MMU
+                unsigned long (*get_unmapped_area)(struct file *filp, unsigned long addr,
+                                                   unsigned long len, unsigned long pgoff,
+                                                   unsigned long flags);
+                void (*unmap_area)(struct mm_struct *mm, unsigned long addr);
+        #endif
+                unsigned long mmap_base;
+                unsigned long task_size;
+                unsigned long cached_hole_size;
+                unsigned long free_area_cache;
+                pgd_t *pgd;
+                atomic_t mm_users;
+                atomic_t mm_count;
+                int map_count;
+                struct rw_semaphore mmap_sem;
+                spinlock_t page_table_lock;
+
+                struct list_head mmlist;
+
+                unsigned long hiwater_rss;
+                unsigned long hiwater_vm;
+
+                unsigned long total_vm, locked_vm, shared_vm, exec_vm;
+                unsigned long stack_vm, reserved_vm, def_flags, nr_ptes;
+                unsigned long start_code, end_code, start_data, end_data;
+                unsigned long start_brk, brk, start_stack;
+                unsigned long arg_start, arg_end, env_start, env_end;
+
+                unsigned long saved_auxv[AT_VECTOR_SIZE];
+
+                struct mm_rss_stat rss_stat;
+
+                struct linux_binfmt *binfmt;
+
+                cpumask_t cpu_vm_mask;
+               
+                mm_context_t context;
+
+                unsigned int faultstamp;
+                unsigned int token_priority;
+                unsigned int last_interval;
+                
+                unsigned long flags;
+
+                struct core_state *core_state;
+
+        #ifdef CONFIG_AIO
+                spinlock_t ioctx_lock;
+                struct hlist_head ioctx_list;
+        #endif
+        #ifdef CONFIG_MM_OWNER
+                struct task_struct *owner;
+        #endif
+        #ifdef CONFIG_PROC_FS
+                struct file *exe_file;
+                unsigned long num_exe_file_vmas;
+        #endif
+        #ifdef CONFIG_MMU_NOTIFIER
+                struct mmu_notifier_mm *mmu_notifier_mm;
+        #endif
+        };
+
+        ! about @mm_users and @mm_count,the mm_struct object maybe lent to kernel thread,
+          and kernel thread might increase @mm_users to keep @mm_count do not become zero
+          in side-effect;or increase @mm_count directly.
+          if @mm_count become zero,then kernel deallocate it,but if it is using by a kernel
+          thread now,so it should not to be destroyed.
+
+      function mm_alloc() is used to allocate a new memory descriptor from slab cache.
+      function mmput() used to decrease @mm_users.
+      function mmdrop() used to decrease @mm_count.
+
+      <linux/sched.h>
+        /**
+         * mm_alloc - allocate a new memory descriptor and initializes it
+         * return:    pointer to the memory descriptor allocated
+         *            NULL => failed to allocate
+         * # this function call to kmem_cache_alloc() attempt to allocate a memory descriptor
+         *   from special purpose slab cache "mm_cachep"
+         * # this function will sets the @mm_count and @mm_users to 1
+         * # the implementation is introduced in <kernel/fork.c>
+         */
+        extern struct mm_struct *mm_alloc(void);
+
+         
+        /**
+         * mmput - gets rid of the mappings and all user-space,it decreases
+         *         the use count and release all resources for an mm
+         * @mm:    memory descriptor
+         * # this function will decrease @mm_users,if @mm_users become _zero_,
+         *   it releases the Local Descriptor Table,thus the memory region descriptors
+         *   and the Page Tables referenced by the memory descriptor,and then call to
+         *   mmdrop()
+         * # the implementation is introduced in <kernel/fork.c>
+         */
+        extern void mmput(struct mm_struct *mm);
+
+        /**
+         * mmdrop - drop an memory descriptor
+         * @mm:     memory descriptor
+         * # this function actually call to __mmdrop(@mm) if @mm_count becomes _zero_,
+         *   in the case,@mm will be deallocated
+         * # the implementation of function __mmdrop() is introduced in <kernel/fork.c>
+         */
+        static inline void mmdrop(struct mm_struct *mm);
+        
         
       
