@@ -1472,7 +1472,7 @@ Chapter 2 : Memory Addressing
 
       start_32() copies the address of swapper_pg_dir to cr3,and enables paging unit(PG flag of the cr0).
       /*  A part of code  */
-        movl     $swapper_pg_dir-0xc0000000,%eax
+        movl     $swapper_pg_dir-0xc0000000,%eax    # 0xc0000000 => PAGE_OFFSET,3 GiB linear address
         movl     $eax,%cr3            #  set he page table pointer
         movl     %cr0,%eax            #  get value of cr0
         orl      $0x80000000,%eax     #  open PG
@@ -1781,6 +1781,9 @@ Chapter 3 : Processes
          *    struct fs_struct *fs;
          *    struct files_struct *files;
          *    struct signal_struct *signal;
+         *
+         *    # @mm: memory descriptor owned by the process
+         *      @active_mm: memory descriptor used by the process when it is in execution
          */
         !!  the routine task_lock() lock up task_struct.@alloc_lock,task_unlock() does the reverse.
                                                         /* concurrent protection of mm */
@@ -15918,6 +15921,46 @@ Chapter 9 : Process Address Space
          * # the implementation of function __mmdrop() is introduced in <kernel/fork.c>
          */
         static inline void mmdrop(struct mm_struct *mm);
-        
-        
-      
+
+    Memory Descriptor of Kernel Threads :
+      kernel threads run only in Kernel Mode,so they are never access linear addresses below
+      TASK_SIZE(defined in <arch/x86/include/asm/processor.h>, expanded to PAGE_OFFSET),
+      and kernel threads do not use memory regions,thus,most of the fields of a memory
+      descriptor are meaningless for them.
+
+      Page Table entries for linear addresses above TASK_SIZE should always be identical,
+      and kernel thread never access to linear addresses above TASK_SIZE,thus what set of
+      Page Table entries the kernel thread uses is not matter.
+      ! but for performance(TLB useless and cache flushes),kernel thread uses the set of
+        Page Tables of the last previously running regular process.
+        /**
+         * So,structure task_struct contains two members of type poiner to memory descriptor
+         * are named @mm and @active_mm,respectively.
+         * For regular process,@mm and @active_mm are point to the same memory descriptor;
+         * but for kernel thread,@mm is NULL,and when the kernel thread is going to runs,
+         * @active_mm will be initialized with the value of @active_mm of the previously
+         * running process.
+         */
+
+      ! if a process in Kernel Mode has modified the Page Table entry for "high" linear
+        address(above TASK_SIZE),then it have to update the corresponding entry in the 
+        sets of Page Tables of all processes in the system.
+        /* once set,the entry should be effective for all other processes in Kernel Mode */
+
+        BUT,updating for all processes in the system is costly operation,therefore,linux
+        adopts a deferred approach.
+        /**
+         * the approach has been described in "Noncontiguous Memory Area".
+         * PAGE_OFFSET => 0xc0000000 (3 GiB linear address)
+         * make up linear address mapping above 3 GiB :
+         *   vmalloc {
+         *           allocate linear addresses
+         *           allocate page frames
+         *           get master Kernel Page Global Directory
+         *           create new PUD PMD PTE entries
+         *           TLB cache flush and reload
+         *   }
+         *   # kernel updates a canonical set of Page Tables rooted at the
+         *     @swapper_pg_dir,master Kernel Page Global Directory.
+         *   # master Kernel Page Global Directory is pointed by @init_mm.@pgd.
+         */        
