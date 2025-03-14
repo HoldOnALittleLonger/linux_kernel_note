@@ -15964,3 +15964,161 @@ Chapter 9 : Process Address Space
          *     @swapper_pg_dir,master Kernel Page Global Directory.
          *   # master Kernel Page Global Directory is pointed by @init_mm.@pgd.
          */        
+
+    Memory Regions :
+      Process Address Space =>
+        +----> Memory Descriptor @mm OR @active_mm 
+        |
+        +-----------------------+
+        |     |     |     |     |
+        | MR1 | MR2 | ... | MRn |
+        |     |     |     |     |
+        +-----------------------+
+          |
+          |
+          +----> Memory Region
+      
+      Linux implemented a special structure named vm_area_struct to represents the memory region
+      in process's address space.
+        <linux/mm_types.h>
+          /**
+           * vm_area_struct - structure used to represent memory region,
+           *                  it identifies a linear address interval
+           * @vm_mm:          the address space this structure belong to
+           * @vm_start:       start linear address within @vm_mm,count from _zero_
+           * @vm_end:         end linear address within @vm_mm,real end is @vm_end - 1
+           * @vm_next:        linked list of virtual memory areas per task,sorted by address
+           * @vm_page_prot:   access permissions of this VMA
+           * @vm_flags:       virtual memory area flags
+           * @vm_rb:          data for the red-black tree
+           * @shared:         links to the data structures used for reverse mapping
+           *                  for areas with an address space and backing store : (OR)
+           *                    linkage into the address_space->i_mmap prio tree
+           *                    linkage to the list of like vmas hanging off its node
+           *                    linkage of vma in the address_space->i_mmap_nonlinear
+           * @vm_set:         set of vma which are shared with other
+           * @list:           doubly linked list for the vmas
+           * @parent:         aligns with @prio_tree_node parent
+           * @head:           head of the linked vmas
+           * @prio_tree_node: raw priority tree node
+           * @anon_vma_chain: chain of anonymous vmas
+           *                  # serialized by @mmap_sem AND @page_table_lock
+           * @anon_vma:       pointer to the struct anon_vma data structure
+           *                  # serialized by @page_table_lock
+           * @vm_ops:         methods of the memory region
+           * @vm_pgoff:       offset in PAGE_SIZE units
+           * @vm_file:        the file this memory region map to(can be NULL)
+           * @vm_private_data: VMA private data,it was vm_pte(shared mm)
+           * @vm_truncate_count: used when releasing a linear address interval in a 
+           *                     non-linear file memory mapping
+           *                     # truncate_count or restart_addr
+           * @vm_region:      NOMMU mapping region
+           *                  # CONFIG_MMU did not selected
+           * @vm_policy:      NUMA policy for the VMA
+           *                  # require CONFIG_NUMA
+           */
+          struct vm_area_struct {
+                  struct mm_struct *vm_mm;
+                  unsigned long vm_start;
+                  unsigned long vm_end;
+                  struct vm_area_struct *vm_next;
+                  pgprot_t vm_page_prot;
+                  unsigned rb_node vm_rb;
+
+                  union {
+                          struct {
+                                  struct list_head list;
+                                  void *parent;
+                                  struct vm_area_struct *head;
+                          } vm_set;
+                          
+                          struct raw_prio_tree_node prio_tree_node;
+                  } shared;                    
+                  
+                  struct list_head anon_vma_chain;
+                  struct anon_vma *anon_vma;
+
+                  const struct vm_operations_struct *vm_ops;
+                  unsigned long vm_pgoff;
+                  struct file *vm_file;
+                  void *vm_private_data;
+                  unsigned long vm_truncate_count;
+
+          #ifndef CONFIG_MMU
+                  struct vm_region *vm_region;
+          #endif
+          #ifdef CONFIG_NUMA
+                  struct mempolicy *vm_policy;
+          #endif
+          };
+
+      ! Memory regions owned by a process never overlap.
+        kernel attempt to merge memory regions when a new one is allocated right next to an existed
+        one.(but the access rights of memory regions must be the same!)
+        # MR1 => existed, MRnew => new allocated, MRnew.vm_start == MR1.vm_end => MRa := MR1 + MRnew
+          /* MR1.vm_page_prot == MRnew.vm_page_prot */
+
+      When a new memory region is allocated to the process address space :
+        a> kernel check if there is one memory region which the new one can be merged into it,
+           then enlarge the old one
+        b> no such memory region is existed which can be combined with the new one,then create the
+           new memory region
+
+      When a range of linear addresses is removed from the process address space :
+        a> if a memory region which identified linear address interval is just right equal to the
+           range of linear addresses,then remove the memory region
+        b> if the memory region is longer than the range of linear addresses,then resize the memory
+           region,and if necessary,split it to two memory regions
+                                   /**
+                                    * the range of linear addresses is included by the memory region,
+                                    * and right at the middle position
+                                    */
+           ! REMOVES A LINEAR ADDRESS INTERVAL MAY THEORETICALLY FAIL BECAUSE NO FREE MEMORY IS 
+             AVAILABLE FOR A NEW MEMORY DESCRIPTOR /* THE NEW ONE IS SPLITED FROM THE OLD */
+
+      member @vma_ops is type of const struct vm_operations_struct pointer,and structure vm_operations_struct
+      collected some methods to be used by kernel control path to manipulate the memory region.
+        <linux/mm.h>
+          /**
+           * vm_operations_struct - collection of the virtual MM functions
+           * @open:                 routine to open an area
+           *                        # invoked when the memory region is added to the set of regions
+           *                          owned by a process
+           * @close:                routine to close an area and unmap it
+           *                        # invoked when the memory region is removed from the set of
+           *                          regions owned by a process
+           *                        # needed to keep files on disk up-to-date etc
+           * @fault:                routine for no-page or wp-page exections
+           *                        # invoked by Page Fault exception handler
+           * @page_mkwrite:         routine for notification that a previously read-only page
+           *                        is about to become writable,if an error is returned,it will cause
+           *                        a SIGBUS
+           * @access:               routine called by access_process_vm() when get_user_pages() fails,
+           *                        typically for use by special VMAs that can switch between memory
+           *                        and hardware
+           * @set_policy:           set up NUMA policy for the memory region,it must add a reference to
+           *                        any non-NULL @new mempolicy to hold the policy upon return
+           *                        # caller can provides NULL @new to remove a policy and fall back to
+           *                          surrounding context(neither MPOL_DEFAULT,nor the task or system default)
+           * @get_policy:           get the NUMA policy of this memory region,it must add reference [mpol_get()]
+           *                        to any policy at (@vma, @addr) marked as MPOL_SHARED,if no MPOL_SHARED marked,
+           *                        then must not add a reference
+           *                        # if no [shared/vma] mempolicy exists at the @addr,this routine must
+           *                          return NULL(no fallback)
+           * @migrate:              routine for migrate this VMA from the NUMA nodes specified by @from to
+           *                        the NUMA nodes specified by @to with new flags @flags
+           */
+          struct vm_operations_struct {
+                  void (*open)(struct vm_area_struct *area);
+                  void (*close)(struct vm_area_struct *area);
+                  void (*fault)(struct vm_area_struct *vma, struct vm_fault *vmf);
+                  int (*page_mkwrite)(struct vm_area_struct *vma, struct vm_fault *vmf);
+                  int (*access)(struct vm_area_struct *vma, unsigned long addr, void *buf, int len, int write);
+
+          #ifdef CONFIG_NUMA
+                  int (*set_policy)(struct vm_area_struct *vma, struct mempolicy *new);
+                  struct mempolicy *(*get_policy)(struct vm_area_struct *vma, unsigned long addr);
+                  int (*migrate)(struct vm_area_struct *vma, const nodemask_t *from,
+                                 const nodemask_t *to, unsigned long flags);
+          #endif
+          };
