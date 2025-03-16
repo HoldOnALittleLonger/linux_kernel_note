@@ -15776,6 +15776,7 @@ Chapter 9 : Process Address Space
          *             all users counted by @mm_users are treated as one unit in @mm_count
          *             kernel deallocate this mm_struct when detected this member becomes _ZERO_
          * @map_count: number of VMAs
+         *             # default value is 65536,but system administrator can modify this limit
          * @mmap_sem:  memory region read/write semaphore
          * @page_table_lock: protects page tables and some counters
          * @mmlist:    list of maybe swapped mm's,these are globally strung together off @init_mm.mmlist,
@@ -15969,14 +15970,14 @@ Chapter 9 : Process Address Space
       Process Address Space =>
         +----> Memory Descriptor @mm OR @active_mm 
         |
-        +-----------------------+
-        |     |     |     |     |
-        | MR1 | MR2 | ... | MRn |
-        |     |     |     |     |
-        +-----------------------+
-          |
-          |
-          +----> Memory Region
+        +-------------------------------------------------------------+
+        |     |     |     |                         |     |     |     |
+        | MR1 | MR2 | ... | unused linear addresses | MRk | ... | MRn |
+        |     |     |     |                         |     |     |     |
+        +-------------------------------------------------------------+
+          |            |
+          |            +----> Last accessed MR => struct mm_struct.@mmap_cache
+          +----> Memory Region => struct mm_struct.@mmap
       
       Linux implemented a special structure named vm_area_struct to represents the memory region
       in process's address space.
@@ -16122,3 +16123,36 @@ Chapter 9 : Process Address Space
                                  const nodemask_t *to, unsigned long flags);
           #endif
           };
+
+      Memory Region Data Structures :
+        memory regions of a process are sorted in ascending order by the memory addresses,
+        successive regions can be separated by an area of unused memory addresses.
+
+        struct mm_struct.@mmap is the pointer to the first memory region in the address space.
+        
+        ! kernel access to @mmap for find out a specified memory region which contains a request
+          linear address only if @map_count is small,less than a few tens of elements in the list.
+          if @map_count is too great,then search on list is inefficient.
+
+        struct mm_struct.@mm_rb is the root of red-black tree in which each node is corresponding to a
+        memory region in the address space.
+        struct vm_area_struct.@vm_rb is the red-black tree node object,there also used embedded data
+        structure,because the offset of struct member is fixed during compile-time.macro container_of()
+        can be used to retrieve the memory region which contains a specified red-black tree node.
+        /**
+         * red-black is auto-balancing binary search tree.
+         * red-black tree rules :
+         *   1> every node must be either red or black
+         *   2> the root of the tree must be black
+         *   3> the children of a red node must be black -> no succssive red nodes
+         *   4> every path from a node to a descendant leaf must contain the same number of black nodes
+         *   !  null node is counted as black node
+         *
+         * each new node to be inserted must as a leaf and color red.
+         *
+         * a red-black tree has N nodes must has a height of at most 2 * log(N + 1)
+         * operations on balanced binary search tree => O(logN) N is nodes in the tree
+         */
+
+        ! struct mm_struct.@mm_rb often used to find out a specified linear address from all memory regions
+          struct mm_struct.@mmap often used to scanning all memory regions in the address space
