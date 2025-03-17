@@ -16268,3 +16268,6 @@ Chapter 9 : Process Address Space
              * NOT(Read AND Write AND Execute AND Share).
              * Present disabled AND Page size enabled -> The Page Frame is real non-present
              */
+        ! THE 16 POSSIBLE COMBINATIONS FOR ACCESS RIGHTS ARE STORED IN ARRAY NAMED @protection_map
+          WHICH IS TYPE OF pgprot_t AND extern DECLARED IN HEADER <linux/mm.h>.
+          /* EACH ELEMENT IS A COMBINATION FOR PROTECTION BITS OF THE PAGE TABLE ENTRY */
