@@ -762,7 +762,7 @@ Chapter 2 : Memory Addressing
         page unit never reset it,OS have to do this.
 
       Read/Write flag :
-        contains the access right of the page or of the Page Table.
+        contains the access right of the page or of the Page Table. /* Read/Write OR Read Only */
         
       User/Supervisor flag :
         contains the privilege level required to access the page or Page Table.
@@ -16124,6 +16124,9 @@ Chapter 9 : Process Address Space
           #endif
           };
 
+          ! header <linux/mm.h> extern declared a special slab cache object *@vm_area_cachep,which is
+            used by allocating memory region descriptor.
+
       Memory Region Data Structures :
         memory regions of a process are sorted in ascending order by the memory addresses,
         successive regions can be separated by an area of unused memory addresses.
@@ -16156,3 +16159,112 @@ Chapter 9 : Process Address Space
 
         ! struct mm_struct.@mm_rb often used to find out a specified linear address from all memory regions
           struct mm_struct.@mmap often used to scanning all memory regions in the address space
+
+      Memory Region Access Rights :
+        there are three kinds flags for pages :
+          1> hardware flags stored in Page Table Entry
+          2> flags stored in page descriptor used by linux kernel
+          3> flags stored in @vm_flags of struct vm_area_struct
+
+        the third flags associated with the pages of a memory region.
+        <linux/mm.h>
+          /* currently active flags */
+          #define VM_READ 0x00000001
+          #define VM_WRITE 0x00000002
+          #define VM_EXEC 0x00000004
+          #define VM_SHARED 0x00000008
+
+          /* mprotect() hardcodes VM_MAYREAD >> 4 == VM_READ,and so on */
+          #define VM_MAYREAD 0x00000010
+          #define VM_MAYWRITE 0x00000020
+          #define VM_MAYEXEC 0x00000040
+          #define VM_MAYSHARE 0x00000080
+
+          
+          #define VM_GROWSDOWN 0x00000100 /* general info on the segment */
+          #define VM_GROWSUP 0x00000200
+          #define VM_PFNMAP 0x00000400 /* Page-ranges managed without "struct page",just pure PFN */
+          #define VM_DENYWRITE 0x00000800 /* ETXTBSY on write attempts.. */
+
+          #define VM_EXECUTABLE 0x00001000
+          #define VM_LOCKED 0x00002000
+          #define VM_IO 0x00004000 /* Memory mapped I/O or similar */
+
+          /* used by sys_madvise() */                        
+          #define VM_SEQ_READ 0x00008000 /* Application will access data sequentially */
+          #define VM_RAND_READ 0x00010000 /* Application will not benefit from clustered reads */
+
+          #define VM_DONTCOPY 0x00020000 /* no copy on fork */
+          #define VM_DONTEXPAND 0x00040000 /* cannot expand with mremap() */
+          #define VM_RESERVED 0x00080000 /* count as reserved_vm like IO */
+          #define VM_ACCOUNT 0x00100000 /* is a VM accounted object */
+          #define VM_NORESERVE 0x00200000 /* should the VM suppress accounting */
+          #define VM_HUGETLB 0x00400000 /* huge TLB page VM */
+          #define VM_NONLINEAR 0x00800000 /* is non-linear (remap_file_pages) */
+          #define VM_MAPPED_COPY 0x01000000 /* T if mapped copy of data(nommu mmap) */
+          #define VM_INSERTPAGE 0x02000000 /* the VMA has had "vm_insert_page()" done on it */
+          #define VM_ALWAYSDUMP 0x04000000 /* always include in core dumps */
+
+          #define VM_CAN_NONLINEAR 0x08000000 /* has ->fault & does nonlinear pages */
+          #define VM_MIXEDMAP 0x10000000 /* can contain "struct page" and pure PFN pages */
+          #define VM_SAO 0x20000000 /* Strong Access Ordering(powerpc) */
+          #define VM_PFN_AT_MAP 0x40000000 /* PFNMAP VMA that is fully mapped at mmap time */
+          #define VM_MERGEABLE 0x80000000 /* KSM may merge identical pages */
+
+          #ifndef VM_STACK_DEFAULT_FLAGS
+          #define VM_STACK_DEFAULT_FLAGS VM_DATA_DEFAULT_FLAGS /* stack default flags,arch can override this */
+          #endif
+
+          /* stack flags */
+          #ifdef CONFIG_STACK_GROWSUP
+          #define VM_STACK_FLAGS (VM_GROWSUP | VM_STACK_DEFAULT_FLAGS | VM_ACCOUNT)
+          #else
+          #define VM_STACK_FLAGS (VM_GROWSDOWN | VM_STACK_DEFAULT_FLAGS | VM_ACCOUNT)
+          #endif
+
+        Page Frame access rights for a memory region can be combined arbitrarily.
+        Access rights can be implemented efficiently by duplicate page access rights for a memory region
+        to the Page Table Entries,then the checking will only be processed by Paging Unit circuitry.
+        @vm_page_prot is the Page Table Entry flags(protection bits) used to initialize the rights of
+        page frames which are assigned to this memory region.
+
+        ! the translating from access rights for pages of memory region is not straightforward to
+          Page Table Entry protection bits.
+          the reasons :
+            1> in some cases,a page access should generate a Page Fault exception even when its access
+               type is granted by the page access rights specified in the @vm_flags member of the
+               corresponding memory region.
+               /* Copy-On-Write mechanism */
+            2> 80x86 Page Table have just Read/Write bit and User/Supervisor bit,and the User/Supervisor
+               for a page frame in a memory region must be always setup because have to let the page frame
+               can be accessed from User Mode.
+            3> PAE(NX,No eXecute flag).
+               /**
+                * if CONFIG_PAE and CPU has NX flag 
+                * then
+                *         rule1 :
+                *                 the Execute access right always implies the Read access right
+                *         rule2 :
+                *                 the Write access right always implies the Read access right
+                * else if no CONFIG_PAE
+                *         rule1 :
+                *                 the Read access right always implies the Execute access right
+                *                 and vice versa
+                *         rule2 :
+                *                 the Write access right always implies the Read access right
+                */
+
+            !! THE PAGE FRAME IS WRITE-PROTECTED WHENEVER THE CORRESPONDING PAGE MUST NOT BE SHARED BY
+               SEVERAL PROCESSES.
+               /* if no VM_SHARED */
+
+        rules for the 16 possible combinations of Read,Write,Execute,Share access rights :
+          > Write AND Share -> Read/Write bit is set in Page Table Entry
+          > Read AND Execute AND NOT(Write OR Share) -> Read/Write is cleared in Page Table Entry
+          > Nx AND NOT(Execute) -> CPU NX flag is set
+          > NOT(Read AND Write AND Execute AND Share) -> Present is cleared in Page Table Entry
+            /**
+             * Linux use Page size bit to distinguish that the page frame is real non-present from
+             * NOT(Read AND Write AND Execute AND Share).
+             * Present disabled AND Page size enabled -> The Page Frame is real non-present
+             */
