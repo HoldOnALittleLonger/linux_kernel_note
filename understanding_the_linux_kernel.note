@@ -16262,7 +16262,7 @@ Chapter 9 : Process Address Space
           > Write AND Share -> Read/Write bit is set in Page Table Entry
           > Read AND Execute AND NOT(Write OR Share) -> Read/Write is cleared in Page Table Entry
           > Nx AND NOT(Execute) -> CPU NX flag is set
-          > NOT(Read AND Write AND Execute AND Share) -> Present is cleared in Page Table Entry
+          > NOT(Read OR Write OR Execute OR Share) -> Present is cleared in Page Table Entry
             /**
              * Linux use Page size bit to distinguish that the page frame is real non-present from
              * NOT(Read AND Write AND Execute AND Share).
@@ -16271,3 +16271,95 @@ Chapter 9 : Process Address Space
         ! THE 16 POSSIBLE COMBINATIONS FOR ACCESS RIGHTS ARE STORED IN ARRAY NAMED @protection_map
           WHICH IS TYPE OF pgprot_t AND extern DECLARED IN HEADER <linux/mm.h>.
           /* EACH ELEMENT IS A COMBINATION FOR PROTECTION BITS OF THE PAGE TABLE ENTRY */
+
+      Memory Region Handling :
+        the primary procedures used to enlarge and shrink address space of a process are
+        do_mmap() and do_munmap(),respectively.
+        before the main procedures,there are some auxiliary methods used to simplify these two
+        functions' works.
+
+        Finding the closest region to a given address - find_vma() :
+          for find out the most closest memory region to a given address,function find_vma()
+          is introduced and take charge of this work.
+
+          <mm/mmap.c> /* CONFIG_MMU;if no CONFIG_MMU,then which is defined in <mm/nommu.c> */
+            /**
+             * find_vma - look up the first VMA which satisfies a specifial condition that is
+             *            the linear address is less than the end of memory region's end
+             * @mm:       memory descriptor,and it is where we look for
+             * @addr:     the linear address
+             * return:    NULL => unfound OR NULL @mm
+             *            pointer to VMA descriptor
+             */
+            struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr);
+
+            brief description for find_vma() :
+              it checks memory region cache of the memory descriptor @mm at first.
+              if the cache is the appropriate VMA,then it must satisfied the condition :
+                      cache AND cache->@vm_end > @addr AND cache->@vm_start <= @addr
+              if no cache hitting,then scanning the memory regions of in the memory try to
+              find out the proper one.
+              as described previously,for optimize to scanning procedure,red-black tree
+              must be considered.
+              because the key of left node is less than current and less than right node,
+              thus we can quickly find out it in O(logN) times.
+              /* through binary search tree FIND() procedure */
+              if we finally find the memory region,then modify cache to this one,and return it;
+              otherwise,return NULL.
+
+              ! have to pay attention about that @addr may not be included in the memory region
+                selected by this function.
+                because,find_vma() returns the most closest memory region to @addr,if it is
+                lie outside of any memory region,then it is one memory region is 
+                selected probably yet.
+                /**
+                 * @vm_end > @addr BUT @vm_start also > @addr then should goto left branch.
+                 * before goto left branch,current VMA identifier have been updated to "this" VMA.
+                 * thus if @left is NULL,the last accessed VMA will as the result.
+                 */
+
+            /**
+             * find_vma_prev - similar to find_vma(),but writes the pointer of previous memory
+             *                 region of the memory region by this function to an additional
+             *                 parameter
+             * @mm:            memory descriptor
+             * @addr:          linear address
+             * @pprev:         where address of the prevous memory region to be stored
+             * return:         NULL => unfound OR NULL @mm
+             *                 pointer to the memory region
+             * # note that,the previous memory region is not the parent node,its @vm_end
+             *   must greater than or equal to @addr
+             * # if result is the first memory region in the memory,then *@pprev should be
+             *   set with value NULL
+             */
+            struct vm_area_struct *find_vma_prev(struct mm_struct *mm, unsigned long addr,
+                                                 struct vm_area_struct **pprev);
+
+            /**
+             * find_vma_prepare - routine used to find the appropriate position which will be
+             *                    used to insert a new leaf contains a specified linear address as
+             *                    its key value to red-black tree,this routine will returns some
+             *                    necessary informations in function parameters
+             * @mm:               memory descriptor
+             * @addr:             linear address
+             * @pprev:            pointer to the poiner of previous memory region
+             *                    previous memory region's @vm_end is always less than or equal to
+             *                    this memory region's @vm_start
+             * @rb_link:          pointer to pointer to pointer to the red-black node which is
+             *                    selected at last proceduring
+             *                    **@rb_link := pointer to pointer to the last accessed one
+             * @rb_parent:        pointer to pointer to the parent node of @rb_link
+             *                    *@rb_parent := pointer to parent of ***@rb_link
+             * return:            NULL => no such node is existed,thus it is able to insert @addr
+             *                    pointer to the memory region => the most closest VMA to @addr
+             * # this function will ends up with several situations :
+             *     1> VMA && *@rb_link != @rb_parent => @addr is not existed,can be inserted
+             *     2> VMA && *@rb_link == @rb_parent => @addr is existed
+             *     3> !VMA && *@rb_link == NULL && @rb_parent == NULL => @addr is not existed,can be inserted
+             */
+            static struct vm_area_struct *find_vma_prepare(struct mm_struct *mm, unsigned long addr,
+                                                           struct vm_area_struct **pprev,
+                                                           struct rb_node ***rb_link, struct rb_node **rb_parent);
+
+            !! WHY IS POINTER TO POINTER BECAUSE MEMBERS @rb_left and @rb_right OF struct rb_node OBJECT BOTH
+               ARE TYPE OF struct rb_node * .
