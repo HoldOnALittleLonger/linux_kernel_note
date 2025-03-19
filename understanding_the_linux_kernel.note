@@ -16363,3 +16363,50 @@ Chapter 9 : Process Address Space
 
             !! WHY IS POINTER TO POINTER BECAUSE MEMBERS @rb_left and @rb_right OF struct rb_node OBJECT BOTH
                ARE TYPE OF struct rb_node * .
+
+        Finding a memory region that overlaps a given interval - find_vma_intersection() :
+          as the meaning of its name,we can find out the first memory region which overlaps
+          a given linear address interval.
+          /* interval means a range of linear addresses */
+
+          <linux/mm.h>
+            /**
+             * find_vma_intersection - look up the first VMA which intersects the given interval
+             * @mm:                    memory descriptor
+             * @start_addr:            start address of the interval
+             * @end_addr:              end address of the interval
+             * return:                 pointer to the VMA
+             *                         NULL => unfound OR @mm NULL
+             * # this function actual call to find_vma(@mm, @start_addr),if the returned VMA
+             *   does not overlap [@start_addr, @end_addr],then this function returns NULL
+             */
+            static inline struct vma_area_struct *find_vma_intersection(struct mm_struct *mm,
+                                                                        unsigned long start_addr,
+                                                                        unsigned long end_addr);
+
+            about overlap :
+
+              VMA && @end_addr <= VMA->@start_addr
+                      return NULL
+
+                                          +----> @vm_start
+                                          |
+                                          +----------------+
+                                          |                |
+                                          |       VMA      | => overlap
+                                          |                |
+                                          +----------------+
+              +-------------------------------------------+
+              |     |                               |     |
+              | ... |             | -------- |      | ... | => process address space <- @mm
+              |     |             |          |      |     |
+              +-------------------|----------|------------+
+                                  |          |
+                 @start_addr <----+          +----> @end_start
+                                                 +----------------+
+                                                 |                |
+                                                 |       VMA      | => non overlap
+                                                 |                |
+                                                 +----------------+
+                                                 |
+                                                 +----> @vm_start
