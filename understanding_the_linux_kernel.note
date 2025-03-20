@@ -15766,9 +15766,17 @@ Chapter 9 : Process Address Space
          *             anonymous memory region or file memory mapping
          * @task_size: size of task vm(virtual memory) space
          * @cached_hole_size: if non-zero,the largest hole below @free_area_cache
+         *                    # when seaching encoutered a hole,this member would be updated
          * @free_area_cache:  first hole of size @cached_hole_size or larger,address from there
          *                    the kernel will look for a free interval of linear addresses in the
          *                    process address space
+         *                    # this member always be updated on the last successed memory area
+         *                      searching
+         *                    # this member usually is initialized to one-third of User Mode
+         *                      linear address space,that is 1 GiB (total is 3 GiB)
+         *                    # linear address start from @free_area_cache may be a memory hole,
+         *                      but it just possibility,if @cached_hole_size is not zero,then
+         *                      there must be a memory hole which is below @free_area_cache
          * @pgd:       process Page Global Directory
          * @mm_users:  how many users with user space,secondary usage counter
          *             the number of lightweight processes that share the mm_struct data structure
@@ -16410,3 +16418,194 @@ Chapter 9 : Process Address Space
                                                  +----------------+
                                                  |
                                                  +----> @vm_start
+
+        Finding a free interval - get_unmapped_area() :
+          function get_unmapped_area() is used to find out an available linear address interval
+          in a given process address space.
+
+          <mm/mmap.c>
+            /**
+             * get_unmapped_area - a wrapper for low-level routine get_unmapped_area()
+             * @file:              file descriptor
+             * @addr:              expected address
+             * @len:               length of the interval
+             * @pgoff:             file offset corresponding to a page belonging to a 
+             *                     non-linear file memory mapping
+             *                     exact file offset = @pgoff * PAGE_SIZE
+             * @flags:             flags for the area
+             * return:             linear address for the unmapped area
+             *                     -ENOMEM   => no memory
+             *                     -EINVAL   => invalid linear address interval
+             *                     ERROR PTR => error ptr,can be checked by IS_ERR_VALUE()
+             */
+            unsigned long get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
+                                            unsigned long pgoff, unsigned long flags);
+
+            brief description for get_unmmaped_area() :
+              as the description,it just a wrapper for low-level get_unmapped_area() routine.
+              this function does arch_mmap_check() at first to @addr,@len,@flags.if any error
+              is encountered,it immediately returns the error code.
+              if @len is greater than TASK_SIZE,that means the request linear address interval can
+              not be contained in a process address space,this is worst case,so have to return -ENOMEM.
+              there are two methods may be invoked by this wrapper :
+                1> @file->f_op->get_unmmaped_area
+                   /* if all components of the calling chain are TRUE */
+                2> @current->mm->get_unmapped_area
+                   /* this is the default behavior */
+              @file->f_op->get_unmapped_area is called only for file memory mapping.
+              if the wrapped routine returned ERROR VALUE,then propagate it to the caller.
+              it returns -ENOMEM if the returned linear address is greater than TASK_SIZE - @len.
+              it returns -EINVAL if the returned linear address is invalid.
+              finally,wrapper invokes arch_rebalance_pgtables(@addr, @len),this function is architecture
+              depended function used to rebalance elements in Page Global Directory,and there is Kernel Mode,
+              thus it rebalance master Kernel Page Global Directory.
+              wrapper returns what arch_rebalance_pgtables() returned,but if no such function is defined,
+              then a macro named arch_rebalance_pgtables() is introduced in the same file and returns
+              @addr.
+
+              ! it is not all file-systems are provided get_unmapped_area() implementation.
+              ! the wrapper may call to arch_get_unmapped_area_topdown(),this is depend on memory region layout.
+
+          <arch/x86/kernel/sys_x86_64.c>
+            /* arch_get_unmapped_area - architecture depened routine for x86 */
+            unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len,
+                                                 unsigned long pgoff, unsigned long flags);
+
+            what arch_get_unmapped_area() does :
+              1> retrieve memory descriptor of current process.
+                 declares some local variables.
+              2> if MAP_FIXED was enabled in @flags,then returns @addr,because mapping is fixed,no adjustment
+                 can take place.
+              3> call to static function find_start_end(@flags, @begin, @end),which try to find out a range
+                 where the required linear address interval will be picked up between the range.
+                 if !TIF_IA32 AND MAP_32BIT was enabled in @flags
+                 then
+                         start at 0x40000000,end at 0x80000000
+                         if defined PF_RANDOMIZE
+                         then
+                                 new start at randomize_range(start, start + 0x02000000, 0)
+                                 if no new start is available,use the old start
+                 else
+                         start at TASK_UNMAPPED_BASE,end at TASK_SIZE
+              4> if @len > @end then return -ENOMEM,because the required interval is too long.
+              5> if @addr is not _zero_,then try to align it in a multiple of  PAGE SIZE at first,
+                 then call to find_vma() to find out a closest VMA from the process address space.
+                 if aligned @addr is less than or equal to @end - @len AND
+                    VMA is NULL OR @addr + @len is less than or equal to VMA->@vm_start
+                 then
+                         returns @addr,it had satisfied the request
+                         /**
+                          * @addr <= @end - @len => the required length is satisfied
+                          * @addr + @len <= VMA->@vm_start => no overlapping
+                          */
+              6> more adjustment is necessary.
+                 if MAP_32BIT was enabled OR TIF_IA32 was enabled
+                    AND @len is less than or equal to @mm->cached_hole_size
+                 then
+                         reset @cached_hole_size to _zero_
+                         reset @free_area_cache to local variable @begin
+                         /**
+                          * struct mm_struct.@cached_hole_size != 0
+                          * the first memory hole start at @free_area_cache which in size
+                          * @cached_hole_size.
+                          * @len <= @cached_hole_size,so we can use the hole for the
+                          * required linear address interval.
+                          * if we will start searching from @begin,then @cached_hole_size
+                          * is useless,thus reset it to _zero_.
+                          * # because we do not know the size of a hole between @begin to
+                          *   the next allocated VMA.
+                          */
+              7> set @addr to @free_area_cache,and if it is greater than @begin,then
+                 reset it to @begin. /* limit range */
+              8> set local variable @start_addr to @addr
+                 enter a for-cycle to search whole chain of memory regions start from
+                 find_vma(@mm, @addr) /* start from @begin or @free_area_cache */
+                 /* these memory regions are chained by @next member of struct vm_area_struct */
+              full_search:
+              9> for-cycle {
+                   if @end - @len < @addr /* @addr is set to @free_area_cache before enter cycle */
+                           if @start_addr == @begin
+                           then
+                                   return -ENOMEM
+                                   /**
+                                    * the allowed range is [@begin, @end),the length of the
+                                    * interval is @end - @begin.
+                                    * but @addr is before @end - @len and the searching is
+                                    * start at @begin,that means the required length of 
+                                    * linear address interval is longer than @end - @begin,
+                                    * thus required size can not be satisfied.
+                                    */
+                           else
+                                   reset @start_addr and @addr to @begin
+                                   reset @cached_hole_size to _zero_
+                                   goto full_search to try again
+                                   /**
+                                    * @start_addr != @begin,search the range of memory area
+                                    * between @begin and @free_area_cache
+                                    * process second searching if previous start from
+                                    * @free_area_cache
+                                    */
+                   if VMA is NULL OR @addr + @len is less than or equal to VMA->@vm_start
+                   then
+                           we find out a proper linear address interval without overlapping
+                           update @free_area_cache and returns @addr
+                           /**
+                            * VMA NULL => no more memory region is existed,we can safely 
+                            * claim an linear address interval at the end.
+                            * <= VMA->@vm_start => we can safely to claim an linear address
+                            * interval before this VMA and withou overlapping
+                            */
+                           
+                   if @addr + @cached_hole_size is less than VMA->@vm_start
+                   then
+                           update @cached_hole_size to VMA->@vm_start - @addr
+                           /**
+                            * VMA is not NULL and a hole has encountered,thus
+                            * updates information(size) of the hole.
+                            * # we start from @free_area_cache or @begin
+                            */
+
+                   update @addr to VMA->@vm_end and enter next cycle stage
+                   /* should skip up this VMA,and restart searching at its end */
+                 }
+
+            !! IF WE CAN FIND OUT AN APPROPRIATE LINEAR ADDRESS INTERVAL QUICKLY,THEN NO
+               FULL SEARCHING CAN TAKE PLACE.
+               IF MAP_FIXED IS DEFINED,THEN SHOULD NOT START SEARCHING,BECOUSE NO ADJUSTMENT
+               CAN TAKE PLACE.
+
+            !! about @cached_hole_size and @free_area_cache
+
+               +----> @begin
+               +------------------------------------+
+               |     |      |     |     |     |     |
+               | ... | HOLE | ... | VMA |  |  | ... |
+               |     |      |     |     |  |  |     |
+               +------------------------------------+
+                       |                   |
+                       |                   +----> @free_area_cache
+                       +----> @cached_hole_size
+
+               if @len <= @cached_hole_size,a hole is available,so start searching from @begin
+               otherwise,start from @free_area_cache
+               /* both these two cases,@cached_hole_size is useless */
+
+               ! if @free_area_cache is less than @begin,then have to start searching from @begin,
+                 so even a hole(if it is existed) is greater than @len,we can not use it.
+
+               +----> @begin
+               +--------------------------------------------+
+               |     |      |     |     |       |     |     |
+               | ... | ...  | ... | VMA |  |HOLE| VMA | ... |
+               |     |      |     |     |  |    |     |     |
+               +--------------------------------------------+
+                                           | |
+                                           | +----> @cached_hole_size
+                                           +----> @free_area_cache
+
+               this appears only when searching start from @free_area_cache and the first VMA is not
+               NULL but @addr + @len >= VMA->@vm_start AND @addr + @cached_hole_size < VMA->@vm_start
+               ! when searching from @free_area_cache,it would not be updated in each cycle stage if 
+                 the first searching-cycle finally resulted in fail,but @cached_hole_size would be
+                 updated whenever a hole has encountered.
+
