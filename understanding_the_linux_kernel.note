@@ -16609,3 +16609,56 @@ Chapter 9 : Process Address Space
                  the first searching-cycle finally resulted in fail,but @cached_hole_size would be
                  updated whenever a hole has encountered.
 
+        Inserting a memory region into the memory descriptor - insert_vm_struct() :
+          routine insert_vm_struct() is used to insert a memory region into the memory regions
+          list and the red-black tree of a given memory descriptor.
+
+          <mm/mmap.c>
+            /**
+             * insert_vm_struct - insert a VMA to a given memory descriptor
+             * @mm:               memory descriptor
+             * @vma:              the VMA
+             * return:            0 => succeed
+             *                    -ENOMEM => 
+             *                      > no appropriate leaf is available to be inserted
+             *                      > VMA has specified VM_ACCOUNT && @current is deny to
+             *                        allocate new virtual memory area
+             * # this function call to find_vma_prepare() attempt to find out an appropriate position
+             *   in the red-black tree of @mm,if no such leaf is existed,then there must be a
+             *   suitable position in the red-black tree where @vma can be placed on
+             * # this function call to static function vma_link() to link @vma into @mm
+             */
+            int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma);
+
+            ! routine vma_link() has three parts,the first is link the VMA into the list
+              of memory regions;the second is insert the VMA into the red-black tree;
+              the third is link the file if it existed.
+              /**
+               * before link VMA,anonymous VMA lock must be acquired,and release it later after
+               * link have accomplished.
+               * # VMA->anon_vma->lock => this would be handled by vma_link()
+               */
+
+              chain VMA and insert VMA is very simple :
+                chain -> assign @next member
+                insert -> insert as a leaf and adjust the order of red-black tree
+              link the file : /* __vma_link_file() */
+                routine __vma_link_file() is used to deal with this.
+                if the @vm_file is not NULL,then retrieve the address space which corresponding
+                to the file,that is the member @f_mapping of struct file.
+                if @vm_flags enabled VM_DENYWRITE,then decrease
+                        @file.f_path.dentry->d_inode->@i_writecount /* write deny */
+                        /* @dentry member is a directory entry */
+                if @vm_flags enabled VM_SHARED,then increase
+                        @i_mmap_writable member of the address space of the file,that is
+                        @f_mapping
+                        /* because it is shared by other,thus allow writing */
+                if @vm_flags enabled VM_NONLINEAR,then insert
+                        @f_mapping->i_mmap_nonlinear into @vma
+                        /* the file is not mapping in linear */
+                flush dcache and return to caller.
+                      /* dentry cache */
+                
+                ! if @file is NULL,then this routine do nothing.
+                
+
