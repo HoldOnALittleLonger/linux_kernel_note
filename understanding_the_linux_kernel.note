@@ -1365,12 +1365,12 @@ Chapter 2 : Memory Addressing
         why kernel loaded starting with the second megabyte?
         :  the PC architecture has several peculiarities that must be taken into account.
            PF0 (BIOS data,system hardware configuration detected during POST(Power-On Self Test)).
-           0x000a0000 -- 0x000fffff are usually reserved to BIOS rountines and to map the internal memory of ISA graphics
+           0x000a0000 -- 0x000fffff are usually reserved to BIOS routines and to map the internal memory of ISA graphics
            cards.
            additional page frames within the first megabyte may be reserved by specific computer models.
 
     in the early stage of the boot sequence,the kernel queries the BIOS and learns the size of the physical memory,
-    later,kernel executes the machine_specific_memory_setup() rountine,which builds the physical address map.
+    later,kernel executes the machine_specific_memory_setup() routine,which builds the physical address map.
     (such functions is named default_machine_specific_memory_setup() in arch/x86/kernel/e820.c)
 
     /*  kernel builds this table on the basis of the BIOS list,if this is available,otherwise the kernel builds the table
@@ -6871,7 +6871,7 @@ Chapter 5 : Kernel Synchronization
             #define do_raw_read_trylock(rwlock)        arch_read_trylock(&(rwlock)->raw_lock)
 
           <linux/rwlock_api_smp.h>
-            /*  _raw_read_lock - internal rountine for get rwlock to reading.
+            /*  _raw_read_lock - internal routine for get rwlock to reading.
              *  @lock:           rwlock_t pointer,can not be NULL.
              *  #  this functions is defined in <kernel/spinlock.c>,if no
              *     CONFIG_INLINE_READ_LOCK defined.in the case,this function
@@ -14992,7 +14992,7 @@ Chapter 8 : Memory Management
              * which is metadata for allocated memory block.
              */
 
-            ! cache_alloc_refill() attempt refill slab local cache as the first method,if no
+            ! cache_alloc_refill() selects refill slab local cache as the first method,if no
               freed object is available in "this" slab cache,then it attempt to grow this slab
               cache through cache_grow().
               NULL would be returned if cache_grow() was failed,in the case,kmem_cache_alloc()
@@ -16660,5 +16660,154 @@ Chapter 9 : Process Address Space
                       /* dentry cache */
                 
                 ! if @file is NULL,then this routine do nothing.
-                
 
+      Allocating a Linear Address Interval :
+        function do_mmap() used to create and initialize a new memory region for current process.
+        if there is a memory region have existed and which could to be merged with this new one,
+        then merge them.
+        
+        <linux/mm.h>
+          /**
+           * do_mmap - create and initialize a new memory region,insert it into @current process
+           *           address space
+           * @file:    the file to be mapped
+           * @addr:    expected linear address
+           * @len:     length of the linear address interval
+           * @prot:    Page Table Entry protection flags
+           * @flag:    virtual memory region flags
+           * @offset:  offset of file
+           * return:   start linear address of the new memory region
+           *           -EINVAL => invalid @offset or invalid @len
+           *           other kinds of error codes are returned by do_mmap_pgoff()
+           * # this function actually call to do_mmap_pgoff() to process primary works,
+           *   and which routine is defined in <mm/mmap.c>
+           * # because do_mmap_pgoff() requires pgoff value,thus this function product
+           *   pgoff through "offset >> PAGE_SHIFT"
+           */
+          static inline unsigned long do_mmap(struct file *file, unsigned long addr,
+                                              unsigned long len, unsigned long prot,
+                                              unsigned long flag, unsigned long offset);
+
+          ! if (@offset + PAGE_ALIGN(len)) < @offset,then either @offset or @len is invalid.
+            PAGE_ALIGN() => defined in the same file,expands to ALIGN(@len, PAGE_SIZE)
+                                                                /* align @len to next page boundary */
+            @len <= PAGE_SIZE => @len := PAGE_SIZE
+            @len > PAGE_SIZE => @len := next page boundary
+
+            < @offset => overflow
+
+          ! this routine call to do_mmap_pgoff() only when @offset & ~0xfffff000 is false,that is,
+            if @offset is not a valid offset value,then should not call to do_mmap_pgoff().
+
+          ! if no file mapping,then @file is NULL and @offset is _zero_.
+
+          ! @flag values :
+                    MAP_GROWSDOWN                grows from top to down
+                    MAP_LOCKED                   mapping locked
+                    MAP_DENYWRITE                deny write permission
+                    MAP_EXECUTABLE               executable
+
+                    MAP_SHARED                   shared with other
+                    MAP_PRIVATE                  process only
+
+                    MAP_FIXED                    fix mapping
+                    
+                    MAP_ANONYMOUS                anonymous mapping,no file associating
+                    
+                    MAP_NORESERVE                no preliminary check on the number of free page frames
+
+                    MAP_POPULATE                 should pre-allocate the page frames required for the
+                                                 mapping established by the memory region
+                                                 /* significant only for file mapping */
+
+                    MAP_NONBLOCK                 when pre-allocating the page frames,this routine must not
+                                                 block
+
+        <mm/mmap.c>
+          /**
+           * do_mmap_pgoff - do memory mapping with pgoff
+           * @file:          file descriptor
+           * @addr:          expected linear address
+           * @len:           length
+           * @prot:          Page Table Entry protection flags
+           * @flags:         virtual memory region flags
+           * @pgoff:         pgoff value
+           * return:         start linear address of the memory region
+           *                 -EINVAL => invalid @len -> _zero_ OR overflow
+           *                            MAP_TYPE unknown
+           *                 -EOVERFLOW => @offset overflow
+           *                 -ENOMEM => reached maximum memory region mapping count
+           *                 -EPERM => disallowed MAP_LOCKED
+           *                 -EAGAIN => reached memory locked limit
+           *                            mandatory locks on the file
+           *                 -EACCESS => file permission deny
+           *                 -ENODEV => file operation undefined
+           *
+           *                 returns error code what security_file_mmap() returned
+           *                 returns error code what mmap_region() returned
+           * # this function does some adjustments to parameters and some checkings to
+           *   them,the real memory map is handled by routine mmap_region()
+           */
+          unsigned long do_mmap_pgoff(struct file *file, unsigned long addr, unsigned long len,
+                                      unsigned long prot, unsigned long flags, unsigned long pgoff);
+
+          brief description for do_mmap_pgoff() :
+            because this routine create a new memory region for current process,thus it have to
+            retrieve the memory descriptor at first.
+            checks page flags,if the application expect PROT_READ to imply PROT_EXEC,then enable
+            PROT_EXEC.
+            /**
+             * if this is file mapping and enabled MNY_NOEXEC in @file->f_path.mnt->mnt_flags,
+             * then should not enable PROT_EXEC.
+             */
+            refuse processing that @len == _zero_ or @len overflow after aligned to PAGE_SIZE.
+            call to round_hint_to_min(@addr) and update @addr,if MAP_FIXED is not required.
+            check @pgoff whether OVERFLOW,if it is,returns -EOVERFLOW.
+            for create a new memory region,it needs a free(unmapped) linear address interval,this
+            is handled by get_unmapped_area().
+            but might an invalid address is returned by get_unmapped_area(),in this case,propagate it
+            to caller.
+            calculate virtual memory region flags through @prot,@flags by the routines calc_vm_prot_bits(),
+            and calc_vm_flag_bits() respectively.
+            just these is not enough,have to bitor @mm->def_flags,VM_MAYREAD,VM_MAYWRITE,VM_MAYEXEC.
+            next,check mlock,if @vm_flags enabled VM_LOCKED,then compare rlimit(RLIMIT_MEMLOCK) with the
+            new locked memory pages,if exceeded limit and no capable to CAP_IPC_LOCK,then returns -EAGAIN.
+
+            if we are playing file mapping,then retrieve inode of the file,and process MAP_SHARED file mapping
+            or MAP_PRIVATE file mapping.
+              file mapping MAP_SHARED {
+                      return -EACCESS if PROT_WRITE is TRUE but @file deny write
+                      return -EACCESS if inode IS_APPEND() but @file permit write
+                      return -EAGAIN if there are mandatory locks on the @file
+                      /* invoke locks_verify_locked() on @file's inode */
+                      enable VM_SHARED and VM_MAYSHARE in virtual memory region flags
+                      if @file deny write,then have to disable VM_MAYWRITE and VM_SHARED in VMA flags
+              }
+              file mapping MAP_PRIVATE {
+                      return -EACCESS if @file deny read
+                      return -EPERM if @file disallowed execute but VMA flags enabled execute
+                      if @file disallowed execute,then disable VM_MAYEXEC in VMA flags
+                      return -ENODEV if @file operations undefined(mmap() undefined)
+              }
+
+            if we are not playing file mapping,then everything is simple.
+              non-file-mapping MAP_SHARED {
+                      ignore @pgoff
+                      /* @pgoff is only for file mapping */
+                      enable VM_SHARED and VM_MAYSHARE in VMA flags
+              }
+              non-file-mapping MAP_PRIVATE {
+                      update @pgoff to @addr >> PAGE_SHIFT
+                      /**
+                       * set @pgoff according to @addr for anonymous VMA(no file associated)
+                       * so,@pgoff := @addr / PAGE_SIZE,it identifies the number of start page frame
+                       * of this linear address space in total memory.
+                       * ! @addr had aligned to PAGE_SIZE,if no MAP_FIXED.
+                       */
+              }
+
+            invoke security_file_mmap() to check capability,if we are not in file mapping,this routine
+            should not returns any error.
+            finally,call to mmap_region() to create and initialize a new memory region,link it into the
+            process address space,and returns the start linear address of the memory region.
+            /* maybe returns error code */
