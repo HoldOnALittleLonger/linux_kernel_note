@@ -16811,3 +16811,115 @@ Chapter 9 : Process Address Space
             finally,call to mmap_region() to create and initialize a new memory region,link it into the
             process address space,and returns the start linear address of the memory region.
             /* maybe returns error code */
+
+          /**
+           * mmap_region - create new memory region,initialize it and insert it into the process
+           *               address space
+           * @file:        file descriptor for file mapping
+           * @addr:        the expected address
+           * @len:         length of the interval
+           * @flags:       mapping flags
+           * @vm_flags:    virtual memory area flags
+           * @pgoff:       pgoff value
+           * return:       the start linear address of memory region(may caused merging)
+           *               error code => failed
+           */
+          unsigned long mmap_region(struct file *file, unsigned long addr, unsigned long len,
+                                    unsigned long flags, unsigned int vm_flags, unsigned long pgoff);
+
+          what mmap_region() does :
+            1> retrieve @current's memory descriptor.
+               initialize local variables both @correct_wcound and @charged to _zero_.
+               retrieve file inode struct if @file is not NULL.
+            munmap_back:
+            2> call to find_vma_prepare() to find out the VMA where new memory region will roots at.
+               if got VMA and no overlapping
+               then
+                       try to do_munmap() for @addr and @len in @mm
+                       /**
+                        * if the linear address interval have mapped,then unmap it at first
+                        * generally,do_munmap() returns _zero_,returns -error_code if failed.
+                        */
+                       return -ENOMEM if do_munmap() failed,otherwise,goto munmap_back.
+            3> if @len have reached limit on @mm address space,returns -ENOMEM.
+            4> if enabled MAP_NORESERVE
+               then
+                       checks sysctl_overcommit_memory,if the value is not OVERCOMMIT_NEVER,
+                       then enable VM_NORESERVE
+                       checks file hugetlb,if it is,then enable VM_NORESERVE,too
+            5> check memory availability,@charged := @len >> PAGE_SHIFT.
+               if security_vm_enough_memory(@charged) returned TRUE,then returns -ENOMEM,
+               otherwise,enable VM_ACCOUNT.
+               /* this step would be processed if @file mapping is accountable */
+            6> call to vma_merge(),if the new VMA is can be inserted by simply expand its @root,
+               then just do expanding and returns the new linear address.
+            7> call to kmem_cache_zalloc() to allocate a new VMA is we can not expand the @prev
+               in 6>.returns -ENOMEM if VMA is NULL.
+               /* in this case,have to unacctount the virtual memory before return,if @charged > 0 */
+            8> initializes the new VMA {
+                       @vm_mm := @mm
+                       @vm_start := @addr
+                       @vm_end := @addr + @len
+                       @vm_flags := @vm_flags
+                       @vm_page_prot := @vm_get_page_prot(@vm_flags)
+                       @vm_pgoff := @pgoff
+                       INIT_LIST_HEAD(VMA->@anon_vma_chain)
+               }
+            9> if we are doing file-mapping
+               then
+                       if enabled VM_GROWSDOWN AND VM_GROWSUP,then goto free_vma,error code is -EINVAL.
+                       if enabled VM_DENYWRITE,then invoke deny_write_access() on @file to forbit writing;
+                       goto free_vma and returns -ETXTBSY if routine did not return _zero_,otherwise,
+                       set @correct_wcount to 1.
+
+                       VMA->@vm_file := @file
+                       lock @file through get_file()
+                       invoke @file specified mmap() routine,goto unmap_and_free_vma if failed
+                       if enabled VM_EXECUTABLE,add a vma mapping executable /* require @mmap_sem */
+
+                       @addr := VMA->@vm_start
+
+                       @pgoff := VMA->@vm_pgoff
+                       @vm_flags := VMA->@vm_flags
+                       /* because several device drivers can change address through @f_op->mmap() */
+
+               if we are not doing file-mapping AND enabled VM_SHARED
+               then
+                       invoke shmem_zero_setup(@vma) to initialize the memory region for sharing to _zero_,
+                       goto free_vma if failed,in this case,error code is the return value.
+
+            10> both file-mapping and non-file-mapping have to continues from there.
+            11> if write notify is wanted at VMA
+                then
+                        get VMA->@vm_page_prot and store it in @pprot(local variable)
+                        VMA->@vm_page_prot := vm_get_page_prot(@vm_flags & ~VM_SHARED)
+                        if @pprot noncached,then set @vm_page_prot to pgprot_noncached(@vm_page_prot)
+                        /**
+                         * @vm_page_prot may have changed because drivers may have changed it in
+                         * their @f_op->mmap()
+                         */
+            12> invoke vma_link()
+                set @file to VMA->@vm_file
+            13> once VMA denies write,undo temporary denial count,
+                that is @correct_wcount > 0 => increase @file's indoe @i_writecount.
+            out:
+            14> raise performance event about memory map on VMA.
+            15> @mm->total_vm += @len >> PAGE_SHIFT
+                does virtual memory area statistics accounting
+                if enabled VM_LOCKED
+                then
+                        if succeed to mlock the VMA,then update @mm->locked_vm += (@len >> PAGE_SHIFT)
+                else if enabled MAP_POPULATE AND disabled MAP_NONBLOCK
+                then
+                        make pages of the VMA present
+            16> return linear address @addr /* !! SUCCEED TO mmap_region() */
+            unmap_and_free_vma:
+            17> increase @file's inode @i_writecount if @correct_wcount > 0
+                fput @file
+                undo any partial mapping done by a device driver
+                @charged := 0
+            free_vma:
+            18> kmem_cache_free VMA
+            unacct_error:
+            19> @charged is TRUE,unaccount memory through vm_unacct_memory()
+            20> finally,return the error code /* !! FAILED TO mmap_region() */
