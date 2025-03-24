@@ -16888,16 +16888,39 @@ Chapter 9 : Process Address Space
                        invoke shmem_zero_setup(@vma) to initialize the memory region for sharing to _zero_,
                        goto free_vma if failed,in this case,error code is the return value.
 
-            10> both file-mapping and non-file-mapping have to continues from there.
+            10> either file-mapping or non-file-mapping have to continues from there.
             11> if write notify is wanted at VMA
                 then
                         get VMA->@vm_page_prot and store it in @pprot(local variable)
+                        /* as old data for later using */
+                        /* @vm_page_prot may have been changed by drivers in their @f_op->mmap() */
+
+
                         VMA->@vm_page_prot := vm_get_page_prot(@vm_flags & ~VM_SHARED)
-                        if @pprot noncached,then set @vm_page_prot to pgprot_noncached(@vm_page_prot)
+                        /* disable VM_SHARED */
+                        /* re-construct @vm_page_prot from VMA flags */
+
                         /**
-                         * @vm_page_prot may have changed because drivers may have changed it in
-                         * their @f_op->mmap()
+                         * macro pgprot_noncached(prot) is defined in <arch/x86/include/asm/pgtable.h>.
+                         * it expands to 
+                         *         @boot_cpu_data.x86 > 3 ? struct pgprot_t { @prot.pgprot | _PAGE_CACHE_UC_MINUS }
+                         *         : @prot
+                         *         # member @pgprot is type of pgprotval_t,the raw type is unsigned long
+                         *         # member @x86 is CPU family
+                         *           3 -> 80386 4 -> 80486 and so on
+                         * # _PAGE_CACHE_MASK => _PAGE_PCD | _PAGE_PWT : page cache disabled and write through
+                         *   _PAGE_CACHE_UC_MINUS => _PAGE_PCD : page cache disabled
+                         * so,this macro means that,if "this" CPU architecture number is greater than 3,then
+                         * disable page caching,otherwise,do nothing.
                          */
+
+                        now checks @pprot,if @pprot.pgprot == pgprot_noncached(@pprot).pgprot
+                        then update @vm_page_prot to pgprot_noncached(@vm_page_prot)
+                        /**
+                         * if page caching enabled before,then it should stay enabled in @vm_page_prot,
+                         * otherwise,mark page uncached
+                         */
+
             12> invoke vma_link()
                 set @file to VMA->@vm_file
             13> once VMA denies write,undo temporary denial count,
