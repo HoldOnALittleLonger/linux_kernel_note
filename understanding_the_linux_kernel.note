@@ -16292,8 +16292,8 @@ Chapter 9 : Process Address Space
 
           <mm/mmap.c> /* CONFIG_MMU;if no CONFIG_MMU,then which is defined in <mm/nommu.c> */
             /**
-             * find_vma - look up the first VMA which satisfies a specifial condition that is
-             *            the linear address is less than the end of memory region's end
+             * find_vma - look up a VMA which satisfies a specifial condition that is
+             *            which includes the given linear address
              * @mm:       memory descriptor,and it is where we look for
              * @addr:     the linear address
              * return:    NULL => unfound OR NULL @mm
@@ -16946,3 +16946,80 @@ Chapter 9 : Process Address Space
             unacct_error:
             19> @charged is TRUE,unaccount memory through vm_unacct_memory()
             20> finally,return the error code /* !! FAILED TO mmap_region() */
+
+      Releasing a Linear Address Interval :
+        kernel use the routine named do_munmap() to delete an linear address interval from the address space
+        of @current process.the deleting may split one memory region into two or more smaller memory regions
+        than the old one.
+        
+        The do_munmap() function :
+          <mm/mmap.c>
+            /**
+             * do_munmap - routine used by the kernel to delete an linear address interval from
+             *             a specified memory address space
+             * @mm:        memory descriptor
+             * @start:     startup linear address
+             * @len:       length of the interval
+             * return:     0 => succeed
+             *             -EINVAL => @start is not a valid address
+             *                        @start is greater than TASK_SIZE
+             *                        @len is greater than TASK_SIZE - @start
+             *                        @len is not a valid length after PAGE_ALIGN -> overflow
+             *             -ENOMEM => @mm->map_count reached or exceeded its limit but there
+             *                        would have spliting
+             *             returns other errors returned by some help routines
+             * # munmap is split into 2 main parts -- this part which finds what needs doing,and
+             *   the areas themselves,which do the work
+             *   this now handles partial unmappings
+             * # returns _zero_ if no such VMA,or VMA does not overlap so have nothing to does
+             *                                    VMA->@vm_start >= @start + @len
+             */ 
+            int do_munmap(struct mm_struct *mm, unsigned long start, size_t len);
+
+            brief description for do_munmap() :
+              this function does these works {
+                find out VMA, split it if necessary, chain previous elements and remainds,
+                munlock if necessary, detach VMA from address space, unmap page frames,
+                remove VMA from memory descriptor
+              }
+
+              if @start is not a valid address or @len is not a valid length,returns -EINVAL.
+              next,try to find out the VMA(@vma) which overlaps the interval,if unfound or no overlapping,
+              just return _zero_.
+              checks if the VMA have to be split for deleting the interval,if it is,then have to checks
+              @mm->map_cout;because,spliting would creates new memory regions,if reached limit,returns 
+              -ENOMEM.
+              help routine __split_vma(@mm, VMA, @start, 0) is invoked for split VMA,return error code
+              if any error was encountered.
+              after we succeed to split VMA,have to update @prev(a local variable used by find_vma_prev())
+              to VMA.
+              function have to checks it is spliting the last one through find_vma(@mm, @end).
+              /* @end := @start + @len */
+              if @last includes the interval but which does not match to it,then split @last through
+              __split_vma(@mm, @last, @end, 1).
+              /* @last = find_vma(@mm, end); @last AND @end > @last->vm_start */
+              
+              +--> last @vm_start
+              +--------------------------------+
+              |                                |
+              |             |                  | --> the last
+              |             |                  |
+              +-------------|------------------+
+                            |                  +--> last @vm_end
+                            +--> @end
+              ! @start -- @end have spanned several memory regions.
+              ! if @end == @last->vm_start,that is the interval does not span @last
+
+              update local variable @vma to @prev->vm_next or @mm->mmap.
+              /* the real VMA or the first VMA in the memory if NULL @prev */
+
+              munlock page frames of the vmas between @vma to the first VMA whose start address is
+              equal to or greater than @end.
+              /* if @mm->locked_vm is TRUE,and for each VMA whose @vm_flags enabled VM_LOCKED */
+
+              call to detach_vmas_to_be_unmapped() to detach the VMAs between @prev and @end,these VMAs
+              spanned [@start, @end).
+              call to unmap_region() to unmap page frames of the VMAs between @prev and @end,these VMAs
+              spanned [@start, @end).
+              call to remove_vma_list() to remove the VMA from memory descriptor.
+              finally,returns _zero_.
