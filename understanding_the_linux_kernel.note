@@ -16293,7 +16293,8 @@ Chapter 9 : Process Address Space
           <mm/mmap.c> /* CONFIG_MMU;if no CONFIG_MMU,then which is defined in <mm/nommu.c> */
             /**
              * find_vma - look up a VMA which satisfies a specifial condition that is
-             *            which includes the given linear address
+             *            which may includes the given linear address
+             *            (in other words,VMA->@vm_end > @the_given_linear_address)
              * @mm:       memory descriptor,and it is where we look for
              * @addr:     the linear address
              * return:    NULL => unfound OR NULL @mm
@@ -17023,3 +17024,98 @@ Chapter 9 : Process Address Space
               spanned [@start, @end).
               call to remove_vma_list() to remove the VMA from memory descriptor.
               finally,returns _zero_.
+
+        The __split_vma() function :
+          static routine __split_vma() is used to split memory region to several smaller memory regions.
+
+          <mm/mmap.c>
+            /**
+             * __split_vma - split a VMA to several smaller VMAs
+             * @mm:          memory descriptor
+             * @vma:         VMA is going to be split
+             * @addr:        linear address where start split,it identifies the intersection point
+             *               between the linear address interval and the memory region
+             * @new_below:   flag specifies whether the intersection occurs at the beginning or at
+             *               the end of VMA
+             * return:       0 => succeed
+             *               error code => failed
+             * # this function bypasses @sysctl_max_map_count checking,use this on the munmap path where
+             *   it doesn't make sense to fail
+             */
+            static int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long addr,
+                                   int new_below);
+
+            brief description for __split_vma() :
+              checks if @vma is hugetlb AND @addr is not huge page address,return -EINVAl.
+              /* VMA and interval unmatched */
+              because splitting will product several smaller virtual memory area,thus call to
+              kmem_cache_alloc() on @vm_area_cachep to allocate kernel memory to store the coming in
+              VMA descriptor;return -ENOMEM if failed on allocating.
+              initializes @new_vma(local variable from allocating) to @vma,initializes its list_head @anon_vma_chain.
+              @new_below is position indicator,thus,if it is TRUE,then @vm_end of @new_vma should be @addr,
+              otherwise,its @vm_start should be @addr,and @vm_pgoff += (@addr - @vma->vm_start) >> PAGE_SHIFT.
+                                                                       /* @new_below FALSE,thus @addr > @vm_start */
+              next,duplicates memory policy(NUMA) by routine mpol_dup(),if it is an error,then goto out_free_vma,by
+              there,we have to deallocate @new_vma and returns error code.
+              after succeed to duplicate memory policy,have to set the same policy for @new_vma,because it belongs to
+              the same process address space.
+              routine anon_vma_clone() is called to clone @anon_vma of @vma for @new_vma,if failed,goto out_free_mpol,
+              have to mpol_put() the duplicated previously memory policy object.
+              if @vma is file-mapping,then have to get_file() on @new_vma and added_exe_file_vma(@mm) if necessary.
+                                                                              /* @vma->vm_flags enabled VM_EXECUTABLE */
+              if @vm_ops->open is not NULL,then call to it to open this new virtual memory area.
+              function vma_adjust() is used to adjust @vma,the arguments will be passed to it are determined by
+              @new_below.
+
+              /* *@new_vma = *@vma */
+              TRUE
+
+                  +--> file-mapping offset : @pgoff * PAGE_SIZE 
+                  | 
+                  |
+                  +--> @vma->vm_start
+                  +-------------------------+
+                  |                         |
+                  |   @new_vma              |
+                  |                         |
+                  +-- ----------------------+
+                                            +--> @addr
+                  +--> @vma->vm_start
+                  +--------------------------------+
+                  |                                |
+                  |              @vma              |
+                  |                                |
+                  +--------------------------------+
+                                                   +--> @vma->vm_end
+                  L->R :
+                    @vma, @addr, @vma->vm_end, @vma->vm_pgoff + ((@addr - @new_vma->vm_start) >> PAGE_SHIFT), @new_vma
+                    /* target, start, end, pgoff, new to insert */
+                
+              FALSE
+                        
+                          +--> file-mapping offset : (@pgoff + ((@addr - @vma->vm_start) >> PAGE_SHIFT)) * PAGE_SIZE
+                          |
+                          |
+                          +--> @addr
+                          +------------------------+
+                          |                        |
+                          |      @new_vma          |
+                          |                        |
+                          +------------------------+
+                                                   +--> @vma->vm_end
+                  +--> @vma->vm_start
+                  +--------------------------------+
+                  |                                |
+                  |              @vma              |
+                  |                                |
+                  +--------------------------------+
+                                                   +--> @vma->vm_end
+            
+                  L->R :
+                    @vma, @vma->vm_start, @addr, @vma->vm_pgoff, @new_vma
+
+              if vma_adjust() returned _zero_,then we returns _zero_,too.__split_vma() succeed.
+              if we failed to split VMA,then have to close @new_vma(corresponding to @open() previous) if @close() is
+              not NULL,fput() file and removed_exe_file_vma() for the memory,free memory policy,free @new_vma descriptor,
+              finally,returns error code returned by vma_adjust().
+            
