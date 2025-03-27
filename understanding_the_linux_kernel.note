@@ -17114,8 +17114,98 @@ Chapter 9 : Process Address Space
                   L->R :
                     @vma, @vma->vm_start, @addr, @vma->vm_pgoff, @new_vma
 
+              /**
+               * combine TRUE and FALSE will drive we into the situation that the linear address interval spanned two
+               * memory regions
+               */
+
               if vma_adjust() returned _zero_,then we returns _zero_,too.__split_vma() succeed.
               if we failed to split VMA,then have to close @new_vma(corresponding to @open() previous) if @close() is
               not NULL,fput() file and removed_exe_file_vma() for the memory,free memory policy,free @new_vma descriptor,
               finally,returns error code returned by vma_adjust().
+
+        The vma_adjust() function :
+          this function is used to adjust comfine for a specified memory region.
+
+          <mm/mmap.c>
+            /**
+             * vma_adjust - adjust a specified VMA
+             * @vma:        target
+             * @start:      new start linear address
+             * @end:        new end linear address
+             * @pgoff:      new pgoff value
+             * @insert:     new memory region to be inserted
+             * return:      0 => succeed
+             *              -ENOMEM => no enough memory
+             * # we can not adjust vm_start, vm_end, vm_pgoff fileds of a VMA that is already present in
+             *   an i_mmap tree without adjusting the tree
+             */
+            int vma_adjust(struct vm_area_struct *vma, unsigned long start, unsigned long end,
+                           pgoff_t pgoff, struct vm_area_struct *insert);
             
+            brief description for vma_adjust() :
+              it retrieves @current's memory descriptor at first,and then retrieves the next VMA of @vma.
+              if next VMA is existed and @insert is NULL,it have to handles some cases involved with
+              the next VMA :
+                /**
+                 * @insert NULL => not another VMA will insert
+                 * if an another VMA will be inserted,then can not adjust the next VMA,because the new one
+                 * may occupies the hole in future.
+                 */
+
+                if @end is greater than or equal to next VMA's end,then have to remove the next VMA
+                /* expand @vma to span the next VMA */
+                /* @exporter := next VMA, @importer := @vma */
+                /* should adjust @vma,should remove next VMA */
+
+                if @end is greater than next VMA's start,then have to adjust the next VMA
+                /* expand @vma to overlap the next VMA,and cut the length of the next VMA */
+                /* @exporter := next VMA, @importer := @vma */
+                /* should adjust @vma,should adjust next VMA */
+
+                if @end is less than @vma's end,then adjust @vma only,do not touch the next VMA
+                /* shrink @vma,and the next VMA expand */
+                /* @exporter := @vma, @importer := next VMA */
+                /* should adjust @vma,should adjust next VMA */
+
+                !! calculation methods for remove next and adjust(or not adjust) next VMA are difference
+                   remove next := 1 + (@end > @next->vm_end)
+                   adjust next := (@end - @next->vm_start) >> PAGE_SHIFT
+                   adjust next := - ((@vma->vm_end - end) >>PAGE_SHIFT)
+            
+              if we had encountered one of these three case,and @exporter->anon_vma is not NULL but
+              @importer->anon_vma is NULL,then have to attempt clone @anon_vma of @exporter for
+              @importer,return -ENOMEM if anon_vma_clone() was failed.
+              if we succeed to clone anonymous vmas,then update @importer->anon_vma to @exporter->anon_vma.
+
+              if we are handling file-mapping,then have to get the root of a tree about private and shared
+              mappings in @file->f_mapping;if @insert is not NULL must invoke __vma_link_file() on it.
+              /* struct address_space *f_mapping, struct prio_tree_root i_mmap */
+
+              if @root is not NULL,then have to flush dentry cache on the @f_mapping,and remove @vma from
+              the @root;if we should adjust the next VMA of @vma before,must remove the next,too.
+              /* adjust the i_mmap tree before go to adjust the VMA */
+
+              now,shrink or expand @vma,reset @vm_start,@vm_end,@vm_pgoff to @start,@end,@pgoff respectively.
+              adjust next VMA's @vm_start and @vm_pgoff,if we should adjust it.
+              if @root is not NULL,then re-insert the adjusted next and the adjusted @vma into the tree,again.
+              unlink the next VMA,if we should remove it.if we are handling file-mapping,must remove it from
+              the shared VMA.
+
+              insert @insert to the memory descriptor,if @insert is not NULL.
+              unlock @i_mmap_lock if we locked up it previously.
+
+              if we have removed the next VMA at least once,then have to process the following actions :
+                > put @file,call removed_exe_file_vma() on @mm,if the next VMA enabled VMA_EXECUTABLE
+                > merge anonymous vma of @vma and the next VMA's
+                > free memory policy of the next VMA
+                > free descriptor of the next VMA
+                > if we removed the next VMA twice,then have to reset @next to @vma->vm_next,and goto again
+                  /**
+                   * label again is the first case of the three cases described above within TRUE
+                   * condition.
+                   * and continues from there.
+                   */
+              validate @mm and returns _zero_.
+                   
+              
