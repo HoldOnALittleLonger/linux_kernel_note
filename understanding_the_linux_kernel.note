@@ -16279,6 +16279,18 @@ Chapter 9 : Process Address Space
         ! THE 16 POSSIBLE COMBINATIONS FOR ACCESS RIGHTS ARE STORED IN ARRAY NAMED @protection_map
           WHICH IS TYPE OF pgprot_t AND extern DECLARED IN HEADER <linux/mm.h>.
           /* EACH ELEMENT IS A COMBINATION FOR PROTECTION BITS OF THE PAGE TABLE ENTRY */
+        /**
+         * Associating between Map type and Page Protection in Linux 2.6.34.1 :
+         *   map_type        prot
+         *                   PROT_NONE        PROT_READ        PROT_WRITE        PROT_EXEC
+         *   MAP_SHARED      r (no) no        r (yes) yes      r (no) yes        r (no) yes
+         *                   w (no) no        w (no) no        w (yes) yes       w (no) no
+         *                   x (no) no        x (no) yes       x (no) yes        x (yes) yes
+         *
+         *   MAP_PRIVATE     r (no) no        r (yes) yes      r (no) yes        r (no) yes
+         *                   w (no) no        w (no) no        w (copy) copy     w (no) no
+         *                   x (no) no        x (no) yes       x (no) yes        x (yes) yes
+         */
 
       Memory Region Handling :
         the primary procedures used to enlarge and shrink address space of a process are
