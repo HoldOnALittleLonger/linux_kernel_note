@@ -16991,19 +16991,19 @@ Chapter 9 : Process Address Space
 
             brief description for do_munmap() :
               this function does these works {
-                find out VMA, split it if necessary, chain previous elements and remainds,
+                find out VMA, split it if necessary, chain previous elements and remainders,
                 munlock if necessary, detach VMA from address space, unmap page frames,
                 remove VMA from memory descriptor
               }
 
               if @start is not a valid address or @len is not a valid length,returns -EINVAL.
               next,try to find out the VMA(@vma) which overlaps the interval,if unfound or no overlapping,
-              just return _zero_.
+              just return _zero_.      /* find_vma_prev() */
               checks if the VMA have to be split for deleting the interval,if it is,then have to checks
               @mm->map_cout;because,spliting would creates new memory regions,if reached limit,returns 
               -ENOMEM.
               help routine __split_vma(@mm, VMA, @start, 0) is invoked for split VMA,return error code
-              if any error was encountered.
+              if any error has encountered.
               after we succeed to split VMA,have to update @prev(a local variable used by find_vma_prev())
               to VMA.
               function have to checks it is spliting the last one through find_vma(@mm, @end).
@@ -17031,7 +17031,7 @@ Chapter 9 : Process Address Space
               /* if @mm->locked_vm is TRUE,and for each VMA whose @vm_flags enabled VM_LOCKED */
 
               call to detach_vmas_to_be_unmapped() to detach the VMAs between @prev and @end,these VMAs
-              spanned [@start, @end).
+              spanned [@start, @end). /* operates red-black tree and memory regions list */
               call to unmap_region() to unmap page frames of the VMAs between @prev and @end,these VMAs
               spanned [@start, @end).
               call to remove_vma_list() to remove the VMA from memory descriptor.
@@ -17062,12 +17062,12 @@ Chapter 9 : Process Address Space
               /* VMA and interval unmatched */
               because splitting will product several smaller virtual memory area,thus call to
               kmem_cache_alloc() on @vm_area_cachep to allocate kernel memory to store the coming in
-              VMA descriptor;return -ENOMEM if failed on allocating.
+              VMA descriptors;return -ENOMEM if failed on allocating.
               initializes @new_vma(local variable from allocating) to @vma,initializes its list_head @anon_vma_chain.
               @new_below is position indicator,thus,if it is TRUE,then @vm_end of @new_vma should be @addr,
               otherwise,its @vm_start should be @addr,and @vm_pgoff += (@addr - @vma->vm_start) >> PAGE_SHIFT.
                                                                        /* @new_below FALSE,thus @addr > @vm_start */
-              next,duplicates memory policy(NUMA) by routine mpol_dup(),if it is an error,then goto out_free_vma,by
+              next,duplicates memory policy(NUMA) by routine mpol_dup(),if it returns an error,then goto out_free_vma,by
               there,we have to deallocate @new_vma and returns error code.
               after succeed to duplicate memory policy,have to set the same policy for @new_vma,because it belongs to
               the same process address space.
@@ -17244,6 +17244,11 @@ Chapter 9 : Process Address Space
               drain pages out of the CPU's pagevecs through lru_add_drain().
                                      /* per-CPU page vectors */
               retrieve TLB cache object,it is type of pointer to struct mmu_gather.
+                                     /* from per-CPU variable named "mmu_gathers" */
+                                     /**
+                                      * it stores all information required for a successful updating
+                                      * of the Page Table entries of a process
+                                      */
               updates @mm's @hiwater_rss with the value get_mm_rss(@mm),if the value is greater
               than @hiwater_rss's.   /* processed by update_hiwater_rss() */
               function unmap_vmas() has defined in <mm/memory.c>,it is used to unmap a range of 
@@ -17261,4 +17266,10 @@ Chapter 9 : Process Address Space
               associated with a set of linear addresses,thus have to invoke free_pgtables() to
               free the Page Table entries.
               finally,call to tlb_finish_mmu() to flush TLB cache for the MMU.
-                                                        /* the mmu_gather object acquired before */
+                                               /* the mmu_gather object acquired before */
+                                               /**
+                                                * call to free_pages_and_swap_cache() on
+                                                * multiprocessor system to release the
+                                                * page frames whose pointers have been
+                                                * collected in the @mmu_gather object
+                                                */
