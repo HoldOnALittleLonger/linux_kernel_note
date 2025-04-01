@@ -16189,8 +16189,21 @@ Chapter 9 : Process Address Space
           #define VM_MAYSHARE 0x00000080
 
           
+
           #define VM_GROWSDOWN 0x00000100 /* general info on the segment */
           #define VM_GROWSUP 0x00000200
+                                          /**
+                                           * If one of these two flags is set,
+                                           * that means this VMA contains a stack
+                                           *                 # mapping a process stack
+                                           * in this case,@vm_start may only decrease/increase
+                                           * but @vm_end always fixed up
+                                           *                        # even 'pop' instruction
+                                           *                          processed
+                                           * the size of VMA stay unchanged even @vm_start
+                                           * changed
+                                           */
+
           #define VM_PFNMAP 0x00000400 /* Page-ranges managed without "struct page",just pure PFN */
           #define VM_DENYWRITE 0x00000800 /* ETXTBSY on write attempts.. */
 
@@ -17273,3 +17286,50 @@ Chapter 9 : Process Address Space
                                                 * page frames whose pointers have been
                                                 * collected in the @mmu_gather object
                                                 */
+
+      Page Fault Exception Handler :
+        Linux Page Fault Exception Handler must distinguish exceptions caused by programming errors from
+        those caused by a reference to a page that legitimately belongs to the process address space but
+        simply has not been allocated yet.
+        function named do_page_fault() is the Page Fault interrupt service routine for 80x86 architecture.
+
+        how do_page_fault() distinguish what the page fault come from?
+          the linear address caused Page Fault -> @addr
+          if @addr of @current->mm
+          then
+                  if access rights permitted
+                  then
+                          legal access -> allocate a new page frame
+                          return
+          else
+                  if the exception come from Kernel Mode
+                  then
+                          Kernel bug -> kill the process
+                          return
+          Illegal access -> send a SIGSEGV signal
+          return
+
+        <arch/x86/mm/fault.c>
+          /**
+           * do_page_fault - Page Fault Exception service routine
+           * @regs:          register contents of the microprocessor when the
+           *                 exception occurred
+           * @error_code:    3-bit error code,it is pushed on the stack by the
+           *                 control unit when the exception occurred
+           *                   bit-0:
+           *                     0 -> the exception was caused by an access to a page
+           *                          that is not present
+           *                     1 -> the exception was caused by an invalid access right
+           *                   bit-1:
+           *                     0 -> the exception was caused by a read or execute access
+           *                     1 -> the exception was caused by a write access
+           *                   bit-2:
+           *                     0 -> the exception occurred while the processor was in
+           *                          Kernel Mode
+           *                     1 -> the exception occurred while the processor was in
+           *                          User Mode
+           * # do_page_fault() must recognize several particular subcases
+           * # do_page_fault() must distinguish several kinds of legal access
+           */
+          dotraplinkage void __kprobes
+          do_page_fault(struct pt_regs *regs, unsigned long error_code);
