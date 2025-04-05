@@ -17372,7 +17372,7 @@ Chapter 9 : Process Address Space
                        /* if the fault is not match to any cases above,it must be caused by a bad area access */
                        /* bad area : the area that can not be accessed by the process */
                }
-            7> now,we can know that it fault in User Mode.
+            7> now,we can know that it failed in User Mode.
                User Mode registers count as a user access even for any potential system fault or CPU buglet.
 
                if kprobes do not want to hook the spurious faults,then just notify page fault and returns to
@@ -17445,3 +17445,39 @@ Chapter 9 : Process Address Space
           !! KERNEL NEVER ACCESS TO THE ADDRESS GREATER THAN OR EQUAL TO PAGE_OFFSET,IF IT HAVE ACCESSED TO,THEN THAT MUST BE
              A KERNEL BUT,THUS KERNEL MUST GENERATES AN OOPS.
              IF AN USER PROCESS ATTEMPT TO ACCESS AN LINERA ADDRESS IS NOT BELONGS TO IT,THEN KERNEL MUST SEND IT A SIGNAL SIGSEGV.
+
+      Handling a Faulty Address Outside the Address Space :
+        Case for User Mode >
+          if the exception was caused by the process attempt to access a page frame is not existed in its address space,
+          then find_vma() would returns NULL,so do_page_fault() will call to bad_area().
+          the static routine bad_area() actually call to static routine __bad_area() with SEGV_MAPPER.
+          SEGV_MAPPER => nonexisting page frame
+          SEGV_ACCESS => existing page frame but permission deny
+          as the result,__bad_area_nosemaphore() would be invoked,the memory semaphore had been acquired by __bad_area() before
+          the invoking.
+          if @error_code enabled PF_USER,then @current->thread.cr2 will be set to the @address,thread.error_code will be set
+          to "error_code | (@address >= TASK_SIZE)",thread.trap_no will be set to 14(Page Fault Exception Number).
+          finally,force_sig_info_fault() be called to send signal SIGSEGV to the @current process.
+          routine force_sig_info_fault() make sure that the process does not ignore or block SIGSEGV signal.
+
+        Case for Kernel Mode >
+          there are two alternatives :
+            1> the exception occurred while using some linear address that has been passed to the kernel
+               as a parameter of a system call
+            2> the exception is due to a real kernel bug
+
+          in this case,only function no_context() would be called with the @regs, @error_code, @address .
+          /* no_context() distinguishes these two alternatives and does something */
+
+          no_context() :
+            for the first case,it call to fixup_exception() with current register information.
+            which function typically sends a SIGSEGV signal to @current or terminates a system call handler
+            with a proper error code.
+
+            for the second case,it print a complete dump of the CPU registers and of the Kernel Mode stack
+            bothn on the console and on a system message buffer.
+            next,send signal SIGKILL to the current process by oops_end()./* oops_begin() is called previously */
+            this is the "Kernel oops".
+            /**
+             * the message format string is seem like "CR2: %0x161x@address\n".
+             */
