@@ -17432,6 +17432,7 @@ Chapter 9 : Process Address Space
                 then call to bad_area_access_error() and return.
                 /* permission deny */
             18> call to handle_mm_fault(),which handles this page fault.
+                /* which function had defined in <mm/memory.c> */
                 if it resulted in VM_FAULT_ERROR,then call to mm_fault_error() and return,we can not handles this
                 Page Fault.
             19> if handle_mm_fault() is resulted in VM_FAULT_MAJOR
@@ -17481,3 +17482,96 @@ Chapter 9 : Process Address Space
             /**
              * the message format string is seem like "CR2: %0x161x@address\n".
              */
+
+      Handling a Faulty Address Inside the Address Space :
+        if @address is inside to the process address space,do_page_fault() proceeds to the statement labeled
+        "good_area".
+        if write is request but the flag in VMA is not enabled,then do_page_fault() jump to bad_area_access_error().
+        which function is similar to bad_area(),but the signal is SEGV_ACCESS.
+        /**
+         * fault in writing {
+         *         but VMA flag disabled write
+         *         but Page Table Entry deny write permission
+         *         but VMA flag disabled write, read, execute
+         * }
+         */
+
+        if there is not an access error,then function handle_mm_fault() will be invoked with @write := 0 or
+        @write := 1.
+        /* @write => 0 -> not write request 1 -> write request */
+        function handle_mm_fault() set @current's state to TASK_RUNNING at first,next,allocate PUD inside a
+        specified PGD which is get by pgd_offset(),allocate PMD inside the PUD,allocate PTE inside the PMD.
+        for allocate a PTE,function pte_alloc_map() will be called,which finally returns a pointer to the
+        new created PTE(with type pte_t).
+        if any allocating was failed,VM_FAULT_OOM would be returned to caller by handle_mm_fault().
+        if no allocating was failed,function handle_pte_fault() will be called.
+        /**
+         * if PMD is not present,pte_alloc_map() proceed to call __pte_alloc(),a new PTE would be allocated,
+         * and set Present for the PMD let PTE populated on it.
+         * # if PMD is present,then there must be another PTE is populating on it now,so have to free the
+         *   new created PTE.
+         *   that is the corresponding PTE for the @address has been existed in the PMD.
+         * next,pte_alloc_map() invoke pte_offset_map(),which call to pte_offset_kernel(),finally,__va() will
+         * be called to convert the physical address of the PMD to an linear address starting from PAGE_OFFSET,
+         * pte_offset_kernel() end up by returns a pointer of PTE(pte_t),whose value is equal to
+         *         (pte_t *)LINEAR_ADDRESS_OF_PMD + pte_index(@address)
+         * so,a pointer to PTE is returned by pte_alloc_map().
+         */
+
+        ! function handle_pte_fault() is used to handle PTE fault,which inspect the Page Table Entry corresponding
+          to @address and to determine how to allocate a new page frame for the process.
+          /* pte_alloc_map() just populate PTE on a PMD,but does not set present for it */
+          if PTE is not present
+                  which is _zero_ value
+                          if VMA operation is not NULL and routine fault() is setup
+                          then end up by call to do_linear_fault()
+                          else end up by call to do_anonymous_page()
+                  it is used to mapping a file
+                          end up by call to do_nonlinear_fault()
+                  end up by call to do_swap_page()
+          proceed checking for FAULT_FLAG_WRITE if setup in @flags,the parameter of handle_mm_fault(),
+          if we had fault in writing,then have to check if write permission is allowed in the PTE.
+          deny => end up by call to do_wp_page()
+          permitted => update PTE to dirty state
+
+          label "unlock" is existed at the end of handle_pte_fault(),which make sure that the PTE
+          unmapped and unlocked after returned to caller.
+          /* @mmap_sem still held,but pte unmapped and unlocked */
+
+          ! strategy would be taken by handle_pte_fault() : 
+              Demand Paging :
+                the accessed page is not present,kernel setup the new created PTE properly and associated it
+                with the @address,assign it to @current process
+              Copy-On-Write :
+                the accessed page is present but read-only,kernel make a copy of the old one and
+                setup it properly,next associated the @address with the new copy and assign
+                it to @current process
+
+        the returned value from handle_mm_fault() is stored in a local variable named @fault.
+        there has three kind of fault :
+                VM_FAULT_ERROR <-> VM_FAULT_OOM | VM_FAULT_SIGBUS | VM_FAULT_HWPOISON
+                /**
+                 * function mm_fault_error() will be called,and then,do_page_fault() return
+                 * to caller.
+                 * mm_fault_error() :
+                 *         if VM_FAULT_OOM => call to out_of_memory()
+                 *         else if VM_FAULT_SIGBUS | VM_FAULT_HWPOISON => call to do_sigbus()
+                 *         neither VM_FAULT_OOM nor VM_FAULT_SIGBUS | VM_FAULT_HWPOISON => BUG()
+                 * do_sigbus() :
+                 *         acquire memory semaphore
+                 *         if fault in Kernel Mode => no_context()
+                 *         # if fault occurred in userspace and because of prefetch => OK,return to caller
+                 *         store exception address in @current->thread cr2
+                 *         set trap number of @current->thread to Page Fault
+                 *         set error code of @current->thread to @error_code
+                 *         force_sig_info_fault()
+                 */
+                VM_FAULT_MAJOR  => @current->maj_flt++
+                /**
+                 * the Page Fault forced the current process to sleep
+                 * # read from disk
+                 */
+                VM_FAULT_MINOR  => @current->min_flt++
+                /**
+                 * the Page Fault has been handled without blocking the current process
+                 */
