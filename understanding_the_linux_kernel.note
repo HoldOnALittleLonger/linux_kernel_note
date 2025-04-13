@@ -17575,3 +17575,59 @@ Chapter 9 : Process Address Space
                 /**
                  * the Page Fault has been handled without blocking the current process
                  */
+
+      Demand Paging :
+        a dynamic memory allocation technique that consists of deferring page frame allocation until the
+        last possible moment(until the process attempts to address a page that is not present in RAM - Page Fault).
+        /* motivation : the process do not access to all the addresses inside its address space right after start */
+        ! some addresses may never be accessed by the process.
+        ! program locality principle(Hard Cache) ensures that,at each stage of program execution,only a small subset
+          of process pages are really referenced,so the page frames containing the temporarily useless pages can be
+          used by other processes.
+
+        global allocation :
+          assigning all page frames to the process right from the average number of free page frames in the system and
+          therefore allows better use of the available free memory.
+          Demand Paging prefer to this strategy.
+
+        ! global allocation may cause system overhead - each Page Fault Exception induced by Demand Paging must be
+          handled by kernel.
+          Hard Cache(locality principle) reduce such Page Fault Exceptions.
+
+        a page frame is not present in the main memory either because the page was never accessed by the process,or
+        it has been reclaimed by the kernel.but in both case,kernel must handles the Page Fault Exception,assign a
+        new page frame to the process.
+        /**
+         * how initialize the page frame is depend on what kind of page and on whether it was previously accessed by
+         * the process.
+         */
+
+        particular cases :
+          1> page was never accessed AND it does not map a disk file
+             OR
+             page maps a disk file
+             => Page Table entry was filled with _zeros_ - pte_none() returns 1
+          2> page belongs to a non-linear disk file mapping
+             => Present == 0 AND Dirty == 0
+          3> page was already accessed by the process,but its content is temporarily
+             saved on disk
+             => Page Table entry is not filled with _zeros_
+                AND
+                Present == 0 AND Dirty == 0
+
+        SO handle_pte_fault() IS ABLE TO DISTINGUISH THE THREE CASES BY INSPECTING THE Page Table Entry
+        THAT REFERES TO THE PARAMETER @address.
+
+        in function handle_pte_fault(),if the PTE is not presented,then it check what the page frame is :
+          case 1> => call to do_linear_fault()  /* it maps a disk file */
+                     /* load the missing page from disk into RAM due to it mapped to a file */
+                     /* @vma->vm_ops is not NULL AND @vma->vm_ops->fault is not NULL */
+
+                     OR
+
+                     call to do_anonymous_page() /* it does not map a disk file */
+                     /* @vma->vm_ops is NULL OR @vma->vm_ops->fault is NULL */
+                     /* anonymous mapping,get a new page frame */
+
+          case 2> => call to do_nonlinear_fault()
+          case 3> => call to do_swap_page()
