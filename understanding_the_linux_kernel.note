@@ -1411,7 +1411,7 @@ Chapter 2 : Memory Addressing
 
     Process Page Tables :
       two parts of the linear address space of a process :
-        1>  linear address 0x00000000 -- 0xbfffffff can be addressed either User or Kernel Mode.
+        1>  linear address 0x00000000 -- 0xbfffffff can be addressed either User Mode or Kernel Mode.
         2>  linear address 0xc0000000 -- 0xffffffff can only be addressed in Kernel Mode.
 
     macro PAGE_OFFSET yields value 0xc0000000,this is the offset in the linear address space of a process
@@ -17443,8 +17443,8 @@ Chapter 9 : Process Address Space
                 @thread member in task struct.
             21> up_read() to release memory semaphore.
 
-          !! KERNEL NEVER ACCESS TO THE ADDRESS GREATER THAN OR EQUAL TO PAGE_OFFSET,IF IT HAVE ACCESSED TO,THEN THAT MUST BE
-             A KERNEL BUT,THUS KERNEL MUST GENERATES AN OOPS.
+          !! KERNEL NEVER ACCESS TO THE ADDRESS LOWER THAN OR EQUAL TO PAGE_OFFSET,IF IT HAVE ACCESSED TO,THEN THAT MUST BE
+             A KERNEL BUG,THUS KERNEL MUST GENERATES AN OOPS.
              IF AN USER PROCESS ATTEMPT TO ACCESS AN LINERA ADDRESS IS NOT BELONGS TO IT,THEN KERNEL MUST SEND IT A SIGNAL SIGSEGV.
 
       Handling a Faulty Address Outside the Address Space :
@@ -17631,3 +17631,78 @@ Chapter 9 : Process Address Space
 
           case 2> => call to do_nonlinear_fault()
           case 3> => call to do_swap_page()
+
+        function do_anonymous_page() :
+          <mm/memory.c>
+            /**
+             * do_anonymous_page - handle Page Fault Exception for anonymous page frame
+             * @mm:                memory descriptor
+             * @vma:               virtual memory area
+             * @address:           the corresponding address for PTE which cause Page Fault
+             * @page_table:        PTE
+             * @pmd:               Page Middle Directory which @page_table residents on
+             * @flags:             passed by do_page_fault(),it is FAULT_FLAG_WRITE or _zero_
+             * return:             0 OR VM_FAULT_OOM
+             * # this function return with @mmap_sem still held but PTE unmapped and unlocked
+             */
+            static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
+                                         unsigned long address, pte_t *page_table, pmd_t *pmd,
+                                         unsigned int flags);
+
+            brief description for do_anonymous_page() :
+              at first,it does write accessing checking.
+              if no FAULT_FLAG_WRITE,this function just check PTE none or PTE is not none.
+              none -> /* read-only */
+                      makeup a special PTE
+                      /**
+                       * there is no need to assign a new page frame filled with zeros to the process
+                       * right away,because we might as well _give_ it an existing page called "zero page",
+                       * @empty_zero_page,allocated statically and initialized with zeros
+                       * during kernel initialization.
+                       */
+                     goto label unlock
+              it is not none -> goto label setpte
+
+              next,unmap PTE,attempt attach an anonymous vma to the memory region @vma.
+              /* release kernel temporary mapping for the high-memory physical address */
+              /* linear address is greater than PAGE_OFFSET */
+              allocate a zeroed new page frame from high-memory,if failed,return OOM.
+              /* may block current process,so have to release high-mem mapping at first */
+              charge cgroup with the new allocated page,if failed,return OOM.
+              create a new PTE accord with the @vm_page_prot member of @vma,
+              if defined VM_WRITE in @vma,then enable flags writable and dirty for it.
+              attempt to get PTE through pte_offset_map_lock(),which is lock version of
+              pte_offset_map().the parameters are @mm, @pmd, @address &@ptl(a local variable).
+              if the PTE is none,then goto label release,by there,the charged cgroup page frame
+              would be unchanged,and page frame cache would be released,finally,unmap and unlock
+              PTE,return 0 to caller./* label unlock */
+              
+              ! rmap - physical to virtual reverse mappings
+
+              increase counter in @mm with kind MM_ANONPAGES,establish new anonymous rmap between
+              the new zero @page, @vma, @address.
+
+              about labels :
+                setpte:
+                  set_pte_at(),use the new created PTE to set the PTE corresponding to the @address,
+                  and update mmu cache.
+                  ! the new allocated page frame had been associated with the new created PTE.
+
+                unlock:
+                  unmap and unlock @page_table,then return 0 to caller.
+
+                release:
+                  uncharge memory cgroup,release page cache for the new created page frame,then goto unlock.
+
+                oom_free_page:
+                  release page cache for the new created page frame,and return VM_FAULT_OOM to caller.
+
+                oom:
+                  return VM_FAULT_OOM to caller.
+
+            !! @page_table is the PTE which cause the Page Fault Exception by the interrupted process,
+               in other word,the address that process want access to cause the Page Fault Exception,and
+               the linear address associated with the PTE.
+
+        !! if the page frame is marked nonwritable,a Page Fault Exception would be caused by the process
+           who want to write a page frame marked read-only,then the Copy-On-Write mechanism is activated.
