@@ -11792,6 +11792,10 @@ Chapter 8 : Memory Management
              * page - structure page represent a physical page
              * @flags:        atomic flags,32 flags describe the status of the page frame
              * @_count:       usage count,-1 unused(free page)
+             *                if more than one processes are sharing it,its value must be
+             *                greater than 1
+             *                # this field would decrease whenever a process releases this page frame
+             *                  or COW is executed on it
              * @_mapcount:    count of ptes mapped in mms to show when page is mapped
              *                AND limit reverse map searches
              *                # Number of Page Table entries that refer to the page frame
@@ -17706,3 +17710,45 @@ Chapter 9 : Process Address Space
 
         !! if the page frame is marked nonwritable,a Page Fault Exception would be caused by the process
            who want to write a page frame marked read-only,then the Copy-On-Write mechanism is activated.
+
+      Copy On Write :
+        Copy On Write mechanism take place when fork() is called and a new child process is created.
+        First-generation Unix system duplicated whole parent's process address space and assign the copy
+        to child process.
+        Linux adopt another way,it let child process shares address space with its parent,only makeup
+        a copy when the child or the parent want to write a page frame in the address space.
+
+        duplicate whole address space immediately requires :
+          1> allocating page frames for the Page Tables of the child process
+          2> allocating page frames for the pages of the child process
+          3> initializing the Page Tables of the child process
+          4> copying the pages of the parent process into the corresponding pages of the child process
+
+          /* this way involved many memory accesses,used up many CPU cycles,completely spoiled cache contents */
+          ! if the child process issues exec() system call,all things have done are nosense.
+
+        Copy-On-Write(COW) :
+          instead of duplicating page frames,they are shared between the parent and the child process.
+          whenever the parent or the child process attempts to write into a shared page frame,an exception occurs,
+          so kernel duplicates the page into a new page frame that it marks as writable.
+
+          !! THE ORIGINAL PAGE FRAME REMAINS WRITE-PROTECTED,WHEN THE OTHER PROCESS TRIES TO WRITE INTO IT,KERNEL
+             CHECKS WHETHER THE WRITING PROCESS IS THE ONLY OWNER OF THE PAGE FRAME;IN SUCH A CASE,IT MAKES THE
+             PAGE FRAME WRITABLE FOR THE PROCESS.
+                             
+        About handle_pte_fault() when the page frame is present in RAM :
+          first,have to check whether FAULT_FLAG_WRITE has enabled in @flags.
+          if this Page Fault Exception is caused by wrting into the page frame,then have to
+          check whether Write is permitted.
+          if Write is deny,handle_pte_fault() return to caller by call to do_wp_page().
+          /* Write is deny but we failed when writing into,so we have to consider if COW should be executed */
+          else,use local variable @entry to re-build a PTE with Dirty,@entry is equal to *@pte generally.
+          continue executing,pte_mkyoung() is called on @entry,this macro set _PAGE_ACCESSED on it.
+          next,ptep_set_access_flags() is invoked,this function is defined in <arch/x86/mm/pgtable.c>.
+          function ptep_set_access_flags() would check if @entry is same as @pte,if it was changed,
+          this function just returns _zero_;if they are the same and the page frame is dirty(FAULT_FLAG_WRITE),
+          then use @entry to setup @pte,update PTE which corresponding to the @address which cause Page Fault
+          of the memory descriptor that @vma belongs to.finally,flush TLB cache and returns 1.
+          handle_pte_fault() will call to update_mmu_cache() when ptep_set_access_flags() has returned 1.
+
+
