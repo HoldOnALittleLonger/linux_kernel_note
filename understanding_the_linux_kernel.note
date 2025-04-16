@@ -17751,4 +17751,157 @@ Chapter 9 : Process Address Space
           of the memory descriptor that @vma belongs to.finally,flush TLB cache and returns 1.
           handle_pte_fault() will call to update_mmu_cache() when ptep_set_access_flags() has returned 1.
 
+        function do_wp_page() :
+          <mm/memory.c>
+            /**
+             * do_wp_page - routine handles present pages,when users try to write into a shared page
+             * @mm:         memory descriptor
+             * @vma:        memory region
+             * @address:    address cause Page Fault Exception
+             * @page_table: Page Table Entry which corresponding to @address
+             * @pmd:        Page Middle Directory where @page_table resident on
+             * @ptl:        Page Table Spinlock
+             * @orig_pte:   the original page frame which is shared between processes
+             * return:      _zero_ OR error information code
+             * # this routine is done by copying the page to a new address and decrementing the
+             *   shared-page counter for the old page
+             * # this routine assume that the protection checks have been done by caller
+             * # this routine mark the page dirty at this point even though the page will change only
+             *   once the write actually happens
+             * # non-exclusive @mmap_sem
+             */
+            static int do_wp_page(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long address,
+                                  pte_t *page_table, pmd_t *pmd, spinlock_t *ptl, pte_t orig_pte);
 
+            description for do_wp_page() :
+              an local variable named @old_page(struct page *) would be retrieve through vm_normal_page().
+              if there is no such page exsiting,there would be two cases.
+              first> @vm_flags enabled VM_WRITE | VM_SHARED,jump to reuse label.
+                     that is we can use the shared page with write or read
+              second> no such bits have setup,jump to gotten label.
+
+              take out anonymous pages,because anonymous shared vmas are not dirty accoutable.
+              anonymous vma is existing AND @old_page is not ksm page
+                                                             /**
+                                                              * KSM => Kernel Same Page Merging
+                                                              * A KSM Page => write-protected "shared page"
+                                                              *               OR
+                                                              *               merged page
+                                                              */
+              >
+                      if we can not lock up @old_page,then we have to get its page cache,next unmap and unlock
+                      @page_table.lock up @old_page,reset @page_table to the linear address of Page Table
+                      entry which is corresponding to @address have residented on @pmd.
+                      same @page_table and @orig_pte,then unlock @old_page,and release page cache for it,
+                      jump to unlock lable.
+                      they are not same,release page cache for @old_page,and continue executing.
+
+                      continue from there:
+                      
+                      if we succeed to lock up @old_page,then set local variable @resue to the result
+                      of reuse_swap_page(),which try to reuse a swap page frame for @old_page.
+                      if we succeed to got a swap page to reuse,then move @old_page to @vma's anonymous VMA.
+                      finally,unlock @old_page.
+              @vma->vm_flags enabled VM_WRITE | VM_SHARED
+              >
+                      there,we handle write-faults on shared writable pages.
+                      if virtual memory operations have been assigned AND page_mkwrite() routine is existing,too
+                      then
+                              construct a virtual memory area fault information structure @vmf is type of
+                              struct vm_fault.
+                              we initialize it with the informations about @old_page and the userspace address
+                              which cause this fault(@address & PAGE_MASK)
+                              next,get page cache for @old_page,unmap and unlock @page_table.
+                              call to page_mkwrite(),which attempts to make a page frame in @vma is writable,the
+                              information about the page frame is collected in @vmf
+                              resulted in VM_FAULT_ERROR | VM_FAULT_NOPAGE,jump to unwritable_page.
+                              resulted in no VM_FAULT_LOCKED,lock @old_page,if it is not mapped now,then unlock it
+                              and jump to unwritable.
+                              resulted in another cases,call to VM_BUG_ON() with parameter !PageLocked(@old_page).
+                              
+                              reset @page_table to pte_offset_map_lock().
+                              if @page_table is not same as @orig_pte,then unlock @old_page and release page cache for
+                              it,jump to unlock
+                              otherwise,set local variable @page_mkwrite to 1,which records if make page writable is
+                              succeed.
+
+                      mark @old_page dirty,call to get_page(@dirty_page),set @resue to 1,which turn out we succeed
+                      to reuse the page frame.
+              if @reuse is TRUE,then jump to reuse label;otherwise,we get page cache for @old_page and jump to
+              label "gotten".
+
+              label resue:
+                flush page cache for @orig_pte
+                mark @orig_pte have been accessed,a new result is stored in @entry
+                attempt to make @entry writable in @vma
+                use @entry to set @page_table with _PAGE_ACCESSED enabled
+                /* if succeed,have to update MMU cache */
+                enable VM_FAULT_WRITE in @ret,which would be the result of this routine
+                jump to unlock
+
+              label gotten:
+                unmap and unlock @page_table
+                if @vma has an anonymous VMA,jump to oom
+                if @orig_pte is the first page frame in the system,then allocate a new zeroed page
+                frame,if we failed,jump to oom
+                if @orig_pte is not the first page frame,then allocate a new page frame with flag
+                GFP_HIGHUSER_MOVABLE for the corresponding @address and @vma,if we failed,jump to
+                oom;otherwise,do cow_user_page() /* Copy-On-Write for User Mode Page Frame */
+                set @new_page Uptodate
+                if @vma->vm_flags enabled VM_LOCKED and @old_page is existing
+                        clear its memory lock
+                        /* have to lock page at first,and release it later */
+                if we failed to charge memory cgroup with the @new_page,jump to oom_free_new
+                reset @page_table to pte_offset_map_lock() for @address
+                if @page_table and @orig_pte are the same
+                        either @old_page is existing or is not,@mm's MM_ANONPAGES counter would be
+                        increased
+                        but if @old_page is not an anonymous page,have to decrease @mm's
+                        MM_FILEPAGES counter
+
+                        flush page cache for @orig_pte
+                        makeup a new PTE through @orig_pte and @address,store it in @entry
+                        attempts to make @entry is writable in @vma
+                        clear @page_table and flush it first before updating the PTE with the new @entry
+                        /* avoid a race condition,one thread doing SMC,another doing COW */
+                        add PTE mapping toa new anonymous page @new_page in @vma at @address
+                        notify MMU to map @new_page directly into the secondary page table
+                        update MMU cache
+                        if @old_page is existing,then take down pte mapping from a page
+                        update @new_page to @old_page for free the old page later
+                        enable VM_FAULT_WRITE in @ret
+                if @page_table is not same as @orig_pte,then uncharge @new_page from memory cgroup
+                release page cache for @new_page if it is existing
+                release page cache for @old_page if it is existing
+
+              label unlock:
+                unmap and unlock @page_table
+                if @dirty_page is existing
+                then checks
+                        if @page_mkwrite is FALSE /* we failed to make the page frame at @address in @vma is writable */
+                        then wait on @dirty_page until it locked up,next set page dirty balance on @dirty_page
+                        put @dirty_page
+                        if @page_mkwrite is TRUE
+                        then
+                                makeup a pointer of struct address_space,which will points to @dirty_page->mapping
+                                                                                              /* mapping info */
+                                set @dirty_page Dirty
+                                unlock @dirty_page
+                                release page cache for @dirty_page
+                                if @mapping is existing,then balance dirty pages ratelimited on @mapping
+                        if @vma is mapping a file,then call to file_update_time() on the file of @vma
+                return @ret
+
+              label oom_free_new:
+                release page cache for @new_page
+                jump to label oom
+
+              label oom:
+                if @old_page is existing,then release page cache for it,but must be done after unlock it;if @page_mkwrite
+                have been succeed,we have to unlock @old_page and relese page cache for it,thus we may release page cache
+                for it twice
+                finally,return VM_FAULT_OOM
+
+              label unwritable_page:
+                release page cache for @old_page
+                returns @ret to caller
