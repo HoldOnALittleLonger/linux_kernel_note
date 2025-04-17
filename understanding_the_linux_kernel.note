@@ -17774,12 +17774,22 @@ Chapter 9 : Process Address Space
                                   pte_t *page_table, pmd_t *pmd, spinlock_t *ptl, pte_t orig_pte);
 
             description for do_wp_page() :
-              an local variable named @old_page(struct page *) would be retrieve through vm_normal_page().
+              an local variable named @old_page(struct page *) would be retrieve through vm_normal_page(),
+              it would the page frame that corresponding to @orig_pte.
               if there is no such page exsiting,there would be two cases.
               first> @vm_flags enabled VM_WRITE | VM_SHARED,jump to reuse label.
-                     that is we can use the shared page with write or read
+                     that is we can use the shared page with write or read without COW take place at there.
+                     /* only one process owns the page frame,no COW */
               second> no such bits have setup,jump to gotten label.
+                      /* need to copy */
 
+              /**
+               * cannot checks @_count if equal to 0(a single owner) only,because it would be increased
+               * when the page frame has inserted into swap cache with PG_private flag is set in the page
+               * descriptor.
+               */
+
+              /* @old_page is existing */
               take out anonymous pages,because anonymous shared vmas are not dirty accoutable.
               anonymous vma is existing AND @old_page is not ksm page
                                                              /**
@@ -17842,8 +17852,8 @@ Chapter 9 : Process Address Space
               label gotten:
                 unmap and unlock @page_table
                 if @vma has an anonymous VMA,jump to oom
-                if @orig_pte is the first page frame in the system,then allocate a new zeroed page
-                frame,if we failed,jump to oom
+                if @orig_pte is the zero page frame(@empty_zero_page),then allocate a new zeroed page frame,if
+                we failed,jump to oom
                 if @orig_pte is not the first page frame,then allocate a new page frame with flag
                 GFP_HIGHUSER_MOVABLE for the corresponding @address and @vma,if we failed,jump to
                 oom;otherwise,do cow_user_page() /* Copy-On-Write for User Mode Page Frame */
@@ -17854,6 +17864,11 @@ Chapter 9 : Process Address Space
                 if we failed to charge memory cgroup with the @new_page,jump to oom_free_new
                 reset @page_table to pte_offset_map_lock() for @address
                 if @page_table and @orig_pte are the same
+                   /**
+                    * allocating a new page frame maybe block @current
+                    * thus have to checks whether Page Table Entry been modified by some other
+                    * kernel control path when we sleeping
+                    */
                         either @old_page is existing or is not,@mm's MM_ANONPAGES counter would be
                         increased
                         but if @old_page is not an anonymous page,have to decrease @mm's
@@ -17872,7 +17887,22 @@ Chapter 9 : Process Address Space
                         enable VM_FAULT_WRITE in @ret
                 if @page_table is not same as @orig_pte,then uncharge @new_page from memory cgroup
                 release page cache for @new_page if it is existing
+                /**
+                 * decrease counter of @new_page
+                 * PTE been modified by another kernel control path,then we should not do COW between
+                 * @new_page and @old_page,so the counter of @new_page becomes to -1,it would be
+                 * reclaimed later
+                 * page_cache_release() -> put_page() -> free_hot_cold_page()
+                 */
                 release page cache for @old_page if it is existing
+                /**
+                 * we maybe decrease @old_page's counter twice,the first is the increasement we done
+                 * before COW,the second is that @current is no longer use this @old_page because it
+                 * has the exclusive page frame now
+                 */
+
+                !! special handling for the zero page would improves the system performance,because it
+                   preserves the microprocessor hardware cache by making fewer address references.
 
               label unlock:
                 unmap and unlock @page_table
@@ -17905,3 +17935,28 @@ Chapter 9 : Process Address Space
               label unwritable_page:
                 release page cache for @old_page
                 returns @ret to caller
+
+        function cow_user_page() :
+          <mm/memory.c>
+            /**
+             * cow_user_page - do Copy-On-Write on exact page frames
+             * @dst:           copying of the original
+             * @src:           original page frame
+             * @va:            virtual linear address,starting from PAGE_OFFSET
+             * @vma:           the VMA of @dst
+             */
+            static inline void cow_user_page(struct page *dst, struct page *src, unsigned long va,
+                                             struct vm_area_struct *vma);
+
+            brief description for cow_user_page() :
+              there is a particular case that @src is NULL,in this case,function copy_user_highpage()
+              would be invoked.and which would build two temporary kernel fix mappings for @src and @dst,
+              next function copy_user_page() is called for make a copying for @src to @dst,finally,destroy
+              the two fix mappings.
+              the case @src is NULL that is unlikely,so when @src is not NULL,one kernel fix mapping was
+              established for @dst with flag KM_USER0.next,@va is converted to userspace linear address,
+              function __copy_from_user_inatomic() is called to copy the page frame starting at converted
+              @va to the kernel temporary fix mapping.if we succeed to make a copying,memset() would be called
+              to initializes the page frame.
+              finally,unmap the fix mapping and flush dcache for the page frame @dst.
+
