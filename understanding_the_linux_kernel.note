@@ -15299,16 +15299,16 @@ Chapter 8 : Memory Management
                  a safety interval of 4kB is inserted between each noncontiguous memory areas.
 
           3GB                           Linear Addresses                                                   4GB
-          +--------------------------------------------------------------------------------------------------+
-          |                 |     |               |     |              |     |     |            |            |
-          | pysical mapping | 8MB | vmalloc areas | 4kB | vmalloc area | ... | 8kB | PKMAP_BASE | fix-mapped |
-          |                 |     |               |     |              |     |     |            |            |
-          +--------------------------------------------------------------------------------------------------+
-          |                 |     |               |                                |            +--> fix-mapping
-          |                 |     |               |                                +--> high memory page mapping
-          |                 |     |               +--> safety interval
-          |                 |     +--> noncontiguous memory area
-          |                 +--> safety interval
+          +---------------------------------------------------------------------------------------------------+
+          |                  |     |               |     |              |     |     |            |            |
+          | physical mapping | 8MB | vmalloc areas | 4kB | vmalloc area | ... | 8kB | PKMAP_BASE | fix-mapped |
+          |                  |     |               |     |              |     |     |            |            |
+          +---------------------------------------------------------------------------------------------------+
+          |                  |     |               |                                |            +--> fix-mapping
+          |                  |     |               |                                +--> high memory page mapping
+          |                  |     |               +--> safety interval
+          |                  |     +--> noncontiguous memory area
+          |                  +--> safety interval
           +--> PAGE_OFFSET
 
             macro VMALLOC_START defines the starting address of the linear space reserved for
@@ -15399,7 +15399,7 @@ Chapter 8 : Memory Management
                                                         void *caller);
 
             brief description for __get_vm_area_node() :
-              check @flags at first,if enabled VM_IOREMAP,then set local variable @bit to fls(@size).
+              check @flags at first,if enabled VM_IOREMAP,then set local variable @bit to result of fls(@size).
               then
                 @bit := @bit > IOREMAP_MAX_ORDER ? IOREMAP_MAX_ORDER : @bit < PAGE_SHIFT ? PAGE_SHIFT : @bit
                 reset @align to 1ul << @bit
@@ -15408,13 +15408,13 @@ Chapter 8 : Memory Management
               if failed,then return NULL.
               update @size to @size plus PAGE_SIZE for safety interval.
               call to alloc_vmap_area() to allocate a vmap_area,this should be the noncontiguous memory area
-              that vm_struct associated to.
+              information structure that vm_struct associated with.
               if succeed to got vmap_area,then call to insert_vmalloc_vm(),which initializes vm_struct and
               associate vmap_area with the vm_struct,chained vm_struct into @vmlist.
               finally,return the vm_struct.
-              /* if failed to got vmap_area,then kfree vm_struct and return NULL! */
+              /* if failed to get vmap_area,then kfree vm_struct and return NULL! */
 
-          structure vmap_area is used to present virtual area mapping.
+          structure vmap_area is used to represent virtual area mapping.
           <mm/vmalloc.c>
             /**
              * vmap_area - structure used to represent mapping of virtual area and linear address
@@ -17960,3 +17960,38 @@ Chapter 9 : Process Address Space
               to initializes the page frame.
               finally,unmap the fix mapping and flush dcache for the page frame @dst.
 
+      Handling Noncontiguous Memory Area Access :
+        a noncontiguous memory area is represented by a structure vm_area.
+        function get_vm_area() will construct such descriptor and insert it into @vmlist,but the Page Table
+        entries would not be updated.
+        function vmalloc() and vfree() are used to control noncontiguous memory area,they would update
+        Page Table entries,too.
+        
+        ! the master Kernel Page Tables(@init_mm.pgd) are not directly used by any process or kernel thread
+          after kernel initialization phase have ended.
+
+        the first time a process in Kernel Mode accesses a noncontiguous memory area the MMU would encountered a
+        NULL Page Table entry,thus an Exception for Page Fault will be raised.because this is occurred in Kernel
+        Mode,thus handler can recognizes this special case;and,the linear address is greater than TASK_SIZE.
+        in this case,the Page Table is @init_mm.pgd.
+        
+        ! do_page_fault() call to vmalloc_fault() to handles noncontiguous memory area access fault.
+          function vmalloc_fault() is defined in <arch/x86/mm/fault.c>.
+          /**
+           * static int vmalloc_fault(unsigned long address);
+           * return 0 OR -1,@address is the faulty linear address.
+           * brief description :
+           *   if @address is not inside noncontiguous memory area,then return -1 to caller.
+           *   get the master Kernel Page Table through pgd_offset_k(@address),that is the master Kernel Page Table
+           *   Global Directory which corresponding to @address;the master Kernel Page Table Global Directory should
+           *   not be none,if it was,return -1.
+           *   get current process's PGD,if it is none,then copy the master Kernel Page Table Global Directory to it.
+           *   # if it is not none but which is not equal to PGDK,then there is a BUG we encountered.
+           *   function continue to processing,next to look at Upper Directory and at Middle Directory until find out
+           *   such Page Table entry it corresponding @address;if Upper Directory or Middle Directory is NULL,then
+           *   return -1 to caller.
+           *   the PTE is get through pte_offset_kernel(),it is the kernel version for pte_offset().
+           *   finally,setup this PTE and return _zero_ to caller.
+           *   # if we failed on set Present on it or its pfn is not equal to the pfn in the master Kernel Page Table
+           *     Directory,that means we encountered a BUG again.
+           */
