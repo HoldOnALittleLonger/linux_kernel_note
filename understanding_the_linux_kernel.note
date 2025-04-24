@@ -17995,3 +17995,72 @@ Chapter 9 : Process Address Space
            *   # if we failed on set Present on it or its pfn is not equal to the pfn in the master Kernel Page Table
            *     Directory,that means we encountered a BUG again.
            */
+
+      Creating and Deleting a Process Address Space :
+        in Linux,six cases will cause Kernel to creates a process address space,these have been mentioned in
+        "The Process's Address Space".
+
+        Creating a Process Address Space :
+          routine copy_mm() would be called by copy_process() while creating a new process.the routine creates
+          the process address space by setting up all Page Tables and memory descriptors of the new process.
+          lightweight processes share the same address space of their creators(parents). /* CLONE_VM */
+          because COW approach,traditional processes inherit the address space of their parent,pages are shared
+          as long as they are only read;when a process attempts to write into a page frame,COW will take place
+          at there,and the page frame would be duplicated.
+
+          <kernel/fork.c>
+            /**
+             * copy_mm - copy address space
+             * @clone_flags: behavior flags
+             * @tsk:         the task that duplicated from @current process
+             * return:       0 => succeed
+             *               -ENOMEM => failed because no memory available
+             */
+            static int copy_mm(unsigned long clone_flags, struct task_struct *tsk);
+
+            !! we can not clone a kernel thread,thus if @current->mm is NULL,copy_mm()
+               will returns _zero_ to caller.
+
+            about @clone_flags :
+              CLONE_VM -> copy_mm() will increase @current's @mm_users member,then reset its
+                          @token_priority and @last_interval of @mm member to _zero_,next,
+                          assign @current's @mm to @tsk's @mm and @active_mm,that is shares
+                          address space.
+              !CLONE_VM -> copy_mm() will attempts to duplicate address space for @tsk,reset
+                           duplicated @mm's @token_priority and @last_interval to _zero_,
+                           finally,assign duplicated @mm to @tsk's @mm and @active_mm.
+                           /**
+                            * duplicating memory descriptor is done through dup_mm() routine,
+                            * which will allocate a new memory descriptor and use @current's
+                            * @mm to initialize it.
+                            * if failed to allocating memory descriptor,function will returns
+                            * -ENOMEM.
+                            */
+
+                           !! dup_mm() will call to
+                                mm_init() -> initializes the address space of @tsk,and,a Page Global
+                                             Directory for the new process @tsk will be created
+                                init_new_context() -> architecture-dependent routine init_new_context()
+                                                      is used to make a copy of customized LDT for @tsk
+                                                      if @current has one
+                                dup_mm_exe_file() -> duplicate executing file for @tsk,that is child
+                                                     process will start running right after fork() calling.
+                                dup_mmap() -> duplicate both the memory regions and the Page Tables of @current
+                                              for @tsk.this routine inserts the new memory descriptor @tsk->mm
+                                              in a global list of memory descriptor,then scans the list of regions
+                                              owned by @current,starting from @current->mm->mmap,each encountered
+                                              struct vm_area_struct object would be inserted into red-black tree
+                                              of @tsk.
+                                              right after each inserting of memory regions,routine copy_page_range()
+                                              is called by dup_mmap().if necessary,the routine will create the Page
+                                              Tables needed to map the group of pages included in the memory region
+                                              and to initialize the new Page Table Entries.
+
+              !! each page frame corresponding to a private,writable page(VM_SHARED 0,VM_MAYWRITE 1)
+                 is marked as read-only for both the parent and the child,thus the Page Fault Exception
+                 caused by write into a page frame is read-only marked can be handled by
+                 COW mechanism.
+
+                              
+                                
+
