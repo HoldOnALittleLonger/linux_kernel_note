@@ -1781,9 +1781,11 @@ Chapter 3 : Processes
          *    struct fs_struct *fs;
          *    struct files_struct *files;
          *    struct signal_struct *signal;
+         *    struct completion *vfork_done;
          *
          *    # @mm: memory descriptor owned by the process
          *      @active_mm: memory descriptor used by the process when it is in execution
+         *      @vfork_done: completion object for vfork() system call
          */
         !!  the routine task_lock() lock up task_struct.@alloc_lock,task_unlock() does the reverse.
                                                         /* concurrent protection of mm */
@@ -18060,6 +18062,52 @@ Chapter 9 : Process Address Space
                  is marked as read-only for both the parent and the child,thus the Page Fault Exception
                  caused by write into a page frame is read-only marked can be handled by
                  COW mechanism.
+
+        Deleting a Process Address Space :
+          routine exit_mm() will be called while a process terminating,which release the address space owned by 
+          this process.
+
+          <kernel/exit.c>
+            /**
+             * exit_mm - release address space owned by the process
+             * @tsk:     the process
+             * # this routine will turn us into a lazy TLB process if
+             *   we are not already
+             */
+            static void exit_mm(struct task_struct *tsk);
+
+            brief description for exit_mm() :
+              routine mm_release() would be called by exit_mm() on @tsk and @tsk's @mm.
+              mm_release() will wake up all processes sleeping in @tsk->vfork_done completion,too.
+              /* the wait queue is not empty,if this exiting process is created by means of the vfork() */
+              if @mm is NULL,that this process is a kernel thread,then just returns to caller as well.
+              if @tsk->mm->core_state is not NULL,then exit_mm() have to finish coredump,but before the checking,
+              @mmap_sem must been acquired.
+              /**
+               * exit_mm() have to serialize any possible pending coredump,that is serialize any lightweight
+               * process which is sharing memory address space with this process and attempts to create core file.
+               * follow this way,it could avoid corruption in the core file.
+               */
+              next,increase memory usage counter @tsk->mm->mm_count.
+              before reset @tsk->mm to NULL,have to check @mm and @active_mm at first.if they are not same,that
+              is a kernel BUG.
+              then,exit_mm() acquires task lock on @tsk,reset its @mm to NULL,release @mmap_sem,and put the
+              processor that executing exit_mm() in lazy TLB mode,thus the Page Table entries would not be
+              flushed immediately.
+              proceed call to clear_freeze_flag() on @tsk,this routine would clear TIF_FREEZE flag,and next,
+              release task lock,call to mm_update_next_owner() try to find out a process which needs this
+              memory descriptor(adpot this address space);if unfound,set @mm's owner to NULL.
+              /**
+               * traverse all siblings,if any one is sharing this @mm,then set the owner of @mm to it.
+               */
+              finally,call to mmput() on @mm,which will release the LDT,the vm_area_struct objects,and the
+              Page Table entries.
+              /* because the processor in lazy TLB,thus the cache stay effect */
+
+              !! @mm WOULD NOT BE DESTROYED NOW BECAUSE ITS USAGE COUNTER HAVE BEEN INCREASED.
+                 @mm WOULD BE DESTROYED BY THE finish_task_switch() WHEN THE PROCESS BEING TERMINATED
+                 WILL BE EFFECTIVELY REMOVED FROM THE LOCAL CPU.
+
 
                               
                                 
