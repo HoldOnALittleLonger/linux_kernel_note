@@ -16068,7 +16068,7 @@ Chapter 9 : Process Address Space
           };
 
       ! Memory regions owned by a process never overlap.
-        kernel attempt to merge memory regions when a new one is allocated right next to an existed
+        kernel attempts to merge memory regions when a new one is allocated right next to an existed
         one.(but the access rights of memory regions must be the same!)
         # MR1 => existed, MRnew => new allocated, MRnew.vm_start == MR1.vm_end => MRa := MR1 + MRnew
           /* MR1.vm_page_prot == MRnew.vm_page_prot */
@@ -18108,6 +18108,105 @@ Chapter 9 : Process Address Space
                  @mm WOULD BE DESTROYED BY THE finish_task_switch() WHEN THE PROCESS BEING TERMINATED
                  WILL BE EFFECTIVELY REMOVED FROM THE LOCAL CPU.
 
+      Managing the Heap :
+
+        sections layout described by Linux ld : <arch/x86/kernel/vmlinux.lds.S>
+          SECTIONS
+          {
+                  # if the program is not Linux Kernel
+                    there would be ". = START"
+                  . = __START_KERNEL /* x86_64 */
+                  ...
+                  text section {
+                          _text = .
+                          ...
+                          _stext = .
+                          ...
+                          _etext = .
+                  }
+                  data section {
+                          _sdata = .
+                          ...
+                          _edata = .
+                  }
+                  bss section {
+                          __bss_start = .
+                          ...
+                          __bss_stop = .
+                  }
+                  program break {
+                          __brk_base = .
+                          ...
+                          __brk_limit = .
+                  }
+                  _end = .
+          }
+          /* each program are linked and executing on Linux follow this memory layout */
+          
+        <arch/x86/kernel/setup.c> :
+          _brk_end := __brk_base
+
+          init_mm.start_code = _text
+          init_mm.end_code = _etext
+          init_mm.end_data = _edata
+          init_mm.brk = _brk_end
+
+          ! all other process are forked by init process,thus they would inherit the memory address space
+            from init process.
+          ! now we can know that how a C program's brk and start brk are arranged in memory
+              [ text | data | bss | brk-end | ... | brk-start | ... unmapped ... | ESP | ... | stack-start ]
+
+
+        @start_brk and @brk members inside memory descriptor are used to delimit the starting and ending
+        addresses,respectively,of the heap region.
+        C library functions malloc(),calloc(),realloc(),free() are used to control dynamically allocating memory
+        area.
+        system call brk() is used to modifies the size of the heap directly,it receive a parameter is a
+        linear address,which would be the new value of @current->mm->brk.
+        /* program break -> the end of the process's data segment */
+        system call sbrk() is used to increase heap region.
+        /**
+         * on Linux,sbrk() is implemented as a library function which uses brk() system call
+         * malloc(),calloc(),realloc(),free() are implemented through brk() or mmap()
+         * realloc() can also make use of the mremap() system call
+         */
+        ! new brk < old brk => reduce length of data segment,grow size of heap region */
+          
+        <mm/mmap.c>
+          /**
+           * sys_brk - Linux system call brk()
+           * @brk:     new brk which is an linear address
+           * return:   @current's @brk
+           */
+          SYSCALL_DEFINE1(brk, unsigned long, brk);
+          => long int sys_brk(unsigned long brk);
+          
+          brief description for sys_brk() :
+            first,this routine have to checks whether @brk falls inside the program code segment,if it is,
+            then should not setup new brk,so it have to returns to caller.
+            next,check process resource limits,if @brk exceeded resource limit,then should not setup new brk.
+            proceed executing,PAGE_SIZE align the new brk and the old brk,if they are same,then we do not need
+            to setup new brk,just returns;if @brk less than or equal to @current->mm->brk,then have to unmap
+            the memory region starting from aligned new brk with the length "aligned old brk - aligned new brk",
+            if we failed to unmap the memory region,then we should not setup new brk.
+            the last checking is find_vma_intersection() to see if there is a memory region existing which overlaps
+            the memory region starting from aligned old brk with the length "aligned new brk + PAGE_SIZE",
+            if such memory region is existing,then we can not setup new brk.
+            /* the memory mapping have spanned the old brk and the new brk */
+            finally,call to do_brk(),if it returned the aligned old brk,that means we failed to setup new brk.
+            /**
+             * if we succeed on do_brk()(returned the aligned old brk),there would be a new VMA created through
+             * kmem_cache_zalloc(),and its @vm_start is equal to aligned old brk,its @vm_end is equal to
+             *   "aligend old brk + aligned new brk - aligned old brk"
+             * ! do_brk() will attempts to find out a VMA overlaps aligned old brk through find_vma_prepare(),
+             *   if there is a VMA existing at aligned old brk,then have to unmap it at first;next try to
+             *   expand the previous memory region for the aligned old brk,if failed,then create a new VMA right
+             *   starting at aligned old brk.
+             * # re-arrange the memory region which corresponding to the aligned old brk before setup new brk.
+             * # the size to unmap is equal to "aligned new brk - aligned old brk".
+             * # do_brk() routine is actually a simplified version of do_mmap() that handles only anonymous
+             *   memory regions.(it assuming that the memory region does not map a file on disk)
+             */
 
                               
                                 
