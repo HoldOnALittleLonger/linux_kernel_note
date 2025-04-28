@@ -18208,6 +18208,37 @@ Chapter 9 : Process Address Space
              *   memory regions.(it assuming that the memory region does not map a file on disk)
              */
 
-                              
+
+Chapter 10 : System Calls
+    POSIX APIs and System Calls :
+      difference between an application programmer interface(API) and a system call >
+        API => a function definition that specifies how to obtain a given service.
+        System Call => an explicit request to the kernel made via a software interrupt.
+
+      common APIs on Unix-like system >
+        libc - standard C library,which refer to wrapper routines
+               usually,each system call has a corresponding wrapper routine whose
+               only purpose is to issue a system call,and programmers should to employ
+               this routine for obtain the system service(if who wants the application is portable)
+               # an API does not necessarily correspond to a specific system call
+                 it can offer its services directly in User Mode withou system call
+               # a single API function could make several system call
+                 several API functions could make the same system call
+
+      POSIX standard >
+        it refers to APIs and not to system calls.
+        A system can be certified as POSIX-compliant,if it offers the proper set of
+        APIs to the application programs,no matter how the corresponding functions are
+        implemented.
+
+      error code >
+        each system call retunrs negative value as the error code to indicates what kind of failure
+        has encountered.
+        the header <arch/x86/include/asm/errno.h> defined these error code as macro constants.
+                                                          /* they are defined in positive value */
+        in Linux 2.6.34.1,the header includes <include/asm-generic/errno.h>,and which includes
+        <include/asm-generic/errno-base.h>.
+        a header <errno.h> of a C library usually includes the Linux <asm-generic/errno.h> header.
+        follow such way to allow portability of C programs among Unix / Unix-like systems.
                                 
 
