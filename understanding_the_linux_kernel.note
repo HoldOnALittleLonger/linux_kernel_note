@@ -18240,5 +18240,65 @@ Chapter 10 : System Calls
         <include/asm-generic/errno-base.h>.
         a header <errno.h> of a C library usually includes the Linux <asm-generic/errno.h> header.
         follow such way to allow portability of C programs among Unix / Unix-like systems.
-                                
 
+    System Call Handler and Service Routines :
+      when a User Mode process wants a system call,the CPU must switch to Kernel Mode,and start
+      the execution of a kernel function.there are two ways for switch to Kernel Mode only;the
+      first is executing the "int $0x80" assembly language instruction,the second is executing the
+      "sysenter" assembly language(for x86_64,it is "syscall").both of them are jump to an assembly
+      language function called the "system call handler".
+      /**
+       * 0x80 => 128 => Kernel Exception number 128 => associated with a System Gate
+       */
+
+      System Call Number :
+        passed by User Mode process to Kernel to indicates what system call it wants,this is 
+        mandatory because kernel have been implemented a lot of system-calls,thus we must tell
+        kernel what system call should to be called.
+        the system call number(NR_xyz) is used to retrieve the extra system call function address from
+        system call table(@sys_call_table,an array contains NR_syscalls entries/* void pointer */).
+        on x86_64,follow the ABI specification,register RAX is used to save the system call number.
+        /**
+         * NR_syscalls is a macro constant which just a static limit on the maximum number of
+         * implementable system calls,it does not indicate the number of system calls actually
+         * implemented by Kernel.
+         * !! function sys_ni_syscall() means "nonimplemented" system call,it is a nop function usually,
+         *    and it just returns error code -ENOSYS.
+         */
+
+      Return Value :
+        system call returns a integer value,the conventions for these return values are different
+        from those for wrapper routine.Linux Kernel use 0 or positive values denote a successful
+        termination of the system call,while negative values denote an error condition,and the 
+        negative value is the negation of error code which is used to describe what kind of error
+        have been encountered.
+        /**
+         * wrapper routines may not returns the error code directly to caller(the userspace program),
+         * global variable @errno is used to saves the error code for further description.
+         */
+
+      System Call Handler :
+        system call handler has a structure similar to that of the other exception handlers.
+        
+        behaviors the system call handler will takes(in usual case) :
+          > saves the contents of most registers in the Kernel Mode stack
+            /* this behavior also be taken by interrupt handler */
+          > handles the system call by invoking a corresponding C function called system call
+            service routine
+            /* sys_xyz(),such functions are defined by macro SYSCALL_DEFINEx() */
+          > exits from the handler :
+              loads the register contents saved in Kernel Mode stack previously
+              CPU switch back to User Mode
+
+        e.g.
+          invoking flow scheme :
+            
+            User Mode process => Wrapper Routine => "int $0x80" OR "syscall" => ... =>
+            Linux Exception Handler 128 => ... => Call to sys_call_table[System Call Number] =>
+            ... => Ready to exit system call => ... => CPU switch back to User Mode =>
+            User Mode process continues executing => ...
+            /**
+             * Yes,it would be interrupted at a moment until system call accomplished,
+             * but in some cases,this User Mode process would enter TASK_INTERRUPTIBLE or 
+             * TASK_UNINTERRUPTIBLE if the resource is not available now.
+             */
