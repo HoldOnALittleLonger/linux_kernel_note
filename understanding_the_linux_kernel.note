@@ -3948,6 +3948,12 @@ Chapter 4 : Interrupts and Exceptions
               47 : P
               [48, 63] : OFFSET(16--31)
 
+        /**
+         * bits 32--34 represents an offset into the IST,Interrupt Stack Table which is
+         * stored in Task State Segment.
+         * if all three bits are set to _zero_,the Interrupt Stack Table is not used
+         */
+
         #  In particular,the value of the Type field encoded in the bits 40-43 identifies the descriptor type.
         #  Linux use interrupt gate to handle interrupts,and use trap gate to handle exceptions.
 
@@ -18302,3 +18308,49 @@ Chapter 10 : System Calls
              * but in some cases,this User Mode process would enter TASK_INTERRUPTIBLE or 
              * TASK_UNINTERRUPTIBLE if the resource is not available now.
              */
+
+    Entering and Exiting a System Call :
+      native applications can invoke a system call in two different ways >
+        1> int $0x80
+        2> sysenter
+      kernel can exit from a system call -- switching CPU back to User Mode >
+        1> iret
+        2> sysexit /* introduced in Intel Pentium II microprocessors together with "sysenter" */
+
+      Kernel must supports these two ways to allows application is able to enter the kernel!
+        > Kernel must supports both older libraries that only use "int $0x80" and more recent
+          ones that also use "sysenter".
+        > a standard library that makes use of "sysenter" must be able to cope with older kernels
+          that support only "int $0x80".
+        > Kernel and the standard library must be able to run both on older processors that do
+          not include "sysenter" and on more recent ones that include it.
+        /* these are compatiblity problems */
+
+      Issuing a System Call via "int $0x80" instruction :
+        the "traditional" way to invoke a system call makes use of the "int" assembly language
+        instruction.
+        interrupt vector 128--0x80 is associated with the kernel entry point,it was setup by 
+        trap_init() during kernel initialization.
+        macro constant SYSCALL_VECTOR(0x80) is defined in <arch/x86/include/asm/irq_vectors.h>,
+        and kernel routine trap_init() use it to setup a System Gate,and associated function
+        system_call() with the it.
+          "set_system_trap_gate(SYSCALL_VECTOR, &system_call);"
+
+        <arch/x86/include/asm/desc.h>
+          /**
+           * _set_gate - write an entry into IDT at a specified gate
+           * @gate:      interrupt vector as index for IDT
+           * @type:      type of the gate
+           * @addr:      entry point,corresponding to OFFSET field in gate descriptor
+           * @dpl:       DPL
+           * @ist:       Interrupt Stack Table
+           * @set:       Segment Selector
+           */
+          static inline void _set_gate(int gate, unsigned type, void *addr, unsigned dpl,
+                                       unsigned ist, unsigned seg);
+
+        function trap_init() setup 0x80 by set_system_trap_gate(),and it just a wrapper
+        call to _set_gate() with arguments (@n, GATE_TRAP, @addr, 0, 0, __KERNEL_CS).
+        /**
+         * GATE_TRAP => gate is trap,the corresponding handler does not disable maskable interrupts
+         */
