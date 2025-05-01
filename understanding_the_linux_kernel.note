@@ -5987,9 +5987,10 @@ Chapter 4 : Interrupts and Exceptions
                           goto need_resched
           restore_all:
                   restore hardware context
+                  /* finally,enter "irq_return" */
           resume_userspace:
                   cli
-                  if <is there work to be done(rescheduling,signals,single step)?>
+                  if <is there some works have to be done(rescheduling,signals,single step)?>
                           goto work_pending
                   goto  restore_all
           work_pending:
@@ -18354,3 +18355,76 @@ Chapter 10 : System Calls
         /**
          * GATE_TRAP => gate is trap,the corresponding handler does not disable maskable interrupts
          */
+
+        The system_call() function :
+          the function system_call() is defined in assembly language as an entry point,the 32bit version
+          is defined in <arch/x86/kernel/entry_32.S>,and the 64bit version is defined in
+          <arch/x86/kernel/entry_64.S>.
+
+          <arch/x86/kernel/entry_64.S>
+            ENTRY(system_call)
+                    ... # this code segment does swap gs register
+            ENTRY(system_call_after_swapgs)
+                    ...
+                    /**
+                     * this code segment does the following works :
+                     *   1> save RSP in a per-CPU variable named @old_rsp
+                     *   2> switch current stack to the Kernel Mode stack,
+                     *      which is stored in a per-CPU variable named @kernel_stack
+                     *   3> enable interrupt
+                     *      # CPU control unit will disable it before call to interrupt handler
+                     *   4> save arguments
+                     *   5> get thread info in RCX,and checks whether the system call invocations of
+                     *      executed program are being traced by a debugger,if it is,then jump to
+                     *      "tracesys" symbol
+                     *   6> enter "system_call_fastpath"
+                     */
+            system_call_fastpath:
+                    cmpq $__NR_syscall_max,%rax # can not exceed maximum limit
+                    ja badsys                   # badsys:
+                                                #   saves -ENOSYS on the stack position where corresponding
+                                                #   to RAX register
+                                                #   RAX-ARGOFFSET => 80 - 48 -> OFFSET OF RAX from stack top
+                                                #                    RAX  R11
+                                                #   next,jump to "ret_from_sys_call"
+                    movq %r10,%rcx              # x86_64 system call ABI specification
+                    call *sys_call_table(,%rax,8) # call to extra sys_xyz() handler /* segment jump */
+                    movq %rax,RAX-ARGOFFSET(%rsp) # store return value from the sys_xyz() handler to stack
+            ret_from_sys_call:
+                    movl $_TIF_ALLWORK_MASK,%edi # flag _TIF_ALLWORK_MASK used to indicates 
+                                                 # work to do on any return to user space
+            sysret_check:
+                    ...             # "sysret_check" will checks _TIF_ALLWORK_MASK(edi) if enabled in
+                                    # struct thread_info @flags field(rcx),but before checking,it have to disable
+                                    # local interrupt at first
+                                    # if there is really some works have to be done before return to user space,
+                                    # then jump to "sysret_careful"
+                    USERGS_SYSRET64 # macro defined in <arch/x86/include/asm/irqflags.h>
+                                    # expanded to "swapgs; sysretq;"
+                                    # if current platform support to "sysret",then select this path
+                                    # "sysret" will re-enable local interrupt
+                                    # "sysret" is fast system call returning.if there would be some works have to
+                                    # be done by "sysret_careful",then which finally end up at "irq_return"
+                    ...
+            sysret_careful:
+                    ...  # if TIF_NEED_RESCHED,then TRACE_IRQS_ON and enable local interrupt,call to schedule
+                         # after resumed from scheduling,jump to "sysret_check" to prepare exit system call
+                         # if no TIF_NEED_RESCHED,then jump to "sysret_signal"
+            sysret_signal:
+                    ...  # TRACE_IRQS_ON,enable local interrupt
+                         # if defined CONFIG_AUDITSYSCALL and TIF_SYSCALL_AUDIT is enabled,then jump to
+                           "sysret_audit"
+                         # otherwise,FIXUP_TOP_OF_STACK,and jump to "int_check_syscall_exit_work"
+            ...
+                    jmp int_check_syscall_exit_work
+            ...
+            irq_return:
+                    INTERRUPT_RETURN  # iretq => macro defined in <arch/x86/include/asm/irqflags.h>
+                                      # if current platform support to "iret" only,then select this path
+                    ...
+
+          !! an interrupt always be handled by "common_interrupt"(IDT descriptor) at first,next is do_IRQ(),
+             thus function system_call() is invoked by do_IRQ().so,returning from system call will return to
+             the caller that is do_IRQ(),finally,"common_interrupt" return to user space via "ret_from_intr".
+          !! THINGS ARE SIMPLY,ASSEMBLY LANGUAGE INSTRUCTIONS "syscall","sysret","int","iret" DO NOT RETURN
+             TO THE USERSPACE IMMEDIATELY,THEY RETURN TO THE CALLER BY RESTORE RIP/EIP REGISTER.
