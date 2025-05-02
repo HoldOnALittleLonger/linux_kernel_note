@@ -2654,10 +2654,10 @@ Chapter 3 : Processes
          */
 
         TSSDs stored in GDT,whose base address is stored in the gdtr register of each CPU.
-          the tr register of each CPU contains the TSSD Selector of the corresponding TSS.
+          the gdtr register of each CPU contains the TSSD Selector of the corresponding TSS.
           the register also includes two hidden,nonprogrammable fields :
-          the Base field of the TSSD
-          the Limit field of the TSSD
+            the Base field of the TSSD
+            the Limit field of the TSSD
       
       The thread field :
         at every process switch,the hardware context of the process being replaced must be saved in
@@ -18428,3 +18428,102 @@ Chapter 10 : System Calls
              the caller that is do_IRQ(),finally,"common_interrupt" return to user space via "ret_from_intr".
           !! THINGS ARE SIMPLY,ASSEMBLY LANGUAGE INSTRUCTIONS "syscall","sysret","int","iret" DO NOT RETURN
              TO THE USERSPACE IMMEDIATELY,THEY RETURN TO THE CALLER BY RESTORE RIP/EIP REGISTER.
+
+      Issuing a System Call via "sysenter" instruction :
+        assembly language instruction "sysenter" is more fast than "int $0x80",because "int $0x80" must to
+        finish several consistency and security checks.
+        "sysenter" => fast system call
+
+        The "sysenter" instruction :
+          it makes use of three special registers that must be loaded with the following informations >
+            1> SYSENTER_CS_MSR
+               the segment selector of the kernel code segment
+            2> SYSENTER_EIP_MSR
+               the linear address of the kernel entry point
+            3> SYSENTER_ESP_MSR
+               the kernel stack pointer
+            /* "MSR" => an acronym for "Model-Specific Register" */
+
+          CPU control unit would does the following things when "sysenter" is executed :
+            1> copies the content of SYSENTER_CS_MSR into cs
+            2> copies the content of SYSENTER_EIP_MSR into eip
+            3> copies the content of SYSENTER_ESP_MSR into esp
+            4> adds 8 to the value of SYSENTER_CS_MSR,and loads this value into ss
+            /* after accomplished these,the code of kernel entry point would be executed */
+            /* 4> SYSENTER_CS_MSR + 8 => Kernel Data Segment Descriptor in GDT */
+
+          function enable_sep_cpu() is used to initializes MSRs.
+          <arch/x86/vdso/vdso32-setup.c>
+            /**
+             * enable_sep_cpu - initializes MSRs for later "sysenter" instruction
+             * # if boot_cpu_has(X86_FEATURE_SEP) returns FALSE,then this function does nothing
+             * # SEP => SYSENTER/SYSEXIT present
+             */
+            void enable_sep_cpu(void);
+
+            brief description for enable_sep_cpu() :
+              each CPU on the system would processes this function once during initialization.
+              if boot_cpu_has(X86_FEATURE_SEP) returned TRUE,that is SYSENTER/SYSEXIT presented,
+              then setup
+                      tss->x86_tss.ss1 = __KERNEL_CS
+                      tss->x86_tss.sp1 = sizeof(struct tss_struct) + (unsigned long)tss
+                      /**
+                       * computes the linear address of the end of the local TSS
+                       */
+                      MSR_IA32_SYSENTER_CS := __KERNEL_CS
+                      MSR_IA32_SYSENTER_ESP := tss->x86_tss.sp1
+                      /* the register should point to a real stack */
+                      MSR_IA32_SYSENTER_EIP := (unsigned long) ia32_sysenter_target
+                                               /* sysenter entry point */
+
+              When a system call starts,the kernel stack is empty,thus the esp register should
+              point to the end of the 4- or 8-KB memory area.([thread_info, kernel mode stack])
+              wrapper routine can not set this register properly because it does not know the
+              address of this memory area.
+
+        The vsyscall page :
+          libc wrapper routine can make use of the "sysenter" instruction only if both the CPU and
+          the Linux Kernel support it.
+          function sysenter_setup() is used to build a page frame called vsyscall page during
+          system initialization.the page frame containing a small ELF shared object,when a process
+          issue a system call,the ELF would be linked into its address space automatically,the
+          code in the vsyscall page makes use of the best avaiable instruction to issue the
+          system call.
+
+          <arch/x86/vdso/vdso32-setup.c>
+            /**
+             * sysenter_setup - setup a vsyscall page frame for further system call
+             * return:          always return _zero_             
+             */
+            int __init sysenter_setup(void);
+
+            brief description for sysenter_setup() :
+              this function attempts to get a zeroed page frame with GFP_ATOMIC flag.
+              get the page frame descriptor via virt_to_page(),and use the descriptor to
+              set @vdso32_pages[0] element,construct a reference.
+              next,select the best system call method follow the order
+                syscall > sysenter > int80
+                /* vdso32_syscall_start(), vdso32_sysenter_start(), vdso32_int80_start() */
+              the code contents of the system call method would be written into vsyscall
+              page frame through memcpy().
+              relocate vdso and return _zero_.
+              /**
+               * global symbols vdso32_syscall_start,vdso32_sysenter_start,vdso32_int80_start
+               * are introduced in <arch/x86/vdso/vdso32.S>
+               * in the file vdso32.S,GAS direct ".incbin" is used to include dynamic library files,
+               * and the files are
+               *   vdso32-int80.so
+               *   vdso32-syscall.so
+               *   vdso32-sysenter.so
+               * the corresponding assembly file is under the directory "arch/x86/vdso/vdso32".
+               */
+
+          if the libc wrapper routine wants to issue a system call,it can call to "__kernel_vsyscall".
+          the symbol is defined in files int80.S,syscall.S,sysenter.S.because the vsyscall page frame
+          have initialized by sysenter_setup() with the best system call method,the wrapper can make
+          use the best method in simply call to the symbol "__kernel_vsyscall" as well.
+
+          !! IN THE OLD VERSION OF KERNEL,NO vsyscall page frame IS BUILT,THUS "__kernel_vsyscall"
+             DOES NOT EXIST,THE libc WRAPPER MUST USE OF ASSEMBLY LANGUAGE INSTRUCTION "int $0x80" TO
+             ISSUE A SYSTEM CALL.
+              
