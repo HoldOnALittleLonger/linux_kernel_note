@@ -18522,8 +18522,142 @@ Chapter 10 : System Calls
           the symbol is defined in files int80.S,syscall.S,sysenter.S.because the vsyscall page frame
           have initialized by sysenter_setup() with the best system call method,the wrapper can make
           use the best method in simply call to the symbol "__kernel_vsyscall" as well.
+          /**
+           * assembly code segment of __kernel_vsyscall for "sysenter" :
+           *   __kernel_vsyscall:
+           *         push %ecx
+           *         push %edx
+           *         push %ebp
+           *   .Lenter_kernel:
+           *         movl %esp,%ebp
+           *         sysenter
+           *         .space 7,0x90
+           *         jmp .Lenter_kernel
+           *   VDSO32_SYSENTER_RETURN:
+           *         pop %ebp   # these registers have been stored in User Mode stack previously
+           *         pop %edx
+           *         pop %ecx
+           *         ret
+           */
 
           !! IN THE OLD VERSION OF KERNEL,NO vsyscall page frame IS BUILT,THUS "__kernel_vsyscall"
              DOES NOT EXIST,THE libc WRAPPER MUST USE OF ASSEMBLY LANGUAGE INSTRUCTION "int $0x80" TO
              ISSUE A SYSTEM CALL.
+
+        Entering the system call :
+          MSR_IA32_SYSENTER_EIP is set to ia32_sysenter_target(),the function is written by assembly
+          language which is introduced in <arch/x86/kernel/entry_32.S>.
+
+          <arch/x86/kernel/entry_32.S>
+            /**
+             * ia32_sysenter_target - Interl 32bit architecture system call function for sysenter
+             * # this function is similar to system_call() assembly function
+             */
+            ENTRY(ia32_sysenter_target)
+                    movl TSS_sysenter_sp0(%esp),%esp # esp stored TSS pointer previously
+                                                     # this statement setup kernel stack pointer
+                                                     # of current process
+            sysenter_past_esp:
+                    push USER DATA SEGMENT
+                    push ebp register                # at there,the content of ebp register is
+                                                     # is the content of esp that set by
+                                                     # __kernel_vsyscall(),that is User Mode
+                                                     # stack pointer
+                    push eflag register
+                    orl $X86_EFLAGS_IF,(%esp)
+                    push USER CODE SEGMENT
+                    /**
+                     * push current_thread_info()->sysenter_return to the stack
+                     * a tiny bit of offset fixup is necessary
+                     *   4 * 4 -> 4 words pushed above
+                     *   + 8 -> corresponds to copy_thread's esp0 setting
+                     */
+                    push TI_sysenter_return-THREAD_SIZE+8+4*4)(%esp)
+                    push eax register   # system call number
+                    SAVE_ALL
+                    ENABLE_INTERRUPTS(CLBR_NONE) # enable local interrupt during system call
+                    /**
+                     * load the potential sixth argument from user stack
+                     */
+                    cmpl $__PAGE_OFFSET-3,%ebp # __PAGE_OFFSET => 0xc0000000
+                                               # ebp => User Mode stack pointer
+                    jae syscall_fault
+                    /**
+                     * assembly function :
+                     *   "enter" => pushl %ebp
+                     *              movl %esp,%ebp
+                     *   "leave" => movl %ebp,%esp
+                     *              popl %ebp
+                     * EBP => current user stack pointer 
+                     * __kernel_vsyscall() saved ebp on the User Mode Stack before
+                     * process "sysenter" instruction
+                     */
+            1:      movl (%ebp),%ebp
+                    movl %ebp,PT_EBP(%esp)
+                    GET_THREAD_INFO(%ebp)
+                    testl $_TIF_WORK_SYSCALL_ENTRY,TI_flags(%ebp)
+                    jnz sysenter_audit
+            sysenter_do_call:
+                    compares system call number in eax with @nr_syscalls
+                    jump to syscall_badsys if exceeded maximum limit
+                    call *sys_call_table(,%eax,4)
+                    movl %eax,PT_EAX(%esp) # save system call return value
+                    LOCKDEP_SYS_EXIT
+                    DISABLE_INTERRUPTS(CLBR_ANY)    # before switch back to User Mode
+                                                    # have to check thread_info flags at first,
+                                                    # if there remains some works have to be done,
+                                                    # must deal with them at first
+                                                    # must disable local interrupt during checking
+                                                    # "sysexit_audit" will enable local interrupt
+                                                    # later
+                    TRACE_IRQS_OFF
+                    movl TI_flags(%ebp),%ecx
+                    testl $_TIF_ALLWORK_MASK,%ecx
+                    jne sysexit_audit
+            sysenter_exit:
+                    ...
+
+        Exiting from the system call :
+          a symbol named "sysenter_exit" is existing in assembly function ia32_sysenter_target(),
+          when a system call is terminated,the return value would be stored in eax,and processor
+          continue to execute the code segment of "sysenter_exit".
+
+          <arch/x86/kernel/entry_32.S>
+            ENTRY(ia32_sysenter_target)
+                    ...
+            sysenter_exit:
+                    movl PT_EIP(%esp),%edx      # restore return point in edx
+                                                # the pointer is point to
+                                                # current_thread_info()->sysenter_return
+                                                # which have been stored on Kernel Mode stack
+                                                # by "sysenter_past_esp",and @sysenter_return
+                                                # usually is the symbol VDSO32_SYSENTER_RETURN
+                    movl PT_OLDESP(%esp),%ecx   # restore the old esp in ecx
+                    xorl %ebp,%ebp
+                    TRACE_IRQS_ON
+            1:      mov PT_FS(%esp),%fs         
+                    PTGS_TO_GS
+                    ENABLE_INTERRUPTS_SYSEXIT # aka "sti; sysexit"
+            /**
+             * system call return value have been stored in Kernel Mode stack by
+             * "sysenter_do_call" via "movl %eax,PT_EAX(%esp)"
+             * if there remains some works have to be done,that would be handled by
+             * "work_pending".
+             */
+
+        The sysexit instruction :
+          sysexit is the companion of sysenter,it allows a fast switch from Kernel Mode to User Mode.
+          CPU control unit does these when sysexit is executed :
+            1> SYSENTER_CS_MSR += 16
+               mov SYSENTER_CS_MSR,%cs # restore user code segment
+            2> movl %edx,%eip          # VDSO32_SYSENTER_RETURN
+            3> SYSENTER_CS_MSR += 24   # restore user stack segment
+               mov SYSENTER_CS_MSR,%ss
+                                       # have to understand that,register esp
+                                       # is stack pointer,which always point to the
+                                       # top of stack
+            4> movl %ecx,%esp
+            
+
+          
               
