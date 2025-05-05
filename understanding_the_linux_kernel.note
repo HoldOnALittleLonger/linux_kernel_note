@@ -4787,7 +4787,7 @@ Chapter 4 : Interrupts and Exceptions
           SAVE_ALL :
             an assembly language macro.
 
-            saves the contents of all registers that the interrupt handler maybe use into stack.
+            saves the contents of all registers that the interrupt handler maybe use on the Kernel Mode stack.
 
             movl $(__USER_DS),%edx  #  user data segment
             movl %edx,%ds
@@ -18657,7 +18657,76 @@ Chapter 10 : System Calls
                                        # is stack pointer,which always point to the
                                        # top of stack
             4> movl %ecx,%esp
-            
+
+    Parameter Passing :
+      On the older architecture such Intel 80386,function's arguments usually passed via active program stack,
+      either the User Mode stack or the Kernel Mode stack.
+      /**
+       * if passing via stack,the right-most argument must be push on the stack at the first
+       * the return value of a function usually stored in eax regular register
+       */
+      But on the recent architecture such x86_64(amd64),the arguments are passed via CPU registers.
+      /**
+       * User Mode Program function calling :
+       * 1   2   3   4   5  6
+       * rdi rsi rdx rcx r8 r9
+       * rax => 1st return value
+       * rdx => 2nd return value
+       * 
+       * passing or return floating arguments
+       * xmm0 - xmm1
+       * passing floating arguments
+       * xmm2 - xmm7
+       * return long double arguments
+       * st0 st1
+       */
+
+      Which registers to be used is defined by architecture ABI(Application Binary Interface).
+      /**
+       * x86_64 system call :
+       * 1   2   3   4   5  6
+       * rdi rsi rdx r10 r8 r9
+       * rax => return value
+       * all kernel system calls are not require a floating argument,in other word,no floating
+       * value is appearences in kernel.
+       */
+
+      Linux kernel would copies the arguments stored in the CPU registers on the Kernel Mode stack
+      before call to a extra system call service routine,because the latter is an ordinary C function.
+      But for passing arguments through CPU registers,there are two conditions must be satisfied :
+        1> the length of each parameter cannot exceed the length of a register(32 bits on 8086)
+           /**
+            * always true,POSIX standard,large parameters that cannot be stored in a 32-bit register
+            * must be passed by reference(such argument pointer)
+            */
+        2> the number of parameters must not exceed six,besides the system call number passed in eax,
+           because 8086 processors have a very limited number of registers
+           /**
+            * if the number of parameters have exceeded six,then an additional register is used to
+            * stores a pointer points to a memory area in the process address space that contains
+            * the parameter _values_
+            */
+
+      !! BEFORE A FUNCTION CALLING,IF SOME CPU REGISTERS WOULD BE USED DURING THE FUNCTION IS PROCESSING,
+         MUST SAVE THEIR CONTENTS ON THE STACK,AND RESTORE THEM LATER IF NECESSARY.
+         SOME REGISTERS ARE NOT REQUIRE KEEP UNCHANGED ACROSS FUNCTION CALLING.
+         /* SUCH REGISTER USUALLY IS A REGULAR REGISTER AND USED FOR FUNCTION PARAMETER PASSING,i.e. rdi,etc. */
+
+      8086 architecture kernel system call use the registers :
+        /* these informations can be found in <arch/x86/include/asm/calling.h> */
+
+        eax => system call number / 1st return value
+        ebx => 1st parameter
+        ecx => 2nd parameter
+        edx => 3rd parameter / 2nd return value
+        esi => 4th parameter
+        edi => 5th parameter
+        ebp => stack frame pointer
+               /**
+                * if more than six parameters have passed,then the remain parameters include 6th would
+                * be stored on the User Mode stack,and ebp as the stack frame pointer.
+                */
+
 
           
               
