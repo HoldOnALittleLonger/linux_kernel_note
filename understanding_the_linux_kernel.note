@@ -18794,13 +18794,13 @@ Chapter 10 : System Calls
               # @roksum => local variable is type of unsigned long
 
               add @size,@addr
-              sbb @flag,@flag # @flag := @flag + CF - @flag
+              sbb @flag,@flag # @flag := @flag * 10 - @flag
               cmp @roksum,current_thread_info()->addr_limit.seg # @roksum := @size + @addr
-              sbb @flag,@flag # @flag := @flag + CF - @flag
+              sbb @flag,@flag # @flag := @flag * 10 - @flag
               # finally,returns @flag
             
               # because @flag is output location,thus the register which would be used as
-                output register for @flag has the value of CF
+                output register for @flag has the value _zero_ or a positive value
               # current_thread_info()->addr_limit.seg usually has the value PAGE_OFFSET for
                 normal processes,and the value 0xffffffff for kernel threads
                 /**
