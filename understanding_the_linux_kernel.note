@@ -18689,6 +18689,9 @@ Chapter 10 : System Calls
        * rax => return value
        * all kernel system calls are not require a floating argument,in other word,no floating
        * value is appearences in kernel.
+       * callee-clobered : rdi rsi rdx rcx r8 r9
+       * callee-saved : rbx rbp r12 r13 r14 r15
+       * caller-saved [callee-clobered] : r10 r11
        */
 
       Linux kernel would copies the arguments stored in the CPU registers on the Kernel Mode stack
@@ -18726,6 +18729,88 @@ Chapter 10 : System Calls
                 * if more than six parameters have passed,then the remain parameters include 6th would
                 * be stored on the User Mode stack,and ebp as the stack frame pointer.
                 */
+
+        callee-clobered : eax edx ecx
+        callee-saved : ebx edi esi ebp
+
+      ! callee saved => callee should takes care of the contents of the registers if it wants to use
+                        them,caller does not care about whether the contents of them has changed
+        callee clobered => callee would uses these registers,thus the contents should be saved
+                           by caller before invocation
+        caller saved => caller should take care of the contents of the registers
+
+      Verifying the Parameters :
+        all system call parameters must be carefully checked before the kernel attempts to satisfy a
+        user request,the type of check depends both on the system call and on the specific parameter.
+
+        address checking : common to all system calls
+                           1> verify that the linear address belongs to the process address space and,
+                              if so,that the memory region including it has the proper access rights
+                              /* adopted by early Linux Kernel */
+                           2> verify just that the linear address is lower than PAGE_OFFSET
+                              /* adopted by recent Linux Kernel(include Linux 2.6.34.1) */
+                              /* necessary but not sufficient condition */
+
+        ! defer real checking until the last possible moment.
+        ! the coarse checking is actually crucial to preserve both process address spaces and the
+          kernel address space from illegal accesses.
+
+        <arch/x86/include/asm/uaccess.h>
+          /**
+           * access_ok - architecture depent accessing checking for address
+           * @type:      type of access
+           *             => VERIFY_READ || VERIFY_WRITE
+           * @addr:      user space pointer to start of block to check
+           * @size:      size of block to check
+           * return:     true => is OK
+           *             false => is definitely invalid
+           * # this macro function may sleep,it can only running within User context
+           * # depending on architecture,this function probably just checks that the
+           *   pointer is in the user space range,after calling this routine,memory
+           *   access functions may still return -EFAULT
+           */
+          #define access_ok(type, addr, size) (likely(__range_not_ok(addr, size) == 0))
+
+          /**
+           * __range_not_ok - test whether a block of memory is a valid user space address
+           * @addr:           address
+           * @size:           size of memory block
+           * return:          0 => valid
+           *                  nonzero => invalid
+           */
+          #define __range_not_ok(addr, size)
+
+          ! __range_not_ok() is equivalent to the following test :
+                    (u33)addr + (u33)size >= (u33)current->addr_limit.seg
+            /* x86_32 => 33-bit x86_64 => 65-bit */
+            /* the additional bit for carry(CF flag in eflags) */
+
+            this routine would call to __chk_usr_ptr() on @addr,the function use the compiler
+            feature to check whether @addr is a user space pointer.
+            /* do the test during compile-time */
+
+            this routine has an inline assembly piece :
+              # @flag => local variable is type of unsigned long
+              # @roksum => local variable is type of unsigned long
+
+              add @size,@addr
+              sbb @flag,@flag # @flag := @flag + CF - @flag
+              cmp @roksum,current_thread_info()->addr_limit.seg # @roksum := @size + @addr
+              sbb @flag,@flag # @flag := @flag + CF - @flag
+              # finally,returns @flag
+            
+              # because @flag is output location,thus the register which would be used as
+                output register for @flag has the value of CF
+              # current_thread_info()->addr_limit.seg usually has the value PAGE_OFFSET for
+                normal processes,and the value 0xffffffff for kernel threads
+                /**
+                 * get_fs() and set_fs() can change the field dynamically.
+                 * kernel can use them to bypass the security checks made by access_ok(),
+                 * so that it can invoke system call service routines directly passing to
+                 * them addresses in the kernel data segment.
+                 */
+
+          ! function verify_area() is similar to access_ok(),but it been obsolete.
 
 
           
