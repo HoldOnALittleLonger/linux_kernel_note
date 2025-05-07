@@ -18812,6 +18812,103 @@ Chapter 10 : System Calls
 
           ! function verify_area() is similar to access_ok(),but it been obsolete.
 
+    Accessing the Process Address Space :
+      Linux includes a set of macros that make the accessing to process address space easier.
+      
+      !! these macros can only be called in User context.      
+
+      <arch/x86/include/asm/uaccess.h>
+        /**
+         * get_user - get a variable from user space and store it in a specified position
+         * @x:        where the result to be stored
+         * @ptr:      pointer points to the data source address
+         * return:    0 => succeed
+         *            -EFAULT => failed,in this case,@x set to _zero_
+         */
+        #define get_user(x, ptr)
+
+        how get_user() works :
+          it computes the size of *@ptr at first,and then call to macro __get_user_x() to does
+          retrieving.
+          the routine supports to retrieves data from user space with size 1B,2B,4B,8B.
+
+        /**
+         * put_user - put a variable which stored in a special postion to
+         *            the user space position
+         * @x:        where the data storing
+         * @ptr:      user space position for store the data
+         * return:    0 => succeed
+         *            -EFAULT => failed
+         * # @ptr must have pointer-to-simple-variable type
+         *   @x must be assignable to the result of dereferencing @ptr
+         * # this routine is similar to get_user() and also supports 1B,2B,4B,8B data
+         */
+        #define put_user(x, ptr)
+
+      __get_user_@size() :
+        the routine iscalled by __get_user_x(),and which is called by get_user().
+        for different @size(1,2,4,8),the different __get_user_@size() will be invoked.
+        these assembly functions are defined in <arch/x86/lib/getuser.S>.
+
+        ! __get_user_x() stores @ptr in eax register
+
+        e.g.
+          ENTRY(__get_user_2)
+                  CFI_STARTPROC
+                  add $1,%_ASM_AX   # eax += 1
+                  jc bad_get_user   # CF == 1,"carry", overflow occurred "access_ok()"
+                  GET_THREAD_INFO(%_ASM_DX)
+                  cmp TI_addr_limit(%_ASM_DX),%_ASM_AX # address of memory block must is a User Mode address
+                                                       # "access_ok()"
+                  jae bad_get_user                    
+          2:      movzwl -1(%_ASM_AX),%edx # copy 2B data from the pointer eax points to to the register eax
+                  xor %eax,%eax # set eax to _zero_,means succeed
+                  ret
+                  CFI_ENDPROC
+          ENDPROC(__get_user_2)
+
+      __put_user_@size() :
+        it is similar to __get_user_@size().these routines are defined in <arch/x86/lib/putuser.S>.
+        these function would be called by __put_user_x().
+
+        ! __put_user_x() stores @x in eax,and stores @ptr in ecx.
+
+        e.g.
+          ENTRY(__put_user_2)
+                  ENTER
+                  mov TI_addr_limit(%_ASM_BX),%_ASM_BX # current_thread_info()->addr_limit
+                  sub $1,%_ASM_BX          # may be underflow
+                  cmp %_ASM_BX,%_ASM_CX    # user space address should less than 0xc000000
+                                           # and kernel thread usually has addr_limit on
+                                           # 0xffffffff
+                                           # ebx should has the value less than 0xc0000000,
+                                           # because current is user context
+                                           # if ebx underflow,then its value must be 0xffffffff
+                  jae bad_put_user
+          2:      movw %ax,(%_ASM_CX)      # move the data in eax to the position @ptr points to
+                  xor %eax,%eax
+                  exit
+          ENDPROC(__put_user_2)
+
+      another macros :
+        get_user
+        __get_user
+        put_user
+        __put_user
+        copy_from_user          -                copies a block of arbitrary size from user space
+        __copy_from_user        
+        copy_to_user            _                copies a block of arbitrary size to user space
+        __copy_to_user
+        strncpy_from_user       -                copies a null-terminated string from user space
+        __strncpy_from_user
+        strlen_user             -                returns the length of a null-terminated string in user space
+        strnlen_user
+        clear_user              -                fills a memory area in user space with _zeros_
+        __clear_user
+
+        no "__" prefixed => check validity of the linear address
+        with "__" prefixed => bypass the linear address checking
+
 
           
               
