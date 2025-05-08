@@ -3994,7 +3994,7 @@ Chapter 4 : Interrupts and Exceptions
               }
         6>  if a fault has occurred,it loads cs and eip with the logical address of the instruction that caused the 
             exception so that is can be executed agian.
-        7>  saves the contents of eflags,cs,and eip in the stack.
+        7>  saves the contents of eflags,cs,and eip on the stack.
         8>  if the exception carries a hardware error code,it saves it on the stack.
         9>  loads cs and eip,respectively,with the Segment Selector and the Offset fields of the Gate Descriptor stroed
             in the i_th entry of the IDT.these values define the logical address of the first instruction of the 
@@ -4147,7 +4147,7 @@ Chapter 4 : Interrupts and Exceptions
         control.(because Linux does not use any BIOS routine)
 
         IDT is stored in the @idt_table table,which includes 256 entries,the 6-byte @idt_descr variable stores
-        both the size of the IDT and its address and is used in the system initialization phase when the kernel
+        both the size of the IDT and its address used in the system initialization phase when the kernel
         sets up the idtr register with the lidt assembly language instruction.
 
         assembly language function setup_idt() is used to initializes @idt_table,the 256 entries are filled with
@@ -4727,7 +4727,7 @@ Chapter 4 : Interrupts and Exceptions
            *      vector=FIRST_EXTERNAL_VECTOR      #  vector = FIRST_EXTERNAL_VECTOR = 32
            *      .rept (NR_VECTORS-FIRST_EXTERNAL_VECTOR+6)/7  #  int(result) = 32
            *        .balign 32      #  position counter forwards to next address @p | 32
-           *        .rept 7         #  repeat sequence of code line beween next ".endr" 7 times
+           *        .rept 7         #  repeat sequence of code line between next ".endr" 7 times
            *          ...
            *    1:    pushl $(~vector+0x80)     #  vector number
            *          .if ((vector-FIRST_EXTERNAL_VECTOR)%7) <> 6   #  if (vector-32)%7 != 6 ?
@@ -4786,8 +4786,9 @@ Chapter 4 : Interrupts and Exceptions
                                     #      .size common_interrupt,.-common_interrupt
           SAVE_ALL :
             an assembly language macro.
-
             saves the contents of all registers that the interrupt handler maybe use on the Kernel Mode stack.
+
+            ... # save all registers' contents on Kernel Mode stack 
 
             movl $(__USER_DS),%edx  #  user data segment
             movl %edx,%ds
@@ -4799,8 +4800,8 @@ Chapter 4 : Interrupts and Exceptions
                                     #  __KERNEL_STACK_CANARY is defined in <arch/x86/include/asm/segment.h>,
                                     #  it is equal to GDT_ENTRY_STACK_CANARY * 8
 
-            !  eflags,cs,eip,ss,and esp would not be saved,which are already saved automatically by the
-               control unit.
+            !  eflags,cs,eip,ss,and esp would not be saved,they are already saved automatically by the
+               CPU control unit.
 
           after SAVE_ALL accomplished,the stack be like :
             [contents of registers]     <=  esp
@@ -18909,6 +18910,86 @@ Chapter 10 : System Calls
         no "__" prefixed => check validity of the linear address
         with "__" prefixed => bypass the linear address checking
 
+    Dynamic Address Checking - The Fix-up Code :
+      access_ok() only does coarse checking on an linear address to ensures that linear address is less than
+      PAGE_OFFSET(0xc0000000),but does not ensures that linear address whether belongs to another User Mode
+      process's address space.
+      a Page Fault Exception would be raised when kernel try to use the bad linear address.
 
-          
-              
+      four cases that Page Fault exception may occur in Kernel Mode :
+        1> the page frame does not exist or the kernel attempt to write a read-only page frame.
+           in these cases,kernel must allocates and initializes a new page frame.
+           /* page frame does not exist => allocate and initialize; read-only => Copy-On-Write */
+        2> Page Table entry has not yet been initialized.
+           kernel must properly set up some entries in the Page Tables of the current process.
+        3> kernel programming BUG.
+           transient hardware error.
+           in these cases,kernel must report an oops.
+        4> a system call service routine attempts to read or write into a memory area whose address has been
+           passed as a system call parameter,but that address does not belong to the process address space.
+                                                                                 /* @current */
+
+      The Exception Tables :
+        the key to determining the source of a Page Fault lies in the narrow range of calls that the kernel
+        uses to access the process address space.
+        only a small group of functions and macros are used to access process address space,so if the exception
+        is caused by an invalid parameter,the instruction that caused it must be included in one of the functions
+        or be generated by expanding one of the macros.
+
+        "Exception Table" => a table recorded the addresses of instructions that access to process address space.
+        when a Page Fault have been raised,do_page_fault() is able to destinguish what kind of the Page Fault
+        exception is by examine "Exception Table" with the instruction caused this exception.
+
+        ! Linux defines several exception tables.the main exception table is automatically generated by the
+          C compiler when building the kernel program image.
+
+        <arch/x86/include/asm/uaccess.h>
+          /**
+           * exception_table_entry - kernel exception table entry,the exception table consists of pairs of
+           *                         addresses,the first is the address of an instruction that is allowed to
+           *                         fault,and the second is the address at which the program should continue
+           * @insn:                  instruction that access the process address space
+           * @fixup:                 assembly language code to be invoked when a Page Fault exception triggered
+           *                         by the instruction located at @insn occurs
+           */
+          struct exception_table_entry {
+                  unsigned long insn, fixup;
+          };
+
+        section "__extable" => code segment contains the main exception table.
+
+        <kernel/extable.c> : __start___ex_table => struct exception_table_entry pointer points to the starting of
+                                                   section "__extable"
+        <kernel/extable.c> : __stop___ex_table => struct exception_table_entry pointer points to the ending of
+                                                  section "__extable"
+
+        !! EACH DYNAMICALLY LOADED MODULE OF THE KERNEL INCLUDES ITS OWN LOCAL EXCEPTION TABLE,AND THE TABLE
+           IS AUTOMATICALLY GENERATED BY THE C COMPILER WHEN BUILDING THE MODULE IMAGE,AND IT IS LOADED INTO
+           MEMORY WHEN THE MODULE IS INSERTED IN THE RUNNING KERNEL.
+
+        generally,when CPU jump to @fixup,a sequence of instructions would be processed,and forces the service
+        routine to return an error code to the User Mode process.
+        these instructions are usually defined in the same macro or function that access the process address space,
+        they are placed by the C compiler into a separate section of the kernel code segment called ".fixup".
+
+        <kernel/extable.c>
+          /**
+           * search_exception_tables - see if a given linear address  matched any one of the exception_table_entry's
+           *                           @insn field
+           * @addr:                    the linear address to matching
+           * return:                   pointer points to an object is type of struct exception_table_entry whose
+           *                           @insn matched @addr
+           *                           NULL => if unfound
+           */
+          const struct exception_table_entry *search_exception_tables(unsigned long addr);
+
+          brief description for search_exception_tables() :
+            traverse each struct exception_table_entry objects in section "__extable"([__start___ex_table, __stop___ex_table))
+            attempts to find out such object matched @addr.
+            thus do_page_fault() is able to attempts retrieve the fixup routine by call to search_exception_tables(),
+            if it succeed to find one,then @eip field of struct pt_regs will be set to the @fixup.
+            the object is type of struct pt_regs have been stored on Kernel Mode stack by CPU control unit,it would be
+            restore to CPU registers later when back to User Mode.
+            after setup eip,do_page_fault() returns,and CPU continues from new eip => @fixup after switch back to User Mode.
+
+
