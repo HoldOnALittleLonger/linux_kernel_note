@@ -19158,3 +19158,148 @@ Chapter 10 : System Calls
          system calls,we should call to kernel functions filp_open() and vfs_write().these two function are
          declared in <linux/fs.h> they are belong to VFS,and their function definition is placed in
          <fs/namei.c> and <fs/read_write.c>,respectively.
+
+
+Chapter 11 : Signals
+    The Role of Signals :
+      a signal is a very short message that may be sent to a process or a group of processes,the only information
+      given to the process is usually a number identifying the signal.
+
+      Linux have defined 31 standard signals and 31 real-time signals,they are all POSIX signal.
+      and these signals each of all is represented by a constant macro with prefix "SIG" and get the style SIGXX.
+      /* the constant macro definitions can be find in <asm-generic/signal.h> */
+
+      two main purpose of signal :
+        1> to make a process aware that a specific event has occurred
+        2> to cause a process to execute a signal handler function included in its code
+        /* these two are not mutually exclusive */
+
+    Linux signals :
+      <asm-generic/signal.h>
+        SIGHUP                1                POSIX                terminate
+        SIGINT                2                POSIX                terminate
+        SIGQUIT               3                POSIX                coredump
+        SIGKILL               4                POSIX                coredump
+        SIGTRAP               5                POSIX                coredump
+        SIGABRT               6                POSIX                coredump
+        SIGIOT                6                POSIX                coredump
+        SIGBUS                7                POSIX                coredump
+        SIGFPE                8                POSIX                coredump
+        SIGKILL               9                POSIX                terminate(+)
+        SIGUSR1               10               POSIX                terminate
+        SIGSEGV               11               POSIX                coredump
+        SIGUSR2               12               POSIX                terminate
+        SIGPIPE               13               POSIX                terminate
+        SIGALRM               14               POSIX                terminate
+        SIGTERM               15               POSIX                terminate
+        SIGSTKFLT             16               POSIX                terminate
+        SIGCHLD               17               POSIX                ignore
+        SIGCONT               18               POSIX                ignore(*)
+        SIGSTOP               19               POSIX                stop(*)(+)
+        SIGTSTP               20               POSIX                stop(*)
+        SIGTTIN               21               POSIX                stop(*)
+        SIGTTOU               22               POSIX                stop(*)
+        SIGURG                23               POSIX                ignore
+        SIGXCPU               24               POSIX                coredump
+        SIGXFSZ               25               POSIX                coredump
+        SIGVTALRM             26               POSIX                terminate
+        SIGPROF               27               POSIX                terminate
+        SIGWINCH              28               POSIX                ignore
+        SIGIO                 29               POSIX                terminate
+        SIGPOLL               SIGIO            POSIX                terminate
+        SIGLOST               29
+        SIGPWR                30               POSIX                terminate
+        SIGSYS                31               /* bad sytem call */ coredump
+        SIGUNUSED             31
+
+        _NSIG                 64
+        SIGRTMIN              32
+        #ifndef SIGRTMAX
+        #define SIGRTMAX      _NSIG
+        #endif
+        SIGRTMIN -- SIGRTMAX                   POSIX                terminate
+
+        SIGEMT /* emulator trap */                                  coredump
+
+        (+) => for SIGKILL and SIGSTOP,the action is _always_,not just _default_.
+        (*) => special job control effects :
+                 when SIGCONT is sent,it resumes the process(all thread in the group)
+                 from TASK_STOPPED state,and also clears any pending/queued stop signals(
+                 any of those marked with "stop(*)").
+                 this happens regardless of blocking,catching,or ignoring SIGCONT.
+                 when any stop signal is sent,it clears any pending/queued SIGCONT
+                 signals,this hapeens regardless of blocking,catching,or ignored the
+                 stop signal,though(EXCEPT FOR SIGSTOP) the default action of stopping
+                 the process may happen later or never.
+
+      POSIX real-time signals :
+        signal numbers between [SIGRTMIN, SIGRTMAX] are real-time signal introduced by POSIX
+        standard.
+        real-time signals always queued so that multiple signals sent will be received.
+        regular signals of the same kind are not queued :
+          if a regular signal is sent many times in a rwo,just one of them is delivered to
+          the receiving process.
+        /* Linux Kernel does not use real-time signals,but support them by several specific system calls */
+
+      Kernel system call(POSIX standard) related to Signal :
+        kill
+        tkill
+        tgkill
+        sigaction
+        signal              /* obsolete */
+        sigpending
+        sigprocmask
+        sigsuspend
+
+        rt_sigaction
+        rt_sigpending
+        rt_sigprocmask
+        rt_sigqueueinfo
+        rt_sigsuspend
+        rt_sigtimedwait
+
+    !! SIGNAL IS SENT TO RECEIVING PROCESS ASYNCHRONOUSLY.
+    !! signal may be sent at any time to a process whose state is usually unpredictable.
+       if the process is not currently executing,then the signal must be saved by the kernel
+       until that process resumes execution.
+    !! block a kind of signal will not cancel all pending signals,but be held off until such kind of
+       signal is later unblocked.
+
+    Two different phases related to Signal transmission :
+      1> Signal generation
+           kernel updates a data structure of the destination process to represent that a new signal
+           has been sent
+      2> Signal delivery
+           kernel forces the destination process to react to the signal by changing its execution state,
+           by starting the execution of a specified signal handler,or both
+
+      ! each signal generated can be delivered once at most.
+        signals are consumable resources :
+          once they have been delivered,all process descriptor information that refers to their previous
+          existence is canceled.
+      
+      pending signal => generated but yet delivered
+      ! at any time,only one pending signal of a given type may exist for a process(noqueued),additional
+        pending signals will be discarded.
+
+    Signal delivery :
+      factors about signal may remain pending :
+        > signals are usually delivered only to the currently running process
+        > signals of a given type may be selectively blocked by a process
+        > signals may be blocked when the process is executing signal-handler(signal process mask)
+      
+      kernel-side works :
+        1> kernel have to remember which signals are blocked by each process
+        2> when switching from Kernel Mode to User Mode,check whether a signal for a process has arrived,
+           this happens at almost every timer interrupt
+        3> determine whether the signal can be ignored
+           /**
+            * signal can be ignored must satisfy :
+            *   1> the destination process is not traced by another process(PT_PTRACED cleared)
+            *   2> the signal is not blocked by the destination process
+            *   3> the signal is being ignored by the destination process
+            */
+        4> handle the signal,which may require switching the process to a handler function at any point
+           during its execution and restoring the original execution context after the function returns
+
+
