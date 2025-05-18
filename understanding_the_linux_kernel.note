@@ -19410,5 +19410,155 @@ Chapter 11 : Signals
                 ...
         }
 
+      The signal descriptor and the signal handler descriptor :
+        signal descriptor - struct signal_struct
+        ! the signal descriptor is shared by all processes belonging to the same thread group,
+          thus the signal descriptor includes the fields that must be identical for every process
+          in the same thread group.
+        <linux/sched.h>
+          /**
+           * signal_struct - signal descriptor,kernel use this structure to keeps track of the
+           *                 shared pending signals,but it is not all fields are related to
+           *                 signal handling
+           * @count:         usage counter of the signal descriptor
+           * @live:          number of live processes in the thread group
+           * @wait_chldexit: waitqueue for the processes sleeping in a wait4() system call
+           * @curr_target:   current thread group signal load-balancing target,it usually
+           *                 is the last process in the thread group that received a signal
+           * @shared_pending: shared pending signals
+           * @group_exit_code: thread group exit support,process termination code for the
+           *                   thread group
+           * @notify_count:  used when killing a whole thread group
+           *                 # overloaded :
+           *                     - notify @gourp_exit_task when @count is equal to @notify_count
+           *                     - everyone except @group_exit_task is stopped during signal delivery
+           *                       of fatal signals,@group_exit_task processes the signal
+           * @group_exit_task: used when killing a whole thread group
+           * @group_stop_count: thread group stop support,overloads @group_exit_code too,
+           *                    it is used when stopping a whole thread group
+           * @flags:         flags used when delivering signals that modify the status of
+           *                 the process
+           *                 # flags are with prefix "SIGNAL_"
+           */
+          struct signal_struct {
+                  atomic_t count;
+                  atomic_t live;
+                  wait_queue_head_t wait_chldexit;
+                  struct task_struct *curr_target;
+                  struct sigpending shared_pending;
+                  int group_exit_code;
+                  int notify_count;
+                  struct task_struct *group_exit_task;
+                  int group_stop_count;
+                  unsigned int flags;
+                  ...
+          };
 
+        signal handler descriptor - struct sighand_struct
+        ! signal handler descriptor may be shared by several processes by invoking the clone()
+          system call with the CLONE_SIGHAND flag set.
+          threads in the thread group sharing the same signal descriptor and the same signal
+          handler descriptor.
+        <linux/sched.h>
+          /**
+           * sighand_struct - signal handler descriptor used to describes how
+           *                  signal events will be handled
+           * @count:          usage counter of the signal handler descriptor(sharing)
+           * @action:         array of structures specifying the actions to be performed
+           *                  upon delivering the signals
+           * @siglock:        concurrent protector
+           * @signalfd_wqh:   signal file descriptor wait queue head
+           */
+          struct sighand_struct {
+                  atomic_t count;
+                  struct k_sigaction action[_NSIG];
+                  spinlock_t siglock;
+                  wait_queue_head_t signalfd_wqh;
+          };
 
+        <asm-generic/signal.h>
+          /**
+           * k_sigaction - sigaction in Kernel Space
+           * # some architectures assign properties to a signal that are visible only to
+           *   the kernel,so the properties of a signal are stored in an object is type of
+           *   struct k_sigaction
+           *   for x86 platform,the definitions of struct k_sigaction are the same,but
+           *   the definitions of struct sigaction are different between User Space and
+           *   Kernel Space,however,the definitions are the same if the platform is not "i386"
+           * # 80x86,all properties are visible to User Mode processes(80x86 is not i386)
+           */
+          struct k_sigaction {
+                  struct sigaction sa;
+          };
+
+      The sigaction data structure :
+        signal action - struct sigaction
+
+        <asm-generic/signal-defs.h>
+          typedef void __signalfn_t(int);
+          typedef __signalfn_t __user *_sighandler_t;
+          typedef void __restorefn_t(void);
+          typedef __restorefn_t __user *__sigrestore_t;
+
+        <arch/x86/include/asm/signal.h>
+          #ifdef __i386__
+          #ifdef __KERNEL__ /* i386 Kernel Space */
+          struct sigaction {
+                  __sighandler_t sa_handler;
+                  unsigned long sa_flags;
+                  __sigretore_t sa_restorer;
+                  sigset_t sa_mask;
+          };
+          #else /* i386 User Space */
+          struct sigaction {
+                  union {
+                          __sighandler_t _sa_handler;
+                          void (*_sa_sigaction)(int, struct siginfo *, void *);
+                  } _u;
+                  sigset_t sa_mask;
+                  unsigned long sa_flags;
+                  void (*sa_restorer)(void);
+          };
+          #define sa_handler _u._sa_handler
+          #define sa_sigaction _u._sa_sigaction
+
+          #endif
+          #else /* !i386 */
+          struct sigaction {
+                  __sighandler_t sa_handler;
+                  unsigned long sa_flags;
+                  __sigretore_t sa_restorer;
+                  sigset_t sa_mask;
+          };
+          #endif
+
+          @sa_handler:  specifies the type of action to be performed,its value can be a
+                        pointer to the signal handler
+                        SIG_DFL => value is _zero_,default action
+                        SIG_IGN => value is _one_,ignoring
+                        # can not carry additional information
+          @sa_sigaction: signal handler can carry additional information
+          @sa_flags:    specifies how the signal must be handled
+                          /* <arch/x86/include/asm/signal.h> || <asm-generic/signal.h> */
+                          SA_NOCLDSTOP        0x00000001u    => applies only to SIGCHLD,do not
+                                                                send SIGCHLD to the parent when
+                                                                the process is stopped
+                          SA_NOCLDWAIT        0x00000002u    => applies only to SIGCHLD,do not
+                                                                create a zombie when the process
+                                                                terminates
+                          SA_SIGINFO          0x00000004u    => provide additional information to
+                                                                the signal handler
+                          SA_ONSTACK          0x08000000u    => use an alternative stack for
+                                                                the signal handler
+                          SA_RESTART          0x10000000u    => interrupted system call are automatically
+                                                                restarted
+                                                                used to get restarting signals
+                          SA_NODEFER          0x40000000u    => do not mask the current signal while
+                          SA_NOMASK           SA_NODEFER        executing the signal handler
+                          SA_RESETHAND        0x80000000u    => reset to default action after
+                          SA_ONESHOT          SA_RESETHAND      executing the signal handler
+                          SA_RESTORER         0x04000000     => signal trampoline,Linux does not
+                                                                use this flag
+          @sa_mask:     specifies the signals to be masked when running the signal handler
+          @sa_restorer: kernel does not use this field,but C library use this field to
+                        contains the address of a "signal trampoline"
