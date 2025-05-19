@@ -19562,3 +19562,100 @@ Chapter 11 : Signals
           @sa_mask:     specifies the signals to be masked when running the signal handler
           @sa_restorer: kernel does not use this field,but C library use this field to
                         contains the address of a "signal trampoline"
+
+      The pending signal queues :
+        in oder to keep track of what signals are currently pending,the kernel associated two pending signal
+        queues to each process.
+        the first is shared pending signal queue,which is named @shared_pending inside to struct signal_struct
+        object,and the process descriptor holds such member named *@signal.
+          - stores the pending signals of the whole thread group
+        the second is private pending signal queue,which is rooted at the @pending field of process descriptor.
+          - stores the pending signals of the specific (lightweight) process.
+
+        <linux/signal.h>
+          /**
+           * sigqueue - signal queue element
+           * @list:     pending signal queue
+           * @flags:    flags for the signal queue
+           * @info:     decribes the event that raised the signal
+           * @user:     pointer to per-user data structure of the process's owner
+           * # a slab cache named @sigqueue_cachep is used to handles memory allocation
+           *   for objects of this type
+           */
+          struct sigqueue {
+                  struct list_head list;
+                  int flags;
+                  siginfo_t info;
+                  struct user_struct *user;
+          };
+
+          /**
+           * sigpending - pending signal queue
+           * @list:       embedded list
+           *              when send a signal,a new struct sigqueue object will be
+           *              created and inserted before a sigpending object from the
+           *              task where the signal is sending to
+           *              # @sigpending->list.prev => @list of the new sigqueue object
+           *                thus the signal queue is like this :
+           *                  (sigqueue0, sigqueue1, ... , sigpending)
+           *                                               +--> @task->pending OR
+           *                                                    @task->signal->shared_pending
+           *              # when flushing a signal queue,the iteration will stopped until only
+           *                the @sigpending object is existing in this queue
+           * @signal:     signal bitmask specifying the pending signals
+           */
+          struct sigpending {
+                  struct list_head list;
+                  sigset_t signal;
+          };
+
+        the siginfo_t data structure is a 128-byte data structure that stores information about an
+        occurrence of a specific signal.
+        <asm-generic/siginfo.h>
+          /**
+           * siginfo - signal information
+           * @si_signo: the signal number
+           * @si_errno: the error code of the instruction that caused the signal to be raised,or
+           *            0 if there was no error
+           * @si_code:  a code identifying who raised the signal
+           * @_sifields: a union storing information depending on the type of signal
+           *             # e.g.
+           *                     SIGKILL - the union records the PID and the UID of the sender process
+           *                               @_sigfields.@_kill
+           *                     SIGSEGV - the union records the memory address whose access caused the
+           *                               signal to be raised
+           *                               @_sifields.@_sigfault           
+           */
+          struct siginfo {
+                  int si_signo;
+                  int si_errno;
+                  int si_code;
+                  union {
+                          ...
+                  } _sifields;
+          };
+          
+          typedef struct siginfo siginfo_t;
+
+          #ifdef __KERNEL__
+          ...
+          #define __SI_TIMER (1 << 16)
+          ...
+          #define __SI_MESGQ (6 << 16)
+          ...
+          #define __SI_CODE(T,N) ((T) | ((N) & 0xffff))
+          ...
+          #else /* for user space,all code is _zero_,and __SI_CODE() returns N */
+          ...
+          #endif
+
+          /* si_code values,digital reserves positive values for kernel-generated signals */
+          #define SI_USER 0  /* sent by kill,sigsned,raise */
+          #define SI_KERNEL 0x80  /* sent by the kernel from somewhere */
+          #define SI_QUEUE -1  /* sent by sigqueue */
+          #define SI_TIMER __SI_CODE(__SI_TIMER,-2)  /* sent by timer expiration */
+          #define SI_MESGQ __SI_CODE(__SI_MESGQ,-3)  /* sent by real time mesq state change */
+          #define SI_ASYNCIO -4  /* sent by AIO completion */
+          #define SI_SIGIO -5  /* sent by queued SIGIO */
+          #define SI_TKILL -6  /* sent by tkill system call */
+          #define SI_DETHREAD -7  /* sent by execve() killing subsidiary threads */
