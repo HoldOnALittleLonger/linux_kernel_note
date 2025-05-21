@@ -19659,3 +19659,102 @@ Chapter 11 : Signals
           #define SI_SIGIO -5  /* sent by queued SIGIO */
           #define SI_TKILL -6  /* sent by tkill system call */
           #define SI_DETHREAD -7  /* sent by execve() killing subsidiary threads */
+
+    Operation on Signal Data Structures :
+      sigset_t operations :
+        <linux/signal.h>
+          /* empty @set,set to _zero_ */
+          static inline void sigemptyset(sigset_t *set);
+
+          /* fill @set,set to _one_ */
+          static inline void sigfillset(sigset_t *set);
+
+          /* add @_sig into *@set */
+          static inline void sigaddset(sigset_t *set, int _sig);
+    
+          /* delete @_sig from *@set */
+          static inline void sigdelset(sigset_t *set, int _sig);
+
+          /* open all bits in *@set corresponding to @mask /
+          static inline void sigaddsetmask(sigset_t *set, unsigned long mask);
+
+          /* close all bits in *@set corresponding to @mask */
+          static inline void sigdelsetmask(sigset_t *set, unsigned long mask);
+    
+          /* return TRUE <-> @_sig in *@set;otherwise return FALSE */
+          static inline int sigismember(sigset_t *set, int _sig);
+
+          /* yields the bit index of @sig */
+          #define sigmask(sig) (1UL << ((sig) - 1))
+
+          /**
+           * for these three routines,each of them is receives three parameters.
+           * @r: the first parameter used to save result (sigset_t *)
+           * @a: the second parameter as first operand   (const sigset_t *)
+           * @b: the third parameter as second operand   (const sigset_t *)
+           * # _SIG_SET_BINOP(name, op) :
+           *     this macro defines a routine named @name,and the routine process
+           *     operation @op between @a and @b,finally,stores the result in
+           *     @r
+           */
+          /* @r := @a OR @b */
+          #define _sig_or(x, y) ((x) | (y))
+          _SIG_SET_BINOP(sigorsets, _sig_or)
+
+          /* @r := @a AND @b */
+          #define _sig_and(x, y) ((x) & (y))
+          _SIG_SET_BINOP(sigandsets, _sig_and)
+
+          /* @r := @a AND NOT(@b) */
+          #define _sig_nand(x, y) ((x) & ~(y))
+          _SIG_SET_BINOP(signandsets, _sig_nand)
+
+          /* return TRUE <-> bits of @mask in *@set are opened;otherwise,return FALSE */
+          static inline int sigtestsetmask(sigset_t *set, unsigned long mask);
+
+          /* use @mask to set @set->sig[0],and set the remained @set->sig[1.._NSIG_WORDS - 1] to _zero_ */
+          static inline void siginitset(sigset_t *set, unsigned long mask);
+
+          /* use NOT(@mask) to set @set->sig[0],and set the remained @set->sig[1.._NSIG_WORDS - 1] to -1 */
+          static inline void siginitsetnv(sigset_t *set, unsigned long mask);
+
+      sigpending and sigqueue operations :
+        <linux/sched.h>
+          /* return TRUE if *@p has nonblocked pending signals;otherwise return FALSE */
+          /* this routine is implemented by simply checking TIF_SIGPENDING flag */
+          static inline int signal_pending(struct task_struct *p);
+
+          /* equal to recalc_sigpending_tsk(current) */
+          extern void recalc_sigpending(void);
+
+          /* remove all pending signals in @queue,remove and destroy sigqueue objects */
+          extern void flush_sigqueue(struct sigpending *queue);
+
+          /**
+           * remove all signals sent to process @t,
+           * this is done by clearing TIF_SIGPENDING flag and call invoking twic flush_sigqueue()
+           * on @t->pending and @t->signal->shared_pending
+           */
+          extern void flush_signals(struct task_struct *t);
+
+        <kernel/signal.c>
+          /**
+           * return TRUE if either *@t has pending signals or
+           * the thread group that @t belongs to has pending signals
+           * return FLASE,otherwise
+           * if the routine returned TRUE,thread flag TIF_SIGPENDING of @t have been
+           * opended
+           */
+          static int recalc_sigpending_tsk(struct task_struct *t);
+        
+          /**
+           * close bits of @s->signal corresponding to the bits of @mask
+           * if no such bits have been opened,routine returns 0,otherwise return 1
+           * this routine will traverse the signal queue which associated to @s,
+           * if any sigqueue object's member @info holds a signal less than SIGRTMIN
+           * and the signal is opened in @mask,the sigqueue object will be removed
+           * from the signal queue,then destroyed
+           */
+          static int rm_from_queue(unsigned long mask, struct sigpending *s);
+
+
