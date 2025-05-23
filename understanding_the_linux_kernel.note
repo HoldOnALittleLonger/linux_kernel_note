@@ -19757,4 +19757,131 @@ Chapter 11 : Signals
            */
           static int rm_from_queue(unsigned long mask, struct sigpending *s);
 
+    Generating a Signal :
+      many kernel functions generate signals by updating one or more process descriptors,but they are
+      not take charge of signal delivering.the delivering depending on the type of signal and the state
+      of the destination processes.some signals may wake up some processes(TASK_INTERRUPTIBLE) and force
+      them to receive the signal.
+
+      Kernel functions to generate signal :
+        <linux/sched.h>
+          /**
+           * send_sig - send a signal to a given task
+           * @sig:      signal number
+           * @p:        the task
+           * @priv:     this parameter used to tell to __send_signal() how the signal info
+           *            should to be constructed
+           *            1 => SEND_SIG_PRIV
+           *                    @si_signo := @sig
+           *                    @si_code := SI_KERNEL
+           *                    other members are _zero_
+           *            0 => SEND_SIG_NOINFO
+           *                    @si_signo := @sig
+           *                    @si_code := SI_USER
+           *                    other members are _zero_
+           * return:    0 => succeed
+           *            -ESRCH => no such task
+           *            -EINVAL => invalid signal
+           */
+          extern int send_sig(int sig, struct task_struct *p, int priv);
+
+          /**
+           * send_sig_info - send a signal to a given task with additional info
+           * @sig:           signal number
+           * @info:          signal info
+           *                 special value : <linux/sched.h>
+           *                   SEND_SIG_PRIV
+           *                   SEND_SIG_NOINFO
+           *                   SEND_SIG_FORCE
+           * @p:             task
+           * return:         same return values as send_sig()
+           * # send_sig() actually invokes this function,and this function call to do_send_sig_info()
+           */
+          extern int send_sig_info(int sig, struct siginfo *info, struct task_struct *p);
+
+          /**
+           * force_sig - send a signal that cannot be explicitly ignored or blocked by the process
+           * @sig:       signal number
+           * @p:         task
+           * # this function actually call to force_sig_info() with SEND_SIG_PRIV
+           */
+          extern void force_sig(int sig, struct task_struct *p);
+
+          /**
+           * force_sig_info - send a signal that cannot be explicitly ignored or blocked by the process
+           *                  with additional info
+           * @sig:            signal number
+           * @info:           signal info
+           * @p:              task
+           * return:          0 => succeed
+           *                  -EAGAIN => error only occurs for real time signals
+           * # if necessary,this routine will set signal action to SIG_DFL and unblock @sig
+           * # if the signal action is SIG_DFL,then signal flag SIGNAL_UNKILLABLE will be cleared
+           *   to prevent recursive SIGSEGV
+           */
+          extern int force_sig_info(int sig, struct siginfo *info, struct task_struct *p);
+
+        <linux/syscalls.h>
+          /**
+           * sys_tkill - system call tkill() handler
+           * @pid:       task pid
+           * @sig:       signal number
+           * return:     0 => succeed
+           *             - ERROR CODE => failed
+           * # this handler actually call to do_tkill() with tgid _zero_
+           */
+          asmlinkage long sys_tkill(int pid, int sig);
+
+          /**
+           * sys_tgkill - system call tgkill handler
+           * @tgid:       thread group id
+           * @pid:        task pid
+           * @sig:        signal number
+           * return:      0 => succeed
+           *              - ERROR CODE => failed
+           * # this handler actually call to do_tkill()
+           */
+          asmlinkage long sys_tgkill(int tgid, int pid, int sig);
+
+        the routines described above are end up invoking the __send_signal() which is defined in
+        <kernel/signal.c>.
+        /* some routine may call to specific_send_sig_info(),but the function just call to send_signal() */
+
+        when a signal is send to a whole thread group,either from the kernel or from another process,
+        the kernel generates it by invoking one of the following routines :
+          /* <kernel/signal.c> */
+          
+          /* send a signal with additional info to a group,@p is the task of such process group */
+          int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p);
+
+          /* send a signal to all tasks in a process group which is identified by @pid */
+          int kill_pgrp(struct pid *pid, int sig, int priv);
+
+          /* send a signal with additional info to all tasks in a process group which is identified by @pid */
+          int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp);
+
+          /**
+           * send a signal to a process group which is identified by @pid,and the @shared_pending
+           * will be fetched from @pid's @signal member
+           */
+          int kill_pid(struct pid *pid, int sig, int priv);
+
+          /**
+           * send a signal with additional info to a process group which is identified by @pid
+           * this routine actually call to kill_pid_info()
+           */
+          int kill_proc_info(int sig, struct siginfo *info, pid_t pid);
+
+          /* system call kill() handler */
+          asmlinkage long sys_kill(int pid, int sig);
+
+          /* system call rt_sigqueueinfo() handler for real time signals */
+          asmlinkage long sys_rt_sigqueueinfo(int pid, int sig, siginfo_t __user *uinfo);
+
+          ! the routines described above are end up invoking group_send_sig_info(),but that routine
+            will call to do_send_sig_info(),thus finally call to __send_signal().
+          
+
+          
+
 
