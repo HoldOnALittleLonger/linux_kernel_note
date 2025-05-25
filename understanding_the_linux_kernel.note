@@ -19881,7 +19881,153 @@ Chapter 11 : Signals
           ! the routines described above are end up invoking group_send_sig_info(),but that routine
             will call to do_send_sig_info(),thus finally call to __send_signal().
           
+      The signal_send() Function :
+        function specific_send_sig_info() only one statement inside its body,that is
+          "return send_signal(sig, info, p, 1);"
+        @sig,@info and @p are the parameters of specific_send_sig_info().
 
-          
+        <kernel/signal.c>
+          /**
+           * send_signal - send a signal with additional info to a given process or to the process group if
+           *               necessary
+           * @sig:         signal
+           * @info:        additional signal info
+           * @t:           task
+           * @group:       should send to process group ?
+           * return:       returns what __send_signal() returned
+           * # this routine declared a local variable named @from_ancestor_ns
+           *   if defined CONFIG_PID_NS,then it will has the value
+           *     si_fromuser(@info) && !task_pid_nr_ns(current, task_active_pid_ns(t)))
+           *   else
+           *     _zero_
+           * # this function just call to __send_signal(@sig, @info, @t, @group, @from_ancestor_ns)
+           */
+          static int send_signal(int sig, struct siginfo *info, struct task_struct *t,
+                                 int group);
+
+      The __send_signal() Function :
+        static routine __send_signal() plays the role that take charge of all signals' delivering.
+
+        <kernel/signal.c>
+          /**
+           * __send_signal - send a signal with additional info
+           * @sig:           signal
+           * @info:          additional info
+           * @t:             task
+           * @group:         send to group?
+           * @from_ancestor_ns: pid namespace of the process's ancestor
+           * return:         0 => succeed
+           *                 -EAGAIN => queue overflow,only occurs when delivering real time signal
+           */
+          static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
+                                   int group, int from_ancestor_ns);
+
+          description for __send_signal() :
+            when entered this routine,kernel trace point for signal generating will be enabled.
+            an assert will be processed that the spinlock @t->sighand->siglock has been locked up.
+            /* when we delivering a signal,the signal handler should not change at this time */
+            next,call to prepare_signal().
+            /**
+             * prepare_signal() handles magic process-wide effects of stop/continue signals.
+             * it does the actual continuing for SIGCONT,bui not the actual stopping for
+             * stop signals,process stop is done as a signal action for SIG_DFL
+             * this routine returns TRUE if the signal should be actually delivered,otherwise,
+             * it should be dropped.
+             * if @p is dying,nothing to do
+             * if @sig is stop signal,remove SIGCONT from all queues(@shared_pendiing and @pending of
+             * each thread in the thread group)
+             * if @sig is SIGCONT,remove all stop signals from all queues,and wake all thread
+             * 
+             *   # remove signal from @shared_pending and @pending of each thread,set task state
+             *     to __TASK_STOPPED,if user decided to handles this continuing signal,then
+             *     set TIF_SIGPENDING for the threads,and modify the state to
+             *     __TASK_STOPPED | TASK_INTERRUPTIBLE
+             *   # notify the parent with CLD_CONTINUED if the process were stopped,and now continued
+             *     if the process were in the middle of a group stop,then pretend it was already finished,
+             *     and then continued
+             *     SIGCHLD does not queue,so report ony CLD_STOPPED,as if the next CLD_CONTINUED was dropped
+             */
+            if prepare_signal() returned FALSE,then return to caller,because the signal should be dropped.
+            if we can continuing,then retrieve the sigpending object either @shared_pending or @pending,this
+            determined by @group parameter.                               # @group is TRUE or FALSE
+            call to legacy_queue(),it is a short-circuit,if @sig is not a real time signal and it have been
+            a member of the pending sigset,then return to caller,because non-real-time signal does not support
+            queue.
+            routine proceeds to check if @info equal to SEND_SIG_FORCED then goto out_set.
+            this is a fast-path for kernel-internal things like SIGSTOP or SIGKILL.
+            if @sig is not pending,and it is not kernel-internal things,then prepare to send this signal.
+            set local variable @override_rlimit,if @sig is not real time signal,then its value is equal
+            to "is_sig_special(@info) || @info->si_code >= 0",otherwise,it is _zero_.
+            this variable will be used by __sigqueue_alloc() as the parameter @override_rlimit,only
+            @override_rlimit is true and user's pending signal is not exceed RLIMIT_SIGPENDING,a new
+            sigqueue is able to be allocated.
+            continue executing,try to allocate a new sigqueue object with GFP_ATOMIC | GFP_NOTRACK_FALSE_POSITIVE.
+            if succed to allocate a sigqueue object
+            then
+                    insert the sigqueue object to the signal pending queue,it will be inserted before
+                    the selected pending
+                    switch @info
+                            SEND_SIG_NOINFO:
+                                    @q->info.si_signo = sig
+                                    @q->info.si_code = SI_USER
+                                    @q->info.si_pid = task_tgid_nr_ns(current, task_active_pid_ns(@t))
+                                    @q->info.si_uid = current_uid()
+                                    # other members are set to _zero_
+                                    break
+                            SNED_SIG_PRIV:
+                                    similar to the actions that SEND_SIG_NOINFO will takes,but
+                                    @si_code is set to SI_KERNEL,and @si_pid,@si_uid are _zero_
+                                    break
+                            default: /* have to send additional info
+                                    copy @info to @q->info
+                                    if @from_ancestor_ns is TRUE,then set @si_pid to _zero_
+                                    break
+            else if @info > SEND_SIG_FORCED /* !is_si_special(@info) */
+                    @sig is real time signal and @si_code is not SI_USER
+                    => queue overflow,abort,and returns -EAGAIN
+                       /**
+                        * may abort if the signal was rt and sent by user using something
+                        * other than kill()
+                        */
+                    @sig is not real time signal and @si_code is SI_USER
+                    => silent loss of information,still send the signal but the *@info bits are lost
+            out_set:
+            signalfd_notify(@t, @sig)
+              deliver the signal to listening signalfd.
+
+            sigaddset(the pending, @sig)
+              deliver the signal.
+
+            complete_signal(@sig, @t, @group)
+              if the thread @t wants this signal,then it will be the signal target
+              if the thread group is empty and @group is FALSE,then return to caller
+              otherwise,try to find a suitable thread as the signal target
+
+              for fatal signal and the corresponding sighandler of @t is SIG_DFL
+                if
+                  @t is not in the signal state (SIGNAL_UNKILLABLE | SIGNAL_GROUP_EXIT)
+                  AND
+                  @sig is not a member in the signal target's @real_blocked
+                  AND
+                  @sig is SIGKILL or the signal target is not traced by a debugger
+                then this signal will be fatal to the whole group
+                proceed checks
+                  if
+                    @sig is not a standard signal or it will not procudes coredump
+                      @t->signal->flags = SIGNAL_GROUP_EXIT
+                      @t->signal->@group_exit_code = @sig
+                      @t->signal->group_stop_count = 0
+                      the signal target will be @t
+                      send SIGKILL to each thread of the thread group
+                      return to caller
+              /**
+               * normal returning path => the checking above for fatal signal resulted FALSE,
+               *                          or the result is TRUE but the signal will produces coredump
+               *                          AND it is a standard signal
+               */
+              normal returning path,signal_wake_up() signal target with @resume parameter @sig == SIGKILL,
+              if the signal is SIGKILL,we want to wake it up in the stopped/traced/killable case.
+
+            finally,__send_signal() returns _zero_ to caller.
 
 
