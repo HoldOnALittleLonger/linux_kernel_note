@@ -19790,9 +19790,9 @@ Chapter 11 : Signals
            * @sig:           signal number
            * @info:          signal info
            *                 special value : <linux/sched.h>
-           *                   SEND_SIG_PRIV
-           *                   SEND_SIG_NOINFO
-           *                   SEND_SIG_FORCE
+           *                   SEND_SIG_PRIV        =>  (by user process)  0
+           *                   SEND_SIG_NOINFO      =>  (by kernel)  1
+           *                   SEND_SIG_FORCE       =>  (by kernel) SIGSTOP/SIGKILL
            * @p:             task
            * return:         same return values as send_sig()
            * # send_sig() actually invokes this function,and this function call to do_send_sig_info()
@@ -19918,6 +19918,7 @@ Chapter 11 : Signals
            * @from_ancestor_ns: pid namespace of the process's ancestor
            * return:         0 => succeed
            *                 -EAGAIN => queue overflow,only occurs when delivering real time signal
+           * # the control path invokes this function must been disabled local interrupt
            */
           static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
                                    int group, int from_ancestor_ns);
@@ -19946,6 +19947,20 @@ Chapter 11 : Signals
              *     if the process were in the middle of a group stop,then pretend it was already finished,
              *     and then continued
              *     SIGCHLD does not queue,so report ony CLD_STOPPED,as if the next CLD_CONTINUED was dropped
+             *   # prepare_signal() return to caller with the return value
+             *             !sig_ignored(@t, @sig, @from_ancestor_ns)
+             *     if the task ignored signal @sig,then this function will returns FALSE
+             *     the signal is ignored if all of the following are satisfied : 
+             *             1> it is not blocked AND it is not real blocked
+             *             2> sig_task_ignored(@t, @sig, @from_ancestor_ns) returned 1
+             *                the routine returns 1 if 
+             *                  > @t stated in SIGNAL_UNKILLABLE && sighandler == SIG_DFL &&
+             *                    !@from_ancestor_ns
+             *                  OR
+             *                  > sighandler == SIG_IGN OR (sighandler == SIGDFL && sig_kernel_ignore(@sig))
+             *                    # sig_kernel_ignore() returns TRUE if @sig is a standard signal and
+             *                      the bits of it corresponding to SIG_KERNEL_IGNORE_MASK are opened
+             *             3> @t was not traced by a debugger
              */
             if prepare_signal() returned FALSE,then return to caller,because the signal should be dropped.
             if we can continuing,then retrieve the sigpending object either @shared_pending or @pending,this
@@ -19974,7 +19989,7 @@ Chapter 11 : Signals
                                     @q->info.si_uid = current_uid()
                                     # other members are set to _zero_
                                     break
-                            SNED_SIG_PRIV:
+                            SEND_SIG_PRIV:
                                     similar to the actions that SEND_SIG_NOINFO will takes,but
                                     @si_code is set to SI_KERNEL,and @si_pid,@si_uid are _zero_
                                     break
@@ -20025,8 +20040,17 @@ Chapter 11 : Signals
                *                          or the result is TRUE but the signal will produces coredump
                *                          AND it is a standard signal
                */
-              normal returning path,signal_wake_up() signal target with @resume parameter @sig == SIGKILL,
-              if the signal is SIGKILL,we want to wake it up in the stopped/traced/killable case.
+              normal returning path,signal_wake_up() is called with arguments signal target and
+              @sig == SIGKILL(@resume,parameter of signal_wake_up()),if the signal is SIGKILL,
+              we want to wake it up in the stopped/traced/killable case.
+              /**
+               * signal_wake_up() sets TIF_SIGPENDING in thread flags of @t,set local variable
+               * @mask to TASK_INTERRUPTIBLE,if @resume is TRUE that @sig is SIGKILL,set @mask
+               * to @mask |= TASK_WAKEKILL.
+               * call to wake_up_state(@t, @mask).if the routine returned _zero_,then kick_process(@t),
+               * since the process is already running on another CPU,so we send an interprocessor interrupt
+               * to the CPU for let the process quickly notices the new pending signal.
+               */
 
             finally,__send_signal() returns _zero_ to caller.
 
