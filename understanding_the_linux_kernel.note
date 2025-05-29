@@ -19851,7 +19851,19 @@ Chapter 11 : Signals
         the kernel generates it by invoking one of the following routines :
           /* <kernel/signal.c> */
           
-          /* send a signal with additional info to a group,@p is the task of such process group */
+          /**
+           * send a signal with additional info to a group,@p is the task of such process group
+           * this routine will call to check_kill_permission() to does signal permission checkings,
+           * such invalid signal number,signal info audit,user permission,etc
+           * # user permission => the user who wants send the signal to the target process is allowed
+           *                      # the user is administrator OR the processes are belong to it
+           *                      the user has capability to send a signal(CAP_KILL)
+           *                      the signal is SIGCONT and the target process in the same login session
+           * ! if @sig is _zero_,then will not send any signal
+           *   signal 0 is used by the sending process to check whether it has the required privileges to send
+           *   a signal to the destination thread group
+           *   # group_send_sig_info(0, NULL, target-task) => returned _zero_ -> has required privileges
+           */
           int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p);
 
           /* send a signal to all tasks in a process group which is identified by @pid */
@@ -19880,6 +19892,10 @@ Chapter 11 : Signals
 
           ! the routines described above are end up invoking group_send_sig_info(),but that routine
             will call to do_send_sig_info(),thus finally call to __send_signal().
+          ! do_send_sig_info() will lock up task's signal handler and disable local interrupt 
+            before call to send_signal() 
+            # task->sighand->siglock,before lock up this spinlock,rcu_read_lock() will be called
+              at first for rcu_dereference(task->sighand)
           
       The signal_send() Function :
         function specific_send_sig_info() only one statement inside its body,that is
@@ -19934,9 +19950,9 @@ Chapter 11 : Signals
              * stop signals,process stop is done as a signal action for SIG_DFL
              * this routine returns TRUE if the signal should be actually delivered,otherwise,
              * it should be dropped.
-             * if @p is dying,nothing to do
-             * if @sig is stop signal,remove SIGCONT from all queues(@shared_pendiing and @pending of
-             * each thread in the thread group)
+             * if @p is dying,nothing to do (SIGNAL_GROUP_EXIT,the thread group is being killed)
+             * if @sig is kernel stop signal,remove SIGCONT from all queues(@shared_pendiing and
+             * @pending of each thread in the thread group)
              * if @sig is SIGCONT,remove all stop signals from all queues,and wake all thread
              * 
              *   # remove signal from @shared_pending and @pending of each thread,set task state
@@ -19968,14 +19984,18 @@ Chapter 11 : Signals
             call to legacy_queue(),it is a short-circuit,if @sig is not a real time signal and it have been
             a member of the pending sigset,then return to caller,because non-real-time signal does not support
             queue.
-            routine proceeds to check if @info equal to SEND_SIG_FORCED then goto out_set.
+            routine proceeds to check if @info equal to SEND_SIG_FORCED(value is 2) then goto out_set.
             this is a fast-path for kernel-internal things like SIGSTOP or SIGKILL.
             if @sig is not pending,and it is not kernel-internal things,then prepare to send this signal.
             set local variable @override_rlimit,if @sig is not real time signal,then its value is equal
             to "is_sig_special(@info) || @info->si_code >= 0",otherwise,it is _zero_.
             this variable will be used by __sigqueue_alloc() as the parameter @override_rlimit,only
-            @override_rlimit is true and user's pending signal is not exceed RLIMIT_SIGPENDING,a new
+            @override_rlimit is true OR user's pending signal is not exceed RLIMIT_SIGPENDING,a new
             sigqueue is able to be allocated.
+            /**
+             * __sigqueue_alloc() will retrieves the user struct of @t via get_uid() routine,if it succeed
+             * to allocate a new sigqueue object,then increase user_struct.@sigpending
+             */
             continue executing,try to allocate a new sigqueue object with GFP_ATOMIC | GFP_NOTRACK_FALSE_POSITIVE.
             if succed to allocate a sigqueue object
             then
@@ -19997,7 +20017,7 @@ Chapter 11 : Signals
                                     copy @info to @q->info
                                     if @from_ancestor_ns is TRUE,then set @si_pid to _zero_
                                     break
-            else if @info > SEND_SIG_FORCED /* !is_si_special(@info) */
+            else if @info > SEND_SIG_FORCED /* !is_si_special(@info),not the kernel forced signal */
                     @sig is real time signal and @si_code is not SI_USER
                     => queue overflow,abort,and returns -EAGAIN
                        /**
@@ -20006,6 +20026,7 @@ Chapter 11 : Signals
                         */
                     @sig is not real time signal and @si_code is SI_USER
                     => silent loss of information,still send the signal but the *@info bits are lost
+                       because we have failed on allocating memory for sigquque object
             out_set:
             signalfd_notify(@t, @sig)
               deliver the signal to listening signalfd.
@@ -20016,8 +20037,23 @@ Chapter 11 : Signals
             complete_signal(@sig, @t, @group)
               if the thread @t wants this signal,then it will be the signal target
               if the thread group is empty and @group is FALSE,then return to caller
-              otherwise,try to find a suitable thread as the signal target
+              otherwise,try to find a suitable thread as the signal target starting
+              from the thread which received the last thread group signal(signal->@curr_target)
+              # wants_signal() :
+                  the process can not
+                    blocked the signal
+                    be exiting
+                    be traced by a debuger
+                  AND
+                  the process is currently runnning on the CPU or there is no pending
+                  signals on the process
+                  (generally,awake a process up which has pending signal is done by the
+                   kernel control path that set TIF_SIGPENDING)
 
+                  if the signal is SIGKILL,it always be wanted by any task(can not be
+                  ignored or be catched)
+
+              /* if we have selected a thread to receive the signal */
               for fatal signal and the corresponding sighandler of @t is SIG_DFL
                 if
                   @t is not in the signal state (SIGNAL_UNKILLABLE | SIGNAL_GROUP_EXIT)
