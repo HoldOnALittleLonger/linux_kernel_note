@@ -20090,4 +20090,177 @@ Chapter 11 : Signals
 
             finally,__send_signal() returns _zero_ to caller.
 
+    Delivering a Signal :
+      when kerenl delivering a signal to the process,the corresponding signal action routine will be called
+      for the signal.but in case,the process is not running on the CPU,kerenl will defers the task of
+      delivering the signal.
+      
+      when returning from interrupt or from exception,the kernel control path will call to the assembly function
+      resume_userspace() to switch back to userspace,but if there are some works have to be done such signal,
+      rescheduling,etc,assembly function work_pending() is be invoked to handles these cases.before return to
+      User Mode,TIF_SIGPENDING will be checked,if it been enabled,the kernel control path have to notice the
+      process signal delivering.
+
+      work_pending() call to work_notifysig(),and work_notifysig() call to do_notify_resume(),and thus the
+      architecture dependent function do_signal() will be called.
+      do_signal() is used to handle the nonblocked pending signals.
+
+      <arch/x86/kernel/signal.c>
+        /**
+         * do_signal - handle pending signals before return to User Mode
+         * @regs:      User Mode register contents
+         */
+        static void do_signal(struct pt_regs *regs);
+
+        brief description for do_signal() :
+          first,this routine can not be called in interrupt context,thus if user_mode(@regs) returned FALSE,
+          this routine just return to caller.
+          if @current's thread status enabled TS_RESTORE_SIGMASK,then process signal mask @saved_sigmask must
+          be used during handle a signal,otherwise,use the @blocked signal mask.
+          routine get_signal_to_deliver() is be invoked to dequeue pending signals in a for-cycle.if a signal
+          is not fatal returned by the routine,local variable @ka is kernel sigaction structure will be set to
+          the signal action that @current has registered or SIG_DFL;local variable @info is an object type of
+          siginfo_t,it also be set to the additional signal information that associated to the signal.
+          now have to handles the non-fatal signal,routine handle_signal() will be called to does this task.
+          if we handled the signal,then we can return caller simply,otherwise,we have to check if did we come from
+          a system call.
+          if come from system call =>
+                  get syscall error
+                  -ERESTARTNOHAND OR -ERESTARTSYS OR -ERESTARTNOINTR
+                          @regs->ax := @regs->orig_ax   /* the system call number in User Mode AX */
+                          @regs->ip -= 2        /* restart the interrupted system call */
+                  -ERESTART_RESTARTBLOCK
+                          @regs->ax = NR_restart_syscall /* __NR_restart_syscall,number of syscall "restart_syscall" */
+                          @regs->ip -= 2
+          proceed executing,before returning to caller,if TS_RESTORE_SIGMASK have been enabled in @current's thread
+          status,then must disable the flag and set its sigmask to @saved_sigmask.
+
+        /**
+         * handle_signal - handle a given signal for current process which is running in User Mode previously and
+         *                 been interrupted
+         * @sig:           signal number
+         * @info:          signal info
+         * @ka:            kernel space signal action
+         * @oldset:        signal mask used to restore process signal mask
+         * @regs:          register contents
+         * return:         0 => succeed
+         *                 otherwise,returns an error code
+         * # in a simply description,this function call to setup_rt_frame() to setup register contents for
+         *   handling the signal.
+         *   IP => @ka->sa.sa_handler
+         *   DI => signal number
+         *   AX => 0
+         *   SI => address of signal info in process's signal frame(been copied to the frame,if SA_SIGINFO
+         *         is enabled in @ka->sa.sa_flags)
+         *   DX => address of process's signal frame @uc(it is type of struct ucontext,represents user context,
+         *         the structure is defined in <asm-generic/ucontext.h>)
+         *   SP => address of process's signal frame
+         *   CS => __USER_CS
+         */
+        static int handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
+                                 sigset_t *oldset, struct pt_regs *regs);
+
+      <kernel/signal.c>
+        /**
+         * get_signal_to_deliver - deliver both process pending signals and group pending signals
+         * @info:                  info object will be fill up
+         * @return_ka:             signal action that associated to the delivering signal
+         * @regs:                  register contents
+         * @cookie:                cookie
+         * return:                 0 OR signal number
+         */
+        int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka, struct pt_regs *regs,
+                                  void *cookie);
+
+        description for get_signal_to_deliver() :
+          try_to_freeze(),if @current is in freezing(TIF_FREEZE enabled),then call to refrigerator() to
+          frozen() it,and recalculate its pending signals.
+          next,acquires spinlock @current->sighand->siglock.
+          if @current->signal->flags enabled SIGNAL_CLD_MASK,disable the flag,if the process is traced by
+          a debugger,then do_notify_parent_cldstop() to tell the debugger the tracing process is stopped,
+          otherwise,get back to the starting of this routine.
+          enter an infinite for-cycle {
+                  invoke tracehook_get_signal() to deliver synthetic signal to traced task,but this function
+                  should always returns _zero_ in Linux 2.6.34.1.
+                  so we just consider the case local variable @signr is _zer_.
+
+                  /* threads in the thread group should be stopped AND stopped all threads in the thread group */
+                  if @current->signal->group_stop_count > 0 AND do_signal_stop(0) is TRUE
+                  then get back to the starting of this routine
+                  
+                                                   /* signal mask */
+                  call to dequeue_signal(@current, &@current->blocked, @info)
+                  /**
+                   * this routine will try to dequeue a signal in @current->pending and then in
+                   * @current->signal->shared_pending if no pending signals in @current->pending.
+                   * this routine actually call to __dequeue_signal().
+                   * __dequeue_signal() :
+                   *   get next_signal(@pending, @mask)
+                   *   @sig > 0 AND @current->notifier is not NULL
+                   *     sigismember(@current->notifier_mask, @sig) is TRUE
+                   *       let device driver to handles this signal
+                   *       clear TIF_SIGPENDING
+                   *       return 0
+                   *   @sig > 0
+                   *     collect_signal() => copy signal info or fill signal info for @sig
+                   *   returns @sig
+                   *
+                   * if __dequeue_signal() is not returned _zero_,recalc_sigpending().
+                   * if @signr is kernel stop signal,enable SIGNAL_STOP_DEQUEUED in @current->signal->flags
+                   * if the signal is raised by a timer AND it is system private signal,unlock @siglock and
+                   * call to do_schedule_next_time(@info).
+                   * finally,return @signr(returned by __dequeue_signal()).
+                   * ! @shared_pending handling is similar to @pending handling,but if @signr is SIGALRM,
+                   *   then this routine have to deal with high-resolution timer of @current->signal->real_timer.
+                   */
+
+                  if @signr is not SIGKILL
+                    then set @signr to the return value of ptrace_signal(),this routine
+                    returns _zero_ either argument of the parameter @signr is _zero_ or @signr is blocked by the
+                    @current process.
+                    if @signr is _zero_,continue to next cycle.
+                  otherwise,set local variable @ka to the signal handler &@current->sighand->action[@signr - 1].
+
+                  @ka->sa.sa_handler is SIG_IGN,ignore this signal,continue to next cycle.
+                  @ka->sa.sa_handler is not SIG_DFL
+                    set @return_ka to @ka;if AS_ONESHOT flag is enabled in @ka->sa.sa_flags,then reset
+                    @ka->sa.sa_handler to SIG_DFL
+                    break the for-cycle,because we succeed to get a non-fatal signal to be delivered.
+                 
+                  proceed cycle,the @signr is kernel ignored signal,do nothing,continue to next cycle.
+                  @current->signal->flags enabled SIGNAL_UNKILLABLE AND @signr is not kernel only signal,
+                  continue to next cycle.
+                  
+                  @signr is kernel stop signal
+                    @signr is not SIGSTOP
+                      unlock @siglock and enable local interrupt
+                      if the current process group become orphaned group,then to to the staring of this
+                      routine /* process group leader leaved */
+                      acquire @siglock and disable local interrupt
+                    try to do_signal_stop(@info->si_signo),if we succeed to stop @current process,all
+                    threads in the thread group will be stopped,too,the task state will be set to
+                    TASK_STOPPED.because @current been stopped,function schedule() will be called to
+                    relinquish CPU time,it will be resumed when SIGCONT has came or SIGKILL is received.
+                    if we can continue executing,do_signal_stop() finally returns 1.
+                    
+                    if do_signal_stop() returned TRUE,then go back to the starting of this routine.
+                    else,continue to next for-cycle.                    
+
+                  @signr is not kernel stop signal.
+                  unlock @siglock and enable local interrupt,enable PF_SIGNALED in @current->flags.
+
+                  if @signr produces kernel coredump signal,then print the fatal signal in kernel
+                  message queue(if global variable @print_fatal_signals is TRUE),call to
+                  do_coredump() for produce a coredump.
+
+                  @signr is not kernel coredump signal,call to do_group_exit(@info->si_signo).
+          }
+
+          unlock @siglock and enable local interrupt,returns @signr.
+
+        !! MUST BE CLEARING THAT get_signal_to_deliver() ALWAYS RETURNED TO CALLER NEITHER @signr
+           IS FATAL SIGNAL NOR WORK CONTROL SIGNAL,AND THE PENDING SIGNAL @signr NEITHER BEEN BLOECKED
+           NOR BEEN IGNORED.
+
+            
 
