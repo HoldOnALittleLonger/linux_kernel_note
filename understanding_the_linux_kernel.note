@@ -20272,6 +20272,7 @@ Chapter 11 : Signals
                   message queue(if global variable @print_fatal_signals is TRUE),call to
                   do_coredump() for coredump producing.
                   /* coredump signal is fatal signal,thus the process will be killed */
+                  /* routine do_coredump() is defined in <fs/exec.c> */
 
                   at the end of once for-cycle,call to do_group_exit(@info->si_signo).
                   /**
