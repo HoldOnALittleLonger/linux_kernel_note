@@ -20225,23 +20225,42 @@ Chapter 11 : Signals
                   @ka->sa.sa_handler is not SIG_DFL
                     set @return_ka to @ka;if AS_ONESHOT flag is enabled in @ka->sa.sa_flags,then reset
                     @ka->sa.sa_handler to SIG_DFL
-                    break the for-cycle,because we succeed to get a non-fatal signal to be delivered.
+                    break the for-cycle,because we find out an action of the signal been resgitered to be
+                    processed when signal is delivering.some fatal signal can not be ignored and be blocked,be
+                    caught,thus this signal @signr must be a non-fatal signal.
                  
                   proceed cycle,the @signr is kernel ignored signal,do nothing,continue to next cycle.
+
                   @current->signal->flags enabled SIGNAL_UNKILLABLE AND @signr is not kernel only signal,
                   continue to next cycle.
+                  /* signal flag SIGNAL_UNKILLABLE is used to protect "init" process */
                   
                   @signr is kernel stop signal
                     @signr is not SIGSTOP
                       unlock @siglock and enable local interrupt
-                      if the current process group become orphaned group,then to to the staring of this
-                      routine /* process group leader leaved */
+                      if the current process group become orphaned group,then go to the staring of this
+                      routine                             /**
+                                                           * POSIX : a process group is not orphaned as long as
+                                                           *         there is a process in the group that has a
+                                                           *         parent in a different process group but in
+                                                           *         the same session
+                                                           */
                       acquire @siglock and disable local interrupt
-                    try to do_signal_stop(@info->si_signo),if we succeed to stop @current process,all
-                    threads in the thread group will be stopped,too,the task state will be set to
-                    TASK_STOPPED.because @current been stopped,function schedule() will be called to
-                    relinquish CPU time,it will be resumed when SIGCONT has came or SIGKILL is received.
-                    if we can continue executing,do_signal_stop() finally returns 1.
+                                                                       /* @group_stop_count FALSE */
+                    try to do_signal_stop(@info->si_signo),if there is no group stop in progress,then a
+                    group stop will be initiated,all threads in the thread group will be stopped,and
+                    @group_stop_count is set to 1,increase it whenever a thread in the group is stopped.
+                    /**                                                /* wake up each thread to response STOP */
+                     * if there are no _other_ threads in the group or a group stop in progress and this
+                     * task is the last one,then have to notify its parent about CLD_STOPPED.
+                     * # set local variable @notify to 1,and call to do_notify_parent_cldstop() later if
+                     *   @notify is TRUE.
+                     */
+                    if @group_stop_count is TRUE,the current task state will be set to TASK_STOPPED.
+                    because @current been stopped,function schedule() will be called to relinquish CPU time,
+                    it will be resumed when SIGCONT has came or SIGKILL is received.if we can continue
+                    executing,do_signal_stop() finally returns 1.
+
                     
                     if do_signal_stop() returned TRUE,then go back to the starting of this routine.
                     else,continue to next for-cycle.                    
@@ -20251,10 +20270,16 @@ Chapter 11 : Signals
 
                   if @signr produces kernel coredump signal,then print the fatal signal in kernel
                   message queue(if global variable @print_fatal_signals is TRUE),call to
-                  do_coredump() for produce a coredump.
+                  do_coredump() for coredump producing.
+                  /* coredump signal is fatal signal,thus the process will be killed */
 
-                  @signr is not kernel coredump signal,call to do_group_exit(@info->si_signo).
-          }
+                  at the end of once for-cycle,call to do_group_exit(@info->si_signo).
+                  /**
+                   * if @signr cause coredump,do_group_exit() is processed right after the checking is
+                   * TRUE;if it is not,we still call to do_group_exit(),because other signals been handled
+                   * previously,and these remaining 18 signals terminates current process.
+                   */
+          } /* END OF for-cycle */
 
           unlock @siglock and enable local interrupt,returns @signr.
 
