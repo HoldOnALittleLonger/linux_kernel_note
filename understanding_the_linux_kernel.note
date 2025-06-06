@@ -3205,7 +3205,7 @@ Chapter 3 : Processes
           9>  @tsk->pid = pid_nr(pid)  /*  @pid is allocated by alloc_pid()  */
         
           10> if @clone_flags & CLONE_PARENT_SETTID => *@parent_tidptr = @tsk->pid
-              this work is did by do_fork() through put_user(Linux 2.6)
+              this work is did by do_fork() through put_user()(Linux 2.6)
 
           11> initializes the list_head data structures and the spin locks included in the child's process descriptor,
               and sets up several other fields related to pending signals,timers,and time statistics.
@@ -3989,12 +3989,12 @@ Chapter 4 : Interrupts and Exceptions
                 a>  reads the tr register to access the TSS segment of the running process.
                 b>  loads the ss and esp registers with the proper values for the stack segment and stack pointer
                     associated with the new privilege level.these values are found in the TSS.
-                c>  in the new stack,it saves the privous values of ss and esp,which define the logical address of the
+                c>  in the new stack,it saves the previous values of ss and esp,which define the logical address of the
                     stack associated with the old privilege level.
               }
         6>  if a fault has occurred,it loads cs and eip with the logical address of the instruction that caused the 
             exception so that is can be executed agian.
-        7>  saves the contents of eflags,cs,and eip on the stack.
+        7>  saves the contents of eflags,cs,and eip on the stack.(if cs.CPL != GDT.Segd.DPL -> Kernel Mode stack)
         8>  if the exception carries a hardware error code,it saves it on the stack.
         9>  loads cs and eip,respectively,with the Segment Selector and the Offset fields of the Gate Descriptor stroed
             in the i_th entry of the IDT.these values define the logical address of the first instruction of the 
@@ -18491,6 +18491,8 @@ Chapter 10 : System Calls
           code in the vsyscall page makes use of the best avaiable instruction to issue the
           system call.
 
+          vDSO : virtual dynamic shared object
+
           <arch/x86/vdso/vdso32-setup.c>
             /**
              * sysenter_setup - setup a vsyscall page frame for further system call
@@ -19393,10 +19395,11 @@ Chapter 11 : Signals
                   > saved sigmask,restored if set_restore_sigmask() was used
   
                 @sas_ss_sp => unsigned long
-                  > address of alternative signal handler stack
+                  > address of alternative signal handler stack(that is signal stack)
   
                 @sas_ss_size => size_t
                   > size of alternative signal handler stack
+                    sp register will be set to @sas_ss_sp + @sas_ss_size by __setup_rt_frame()
   
                 @notifier => int (*)(void *priv)
                   > function pointer used by a device driver to block some signals of the process
@@ -20109,6 +20112,8 @@ Chapter 11 : Signals
         /**
          * do_signal - handle pending signals before return to User Mode
          * @regs:      User Mode register contents
+         * # everytime to the invocation of this routine,only one signal will be delivered,
+         *   this approach ensures that real-time signals will be dealt with in the proper order
          */
         static void do_signal(struct pt_regs *regs);
 
@@ -20288,5 +20293,139 @@ Chapter 11 : Signals
            IS FATAL SIGNAL NOR WORK CONTROL SIGNAL,AND THE PENDING SIGNAL @signr NEITHER BEEN BLOECKED
            NOR BEEN IGNORED.
 
-            
+    Catching the Signal :
+      as the description above,if the signal has a registered signal handler,then it will be returned
+      by get_singal_to_deliver() in @return_ka.by this way,do_signal() can call to handle_signal() for
+      enforce the execution of the signal handler.
 
+      execution of signal handler is rather complex.the signal handler is defined in User Mode,so
+      it is inside to User Mode code segment,but handle_signal() runs in Kernel Mode.that means,
+      the kernel control path which executing handle_signal() must switch to User Mode before the
+      invocation to signal handler,and then return to Kernel Mode proceed the executing.there is a
+      problem,if kernel switch to User Mode,the Kernel Mode stack no longer contains the hardware context
+      of the interrupted program,because the Kernel Mode stack is emptied at every transition from
+      User Mode to Kernel Mode.
+      /**
+       * restore_all - restore hardware context.when a new switching occurs from User Mode to Kernel Mode,
+       * the Kernel Mode stack will stores the hardware context for this once,not the previous.
+       */
+      another problem,if the signal handler call to system call,the control path will return to signal handler,
+      not to the handle_signal().
+
+      the solution that adopted in Linux :
+        > copying the hardware context saved in the Kernel Mode stack onto the User Mode stack of the current
+          process,when the signal handler terminates,a system call named sigreturn() will be invoked automatically,
+          which copy the hardware context back on the Kernel Mode stack and restore the original content of the
+          User Mode stack.
+        !! IN LINUX 2.6.34.1 SIGNAL STACK IS USED TO STORES THE CONTEXT,IT IS NO LONGER BE STORED IN USER MODE
+           STACK.
+
+      the flow of executing signal handler :
+        @current -> interrupted -> interrupt service routine -> do_signal() -> get_signal_to_deliver() ->
+        handle_signal() -> setup_rt_frame() -> __setup_rt_frame() -> get_sigframe() -> back to __setup_rt_frame()
+        -> put_user_try { ... } -> back to setup_rt_frame() -> back to handle_signal() -> back to do_signal() ->
+        resume_userspace() -> registered signal handler -> retcode (sigreturn()) -> int $0x80 to retcode ->
+        switch to Kernel Mode -> restores hardware context -> return from system call -> @current
+
+      retcode :
+        /* retcode - return code used to invoke sys_sigreturn() right after signal handler finished */
+        <arch/x86/kernel/signal.c>
+          static const struct {
+                  u16 poplmovl;
+                  u32 val;
+                  u16 int80;
+          } __attribute__((packed)) retcode = {
+                  0xb858,           /* popl %eax; movl $...,%eax */
+                                    /* popl %eax => pop up the return value and restore sp */
+                  __NR_sigreturn,   /* sys_sigreturn() */
+                  0x80cd            /* int 0x80 */
+          };
+
+          /* for signals that do require signal information */
+          static const struct {
+                  u8 movl;
+                  u32 val;
+                  u16 int80;
+                  u8 pad;
+          } __attribute__((packed)) rt_retcode = {
+                  0xb8,             /* movl $...,%eax */
+                  __NR_rt_sigreturn,
+                  0x80cd            /* int $0x80 */
+                  0
+          };
+
+      related routines :
+        <arch/x86/kernel/signal.c>
+          /**
+           * get_sigframe - get the signal stack for the process
+           * @ka:           Kernel Mode signal action
+           * @regs:         User Mode register context
+           * @frame_size:   size of signal stack
+           * @fpstate:      floating point part state of Intel Processor
+           * return:        User Mode signal stack
+           *                -1L => invalid stack address,this will cause SIGSEGV
+           * # if we on signal stack(@regs->sp => signal stack)
+           *   signal stack := @regs->sp - (used_math ? : sig_xstate_size : 0)
+           *
+           *   if we are not
+           *   signal stack := current->sas_ss_sp + current->sas_ss_size - (used_math ? sig_xstate_size : 0)
+           *   @ka->sa.sa_flags enabled SA_ONSTACK
+           *
+           *   signal stack := @ka->sa.sa_restorer - (used_math ? sig_xstate_size : 0)
+           *   @regs->ss & 0xffff != __USER_DS AND NOT @ka->sa.sa_flags &SA_RESTORER AND @ka->sa.sa_restorer
+           * # before return to caller,the signal stack sp must be aligned through align_sigframe(@sp - @frame_size)
+           */
+          static inline void __user *
+          get_sigframe(struct k_sigaction *ka, struct pt_regs *regs, size_t frame_size, void __user **fpstate);
+
+          /**
+           * __setup_rt_frame - setup signal stack for the signal needs additional information
+           * @sig:              the signal number
+           * @ka:               Kernel Mode signal action
+           * @info:             signal info
+           * @set:              @saved_sigmask or @blocked,depends on do_signal()(TS_RESTORE_SIGMASK)
+           * @regs:             User Moe register context
+           * return:            0 => succeed
+           *                    others => error
+           */
+          static int __setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info, sigset_t *set,
+                                      struct pt_regs *regs);
+
+          brief description for __setup_rt_frame() :
+            this routine setup process signal stack.how to set up the registers of User Mode been described
+            in the description of handle_signal() above.
+            if access_ok() is failed on VERIFY_WRITE to signal frame,then -EFAULT will be returned to caller.
+            the important part of the routine is put_user_try { ... }.
+            put_user_try {
+                    /* setup signal stack */
+                    /* @frame got from get_sigframe() */
+
+                    frame->sig = @sig
+                    frame->pinfo = frame->info
+                    frame->puc = frame->uc
+                    copy_siginfo_to_user(frame->info, @info)
+
+                    /* create the ucontext */
+                    frame->uc.uc_flags = cpu_has_xsave ? UC_FP_XSTATE : 0
+                    frame->uc.uc_link = 0
+                    frame->uc.uc_stack.ss_sp = @current->sas_ss_sp
+                    frame->uc.uc_stack.ss_flags = sas_ss_flags(@regs->sp)
+                    frame->uc.uc_stack.ss_size = @current->sas_ss_size
+                    setup_sigcontext(frame->uc.uc_mcontext, fpstate, @regs, @set->sig[0])
+                    __copy_to_user(frame->uc.uc_sigmask, @set, sizeof(*@set))
+
+                    /* setup to return from userspace */
+                    /**
+                     * for IA32,retcode is sigreturn(),and for x86,retcode is rt_sigreturn().
+                     * handle_signal() just call to setup_rt_frame(),it do not care about the
+                     * architecture,this will be take charged by setup_rt_frame().
+                     * if architecture is x86,then whether signal info is required,__setup_rt_frame()
+                     * will be invoked.
+                     */
+                    /* restorer - local variable is type of void __user * */
+                    restorer = VDSO_32_SYMBOL(@current->mm->context.vdso, rt_sigreturn)
+                    restorer = @ka->sa.sa_flags & SA_RESTORER ? @ka->sa.sa_restorer : restorer
+                    frame->pretcode = restorer
+                    frame->retcode = *((u64 *)&rt_retcode)
+            }
+            if any error was occurred during put to user,-EFAULT will be return to setup_rt_frame().
