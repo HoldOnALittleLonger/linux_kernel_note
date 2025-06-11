@@ -20152,15 +20152,39 @@ Chapter 11 : Signals
          *                 otherwise,returns an error code
          * # in a simply description,this function call to setup_rt_frame() to setup register contents for
          *   handling the signal.
-         *   IP => @ka->sa.sa_handler
-         *   DI => signal number
-         *   AX => 0
-         *   SI => address of signal info in process's signal frame(been copied to the frame,if SA_SIGINFO
-         *         is enabled in @ka->sa.sa_flags)
-         *   DX => address of process's signal frame @uc(it is type of struct ucontext,represents user context,
-         *         the structure is defined in <asm-generic/ucontext.h>)
-         *   SP => address of process's signal frame
-         *   CS => __USER_CS
+         * # setup_rt_frame() might call to IA32 __setup_frame() or x86 __setup_rt_frame(),the different
+         *   routines setup registers with different values :
+         *     __setup_frame {
+         *             SP: signal frame
+         *             IP: @ka->sa.sa_handler
+         *             AX: @sig
+         *             DX: 0
+         *             CX: 0
+         *             DS: __USER_DS
+         *             ES: __USER_DS
+         *             SS: __USER_DS
+         *             CS: __USER_CS
+         *     }
+         *     __setup_rt_frame { /* 32-bit */
+         *             SP: signal frame
+         *             IP: @ka->sa.sa_handler
+         *             AX: @sig
+         *             DX: address of signal info in signal frame
+         *             CX: address of user space context in signal frame
+         *             DS: __USER_DS
+         *             ES: __USER_DS
+         *             SS: __USER_DS
+         *             CS: __USER_CS
+         *     } 
+         *     __setup_rt_frame { /* 64-bit */
+         *             DI: @sig
+         *             AX: 0
+         *             SI: address of signal info in signal frame
+         *             DX: address of user space context in signal frame
+         *             IP: @ka->sa.sa_handler
+         *             SP: signal frame
+         *             CS: __USER_CS
+         *     }
          */
         static int handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
                                  sigset_t *oldset, struct pt_regs *regs);
@@ -20322,8 +20346,8 @@ Chapter 11 : Signals
 
       the flow of executing signal handler :
         @current -> interrupted -> interrupt service routine -> do_signal() -> get_signal_to_deliver() ->
-        handle_signal() -> setup_rt_frame() -> __setup_rt_frame() -> get_sigframe() -> back to __setup_rt_frame()
-        -> put_user_try { ... } -> back to setup_rt_frame() -> back to handle_signal() -> back to do_signal() ->
+        handle_signal() -> setup_rt_frame() -> __setup_rt_frame() -> get_sigframe() -> return to __setup_rt_frame()
+        -> put_user_try { ... } -> return to setup_rt_frame() -> return to handle_signal() -> return to do_signal() ->
         resume_userspace() -> registered signal handler -> retcode (sigreturn()) -> int $0x80 to retcode ->
         switch to Kernel Mode -> restores hardware context -> return from system call -> @current
 
@@ -20353,6 +20377,83 @@ Chapter 11 : Signals
                   0x80cd            /* int $0x80 */
                   0
           };
+
+      signal frame datastructure :
+        <arch/x86/include/asm/sigframe.h>
+          /**
+           * sigframe_ia32 - signal frame for non-rt signal
+           * @pretcode:      pointer to the signal trampoline or vDSO.sigreturn or
+           *                 &this->retcode
+           * @sig:           signal number
+           * @sc:            object is type of struct sigcontext_ia32 which contains
+           *                 the hardware context of the User Mode process right before
+           *                 switching to Kernel Mode
+           * @fpstate_unused: the object used to store the floating point registers of the
+           *                  User Mode process
+           * @extramask:     bit array that specifies the blocked real-time signals
+           * @retcode:       machine code for the assembly code that issues a syscall to
+           *                 sys_sigreturn()
+           * # CONIFG_X86_32 || CONFIG_IA32_EMULATION
+           */
+          struct sigframe_ia32 {
+                  u32 pretcode;
+                  int sig;
+                  struct sigcontext_ia32 sc;
+                  struct _fpstate_ia32 fpstate_unused;
+          #ifdef CONFIG_IA32_EMULATION
+                  unsigned int extramask[_COMPAT_NSIG_WORDS - 1];
+          #else
+                  unsigned long extramask[_NSIG_WORDS - 1];
+          #endif
+                  char retcode[8];
+                  /* fp state follows here */
+          };
+
+          /**
+           * rt_sigframe_ia32 - signal frame used for real-time signal,the structure is
+           *                    similar to sigframe_ia32
+           * @pretcode:         signal trampoline or vDSO.rt_sigreturn
+           * @sig:              signal number
+           * @pinfo:            pointer to signal info
+           * @puc:              pointer to struct ucontext object
+           * @info:             IA32 compatibility
+           * @uc:               user space context
+           * @retcode:          machine code to issues sys_rt_sigreturn()
+           * # CONFIG_X86_32 || CONFIG_IA32_EMULATION
+           */
+          struct rt_sigframe_ia32 {
+                  u32 pretcode;
+                  int sig;
+                  u32 pinfo;
+                  u32 puc;
+          #ifdef CONFIG_IA32_EMULATION
+                  compat_siginfo_t info;
+          #else
+                  struct siginfo info;                  
+          #endif
+                  struct ucontext_ia32 uc;
+                  char retcode[8];
+                  /* fp state follows here */
+          };
+
+          /**
+           * rt_sigframe - real time signal frame
+           * @pretcode:    pointer to the signal trampoline
+           * @uc:          user space context
+           * @info:        signal info
+           * # CONFIG_X86_64
+           * # x86-64 always use SA_RESTORER
+           */
+          struct rt_sigframe {
+                  char __user *pretcode;
+                  struct ucontext uc;
+                  struct siginfo info;
+                  /* fp state follows here */
+          };
+
+        !! @retcode in earlier Linux was effectively executed to return from the signal
+           handler;since Linux 2.6,this field is used only as a signature,so that debuggers
+           can recognize the signal stack frame.
 
       related routines :
         <arch/x86/kernel/signal.c>
@@ -20421,6 +20522,9 @@ Chapter 11 : Signals
                      * architecture,this will be take charged by setup_rt_frame().
                      * if architecture is x86,then whether signal info is required,__setup_rt_frame()
                      * will be invoked.
+                     * # IA32 AND sa_flags & SA_SIGINFO -> ia32_setup_rt_frame
+                     * # IA32 -> ia32_setup_frame
+                     *   ! if defined CONFIG_X86_32,they are defined as __setup_rt_frame and __setup_frame
                      */
                     /* restorer - local variable is type of void __user * */
                     restorer = VDSO_32_SYMBOL(@current->mm->context.vdso, rt_sigreturn)
