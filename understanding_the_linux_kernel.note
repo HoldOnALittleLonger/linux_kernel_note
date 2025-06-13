@@ -3991,6 +3991,10 @@ Chapter 4 : Interrupts and Exceptions
                     associated with the new privilege level.these values are found in the TSS.
                 c>  in the new stack,it saves the previous values of ss and esp,which define the logical address of the
                     stack associated with the old privilege level.
+                    /**
+                     * if start using Kernel Mode stack,the context of ss and esp in User Mode will be saved on the
+                     * Kernel Mode stack.
+                     */
               }
         6>  if a fault has occurred,it loads cs and eip with the logical address of the instruction that caused the 
             exception so that is can be executed agian.
@@ -4787,6 +4791,7 @@ Chapter 4 : Interrupts and Exceptions
           SAVE_ALL :
             an assembly language macro.
             saves the contents of all registers that the interrupt handler maybe use on the Kernel Mode stack.
+            /* through "push" instruction */
 
             ... # save all registers' contents on Kernel Mode stack 
 
@@ -20212,6 +20217,22 @@ Chapter 11 : Signals
         static int handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
                                  sigset_t *oldset, struct pt_regs *regs);
 
+        ! handle_signal() call to sigorsets() to does OR between @current->blocked and @ka->sa.sa_mask,
+          the result is write into @current->blocked.
+          before return to do_signal(),have to invoke recalc_sigpending() to check that if
+          nonblocked signals are pending of current process.
+          /**
+           * recalc_sigpending() :
+           *   set TIF_SIGPENDING of the task and return 1 if
+           *     @group_stop_count < 0 ||
+           *     signal in @pending is not blocked in @blocked ||
+           *     signal in @shared_pending is not blocked in @blocked
+           *   otherwise return _zero_
+           */
+        ! if @ka->sa.sa_flags disabled SA_NODEFER,then handle_signal() will place this signal @sig
+          into the blocked signal set @blocked of the task struct.
+          this will block the signal during signal handler is executing.
+
       <kernel/signal.c>
         /**
          * get_signal_to_deliver - deliver both process pending signals and group pending signals
@@ -20431,7 +20452,6 @@ Chapter 11 : Signals
                   char retcode[8];
                   /* fp state follows here */
           };
-
           /**
            * rt_sigframe_ia32 - signal frame used for real-time signal,the structure is
            *                    similar to sigframe_ia32
@@ -20493,7 +20513,7 @@ Chapter 11 : Signals
            *
            *   if we are not
            *   signal stack := current->sas_ss_sp + current->sas_ss_size - (used_math ? sig_xstate_size : 0)
-           *   @ka->sa.sa_flags enabled SA_ONSTACK
+           *   /* @ka->sa.sa_flags enabled SA_ONSTACK */
            *
            *   signal stack := @ka->sa.sa_restorer - (used_math ? sig_xstate_size : 0)
            *   @regs->ss & 0xffff != __USER_DS AND NOT @ka->sa.sa_flags &SA_RESTORER AND @ka->sa.sa_restorer
@@ -20556,3 +20576,98 @@ Chapter 11 : Signals
                     frame->retcode = *((u64 *)&rt_retcode)
             }
             if any error was occurred during put to user,-EFAULT will be return to setup_rt_frame().
+
+      !! after signal handler accomplished,the assembly instruction "ret" will pop up the top of signal
+         frame into the eip register,the next instruction address is pointed by @pretcode which is setup by
+         setup_rt_frame() previously in Kernel Mode called by handle_signal().
+         +----------------+
+         |    pretcode    | <= ESP /* @pretcode points to @retcode or vDSO.rt_sigreturn or signal trampoline */
+         +----------------+
+         |      sig       | => this element will be discarded frome stack because the "popl %eax" in @retcode
+         +----------------+
+         |     pinfo      |
+         +----------------+
+         |      puc       |
+         +----------------+
+         |     info       |
+         +----------------+
+         |      uc        |
+         +----------------+
+         |    retcode     | => machine code to issue syscall sys_rt_sigreturn()
+         +----------------+
+         |    fp state    |
+         +----------------+
+         |    ...         |
+
+      sys_rt_sigreturn() :
+        <arch/x86/kernel/signal.c>
+          /**
+           * sys_rt_sigreturn - syscall routine is issued after real-time signal handler accomplished
+           * @regs:             User Mode registers context
+           * return:            0 => failed
+           *                    the previous value in ax => succeed
+           */
+          long sys_rt_sigreturn(struct pt_regs *regs);
+          
+          brief description for sys_rt_sigreturn() :
+            this routine receives a parameter is the User Mode registers context.
+            it compute the address of object type of struct rt_sigframe from @regs->sp.
+            /**
+             * [ pretcode ] [ sig ] [ ... ]
+             *              esp
+             * esp - sizeof(long)
+             * @pretcode should been pop up by returning from signal handler.
+             * @sig should been pop up by @retcode.
+             * but the routine is called through rt_retcode,thus only one element been popped up.
+             * ! stack starting from high address,grows to low address.
+             *   push => -4 / (-8)
+             *   pop  => +4 / (+8)
+             */
+            the address of the frame is @regs->sp - sizeof(long).
+            if access_ok() on @frame with VERIFY_READ was failed,then goto badframe label.
+            if failed to copy signal mask in @frame->uc.uc_sigmask,also goto badframe label.
+            next,delete all _BLOCKABLE signals inside the @uc_sigmask,and use the new set to
+            /* _BLOCKABLE => ~(sigmask(SIGKILL) | sigmask(SIGSTOP)) */
+            setup @current->blocked the block signal mask during signal handler executing.
+            call to recalc_sigpending(),if any pending signal has delivered,it will be handled
+            at next interrupt.
+            call to restore_sigcontext() to restore the User Mode context before signal handling,
+            if failed,goto badframe label.
+            /**
+             * static int restore_sigcontext(@regs, @sc, @pax,used to store @sc->ax) :
+             *   it is defined in the same file.
+             *   the main task this routine does is get from user,and store into @regs.
+             *     set_user_gs(@regs, GET_SEG(gs))
+             *     COPY_SEG(fs)
+             *     COPY_SEG(es)
+             *     COPY_SEG(ds)
+             *     COPY(di) COPY(si) COPY(bp) COPY(sp)
+             *     COPY(bx) COPY(dx) COPY(cx) COPY(ip)
+             *     COPY_SEG_CPL3(cs)
+             *     COPY_SEG_CPL3(ss)
+             *     @regs->flags = (@regs->flags & ~FIX_EFLAGS) | (@sc->flags & FIX_EFLAGS)
+             *     @regs->orig_ax = -1
+             *     restore_i387_xstate(@sc->fpstate)
+             * macros :
+             *   FIX_EFLAGS => (__FIX_EFLAGS | X86_EFLAGS_RF)
+             *   __FIX_EFLAGS => X86_EFLAGS_AC | X86_EFLAGS_OF | X86_EFLAGS_DF | X86_EFLAGS_TF |
+             *                   X86_EFLAGS_SF | X86_EFLAGS_ZF | X86_EFLAGS_AF | X86_EFLAGS_PF |
+             *                   X86_EFLAGS_CS
+             *   COPY(x) => get_user_ex(regs->x, &sc->x)
+             *   GET_SEG(seg) => return tmp,get_user_ex(tmp, &sc->seg)
+             *   COPY_SEG(seg) => regs->seg = GET_SEG(seg)
+             *   COPY_SEG_CPL3(seg) => regs->seg = GET_SEG(seg) | 3  # User Mode CPL
+             */
+            proceed call to do_sigaltstack(),this routine is defined in <kernel/signal.c>,it alters
+            the signal stack of @current process.it handles two task,the first is reset @sas_ss_sp
+            and @sas_ss_size of current task if the first parameter is not NULL;the second is setup
+            contents of @sas_ss_sp through the second parameter,if it is not NULL.
+            /**
+             * it requires two stack_t pointer and one unsigned long value @sp,return error code if
+             * failed.
+             */ 
+            finally,returns local variable @ax,it should been setup by restore_sigcontext().
+            badframe:
+              signal_fault(@regs, @frame, "rt_sigreturn")
+              return 0;
+        
