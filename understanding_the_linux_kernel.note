@@ -4777,11 +4777,11 @@ Chapter 4 : Interrupts and Exceptions
         an interrupt.
 
         common_interrupt:
-          addl $-0x80,(%esp)
+          addl $-0x80,(%esp)        # adjust interrupt vector to [-256, -1]
           SAVE_ALL
           TRACE_IRQS_OFF
           movl %esp,%eax
-          call do_IRQ
+          call do_IRQ               # the corresponding ISR will be called by do_IRQ()
           jmp ret_from_intr
         ENDPROC(common_interrupt)   #  a macro function is defined in <linux/linkage.h>,
                                     #  it will have expended to 
@@ -4828,6 +4828,7 @@ Chapter 4 : Interrupts and Exceptions
            *     is named @bx with type of unsigned long.
            *     the member @orig_ax saved the vector of current irq,because its content is the 
            *     content of esp before @SAVE_ALL had called.
+           *  #  do_IRQ() receives the argument through eax register
            */
           extern unsigned int __irq_entry do_IRQ(struct pt_regs *regs);
 
@@ -18359,7 +18360,7 @@ Chapter 10 : System Calls
       Issuing a System Call via "int $0x80" instruction :
         the "traditional" way to invoke a system call makes use of the "int" assembly language
         instruction.
-        interrupt vector 128--0x80 is associated with the kernel entry point,it was setup by 
+        interrupt vector 128 -- 0x80 is associated with the kernel entry point,it was setup by 
         trap_init() during kernel initialization.
         macro constant SYSCALL_VECTOR(0x80) is defined in <arch/x86/include/asm/irq_vectors.h>,
         and kernel routine trap_init() use it to setup a System Gate,and associated function
@@ -20670,4 +20671,38 @@ Chapter 11 : Signals
             badframe:
               signal_fault(@regs, @frame, "rt_sigreturn")
               return 0;
+
+    Reexecution of System Calls :
+      kernel puts the User Mode process issued a system call to TASK_INTERRUPTIBLE or TASK_UNINTERRUPTIBLE if
+      this system call can not be satisfied immediately.
+      in the case a signal is send to the process in TASK_INTERRUPTIBLE,then kernel will puts it to TASK_RUNNING,
+      and proceed to handles the signal through signal handler,after signal handler accomplished,it switch back
+      to Kernel Mode.
+      the system call is been interrupted,and error code EINTR will be return back to User Mode,this is generallly.
+      but of course,there is not only one error code existing,the remains are used internally by Kernel to
+      specify whether the system call may be reexecuted automatically after the signal handler termination.
+        Signal action   EINTR        ERESTARTSYS        ERESTARTNOHAND                ERESTARTNOINTR
+                                                        ERESTART_RESTARTBLOCK
+        default         terminate    reexecute          reexecute                     reexecute
+        ignore          terminate    reexecute          reexecute                     reexecute
+        catch           terminate    depends            terminate                     reexecute
+
+        ! ERESTARTNOHAND and ERESTART_RESTARTBLOCK error codes differ on the mechanism used to restart the
+          system call.
+        ! terminate => no system call restart,-EINTR is returned to User Mode process
+          reexecute => reexecute system call,this is invisible to User Mode process
+          depends   => reexecute system call if and only if SA_RESTART flag of the delivered signal is set
         
+      kernel must to determines that the process which the signal is delivered to is really issued a system call
+      before attempts reexecute system call.the member named @orig_ax in struct pt_regs as indicator,if the process
+      really issued a system call,@orig_ax must stored the system call number.
+      
+      @orig_ax :
+              interrupt => IRQ number associated with the interrupt minus 256
+                           /* common_interrupt() adjusted the vector value to [-256, -1] */
+              0x80 exception => system call number
+              other exceptions => -1
+
+      so we can easy to know that @orig_ax >= 0 means the signal woken up a TASK_INTERRUPTIBLE process that was
+      sleeping in a system call. /* system call interrupted,if we do not reexecute it,should return -EINTR in eax */
+
