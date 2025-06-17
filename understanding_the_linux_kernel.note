@@ -9405,7 +9405,7 @@ Chapter 6 : Timing Measurements
            what do_nanosleep does :
              1>  set @t->function to hrtimer_wakeup(),
                  set @t->task to @current
-             2>  enter do-while loop until hrtimer completed or interrupted by an signal,
+             2>  enter do-while loop until hrtimer completed(@t->task == NULL) or interrupted by an signal,
              3>  set @current to TASK_INTERRUPTIBLE
              4>  start timer expiring through hrtimer_start_expires(&@t->timer, @mode)
              5>  if timer inactive,set sleeper's @task to NULL
@@ -20705,4 +20705,50 @@ Chapter 11 : Signals
 
       so we can easy to know that @orig_ax >= 0 means the signal woken up a TASK_INTERRUPTIBLE process that was
       sleeping in a system call. /* system call interrupted,if we do not reexecute it,should return -EINTR in eax */
+
+      Restarting a system call interrupted by a non-caught signal :
+        if the signal is explicitly ignored or if its default action is enforced,do_signal() analyzes the error code
+        of the system call to decide whether the unfinished system call must be automatically reexecuted.
+        /**
+         * as the description of do_signal() above,it retrieves the system call number through syscall_get_nr() routine,
+         * if the number is greater than or equal to _zero_,then it means we come from a system call.
+         * in this case,it get the error code through syscall_get_error() routine.
+         * # "@regs->ip -= 2;" => instructions "int $0x80" and "sysenter" are 2bytes long
+         */
+
+        as we have knew that do_signal() set eax to the number of system call restart_syscall() when the error code is
+        -ERESTART_RESTARTBLOCK.this error code is usually returned by timer-related system call,in this case,before
+        restart the system call,must adjust its parameters at first.
+        suppose nanosleep(20) been issued a timer will expired in 20 milliseconds,if the system call is interrupted at
+        10 milliseconds,the argument to restarted nanosleep() should be 10 milliseconds,not 20 milliseconds.
+        /**
+         * we have knew that the system call nanosleep() is actually call to hrtimer_nanosleep(),and the routine will
+         * fills the restart_block in the task's thread_info structure.
+         * and the restart_syscall() is actually process the statement
+         *         current_thread_info()->restart_block->fn(current_thread_info()->restart_block);
+         * # restart_syscall() is defined in <kernel/signal.c> by SYSCALL_DEFINE0().
+         */
+      
+      Restarting a system call for a caught signal :
+        if the signal is caught by process,then handle_signal() deal with reexecuting system call.in this case,
+        the signal number got through routine get_signal_to_deliver() is greater than _zero_,and do_signal()
+        will return to caller after handle_signal() is accomplished.
+        handle_signal() does the similar steps to deal with reexecute system call.
+        handle_signal() :
+          first,it get error code of the interrupted system call
+          next check the error code {
+                  -ERESTART_RESTARTBLOCK
+                  -ERESTARTNOHAND
+                          set ax to -EINTR
+                          do not reexecute system call
+                  -ERESTARTSYS
+                          check if SA_RESTART been disabled in @ka->sa.sa_flags
+                          in this case,set ax to -EINTR
+                          do not reexecute system call
+                  -ERESTARTNOINTR
+                          set ax to @orig_ax
+                          set ip to @ip -= 2
+                          the system call will be restarted after signal handler accomplished
+          }
+          ... setup signal handler processing environment ...
 
