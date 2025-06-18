@@ -20752,3 +20752,70 @@ Chapter 11 : Signals
           }
           ... setup signal handler processing environment ...
 
+    System Calls Related to Signal Handling :
+      The kill() System Call :
+        kill() => C lib wrapper
+        sys_kill() => Linux Kernel syscall
+
+        it recevies two parameters and returns a value is type of long(Kernel syscall definition).
+        1st param @pid
+          > 0 => the signal is sent to the thread group of the process whose PID is equal to @pid
+          = 0 => the signal is sent to all thread groups of the processes in the same process group
+                 as the calling process
+          = -1 => the signal is sent to all processes,except swapper,init,and @current
+          < -1 => the signal is sent to all thread groups of the processes in the process group whose
+                  ID is -@pid
+        2nd param @sig
+          the signal number
+
+        sys_kill() :
+          setup minimal signal information,and call to kill_something_info(),returns to caller what the
+          routine returned.
+          /**
+           * @si_code := SI_USER
+           * @si_pid := current task's thread group id
+           * @si_uid := current task's user id
+           */
+          kill_something_info() call to kill_pid_info() while @pid > 0;call to __kill_pgrp_info() while @pid != -1;
+          call to group_send_sig_info() in a for-cycle for send signal to each process in the system while @pid == -1.
+          /* of couse,if @pid < -1,it call to __kill_pgrp_info() with a -@pid. */
+
+        ! sys_kill() can send standard signals and real-time signals,but it would not queue real-time signals,so that,
+          we should not use this system call to send real-time signal.
+        ! SystemV and BSD Unix variants also have a killpg() system call,it is used to send signal to a process group
+          explicitly.however,Linux implemented it via library function that uses kill() system call.
+          another variation is raise() system call,it send signal to this task,and Linux implemented also via library
+          function.
+
+      The tkill() and tgkill() System Calls :
+        these two system calls are defined in <kernel/signal.c>,same file as the sys_kill().
+        tgkill() requires three parameters,and tkill() requires two parameters.
+
+        tgkill() :
+          1st param => tgid,the thread group id
+          2nd param => pid,the process id
+          3rd param => signal number
+
+          it is used to send signal to one specific thread,and the thread is a member of the thread group whose id
+          is @tgid,and the thread has the PID @pid.
+          if @pid <= 0 OR @tgid <= 0,it returns -EINVAL.
+          if the thread group with id @tgid is not exist,returns -ESRCH even the task has id @pid is exist.
+          /* of course,if the task is not exist,-ESRCH also be returned to caller */
+          this routine is actually returns to caller by call to do_tkill(),and which call to do_send_specific(),
+          and do_send_sig_info(),finally,end up to __send_signal().
+          /**
+           * the only thing in signal info different to sys_kill() is @si_code,it fills the field with SI_TKILL.
+           */
+
+        tkill() :
+          1st param => pid,the process id
+          2nd param => signal number
+
+          this routine send a signal to only one task,even if it is a CLONE_THREAD task.
+
+          if @pid <= 0,it returns -EINVAL to caller.
+          this routine is also returns to caller by call to do_tkill(),but the parameter @tgid is _zero_.
+
+        ! pthread_kill() function of every POSIX-compliant pthread library invokes either of them to send a
+          signal to a specific lightweight process.
+
