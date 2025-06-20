@@ -20819,3 +20819,86 @@ Chapter 11 : Signals
         ! pthread_kill() function of every POSIX-compliant pthread library invokes either of them to send a
           signal to a specific lightweight process.
 
+      Changing a Signal Action :
+        system call sigaction() is used to change the signal action for standard signal.
+        the routine sys_sigaction() is called by C lib wrapper sigaction().
+
+        <arch/x86/kernel/signal.c>
+          /**
+           * sys_sigaction - system call service routine used to change signal action
+           * @sig:           signal number
+           * @act:           new action
+           * @oact:          used to store the old action,if it is not NUL
+           * return:         -EFAULT => failed to set new actioon or old action
+           *                 -EINVAL => invalid signal or kernel only signal
+           *                 0 => succeed
+           * # structure old_sigaction has the same members to structure sigaction
+           */
+          asmlinkage int sys_sigaction(int sig, const struct old_sigaction __user *act,
+                                       struct old_sigaction __user *oact);
+
+          brief description for sys_sigaction() :
+            use the parameter @act to setup a local variable to retrieves the signal action related
+            info from user space. /* get_user_ex(),include setup @sa_mask */
+            if any error encountered during retrieving,return -EFAULT. /* if deny VERIFY_READ,return -EFAULT */
+            next,call to do_sigaction(),if @act is not NULL,then pass the local variable @new_ka;
+            otherwise,pass NULL to it.and if @oact is not NULL,then pass the local variable @old_ka,
+            otherwise,pass NULL to it.
+            proceed to check if return value from do_sigaction() is not _zero_ AND @oact is not NULL,
+            in this case,it fills @oact through @old_ka;if @oact deny VERIFY_WRITE,return -EFAULT,
+            if any error is encountered during filling,return -EFAULT.
+            finally,return _zero_.
+
+        <kernel/signal.c>
+          /**
+           * do_sigaction - routine called by sys_sigaction() to setup signal action
+           * @sig:          signal number
+           * @act:          new action
+           * @oact:         store old action
+           * return:        -EINVAL => invalid signal
+           *                0 => succeed
+           * # POSIX 3.3.1.3 :
+           *     setting a signal action to SIG_IGN for a signal that is pending shall cause
+           *     the pending signal to be discarded,whether or not it is blocked
+           *     setting a signal action to SIG_DFL for a signal that is pending and whose
+           *     default action is to ignore the signal,shall cause the pending signal to be
+           *     discarded,whether or not it is blocked
+           */
+          int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact);
+
+          brief description for do_sigaction() :
+            this routine first to checks if @sig is invalid,it is,then return -EINVAL.
+            get the kernel sigaction object of this process,@current->sighand->action[@sig - 1].
+                                                            /* array index starting from _zero_ */
+            acquire @siglock inside to @sighand,and disable local interrupt.
+            fill @oact if it is not NULL,it will store the old sigaction.
+            check if @act is TRUE,then prepare to setup new action.
+            delete SIGKILL and SIGSTOP from @sa_mask,because these two signals neither can be caught nor
+            can be ignored.
+            next,use @act to setup the correspond action at the position @sig - 1 in @sighand->@action.
+            proceed to do POSIX request checking,if the new action is SIG_IGN or is SIG_DFL but the default
+            action is SIG_IGN,then discarded the pending signal.
+            /* @handler == SIG_IGN || (@handler == SIG_DFL && sig_kernel_ignore(@sig)) */
+            /**
+             * add @sig to a local object is type of sigset_t
+             * call to rm_from_queue_full(&mask, @shared_pending)
+             * do-while cycle to rm_from_queue_full(&mask, @pending) for each thread of this process
+             */
+            finally,unlock the spinlock acquried previously,enable local interrupt,return _zero_.
+
+      Examing the Pending Blocked Signals :
+        system call sigpending() allows a process to examine the set of pending blocked signals,
+        the corresponding sys_sigpending() is defined in <kernel/signal.c> through SYSCALL_DEFINE1().
+        it require only one parameter is named @set that is type of old_sigset_t*.
+                                                                    /* typedef unsigned long old_sigset_t */
+        sys_sigpending() :
+          it returned to caller actually by call to do_sigpending(@set, sizeof(*@set)).
+          do_sigpending() must check if its second parameter @sigsetsize is less than or equal to sizeof(sigset_t),
+          if it is not,return -EINVAL to caller.
+          and then,acquire local @siglock in @sighand,disable local interrupt.
+          combine @pending.signal and @shared_pending.signal,the result is stored into @pending.
+          release spinlock,enable local interrupt.
+          disable all blocked signals inside the @pending mask.
+          attempts to copy @pending to @set which is inside to user space,if failed,return -EFAULT.
+          finally,return _zero_.
+        
