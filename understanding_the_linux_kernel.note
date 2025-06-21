@@ -20901,4 +20901,83 @@ Chapter 11 : Signals
           disable all blocked signals inside the @pending mask.
           attempts to copy @pending to @set which is inside to user space,if failed,return -EFAULT.
           finally,return _zero_.
-        
+
+      Modifying the Set of Blocked Signals :
+        system call sigprocmask() is used to modify the set of blocked signals,but it only applies to regular siganls.
+        the corresponding kernel routine is sys_sigprocmask().
+
+        <kernel/signal.c>
+          /**
+           * sys_sigprocmask - system call allows process in User Mode to modify its blocked regular signals set
+           * @how:             SIG_BLOCK => add @set into @blocked,except SIGKILL and SIGSTOP
+           *                   SIG_UNBLOCK => delete the signals inside to @set from @blocked
+           *                   SIG_SETMASK => use @set to reset @blocked,except SIGKILL and SIGSTOP
+           * @set:             signal mask
+           * @oset:            if not NULL,used to store the old set
+           * return:           -EFAULT => failed to set signal mask
+           *                   -EINVAL => invalid @how
+           *                   0 => succeed
+           * # because this routine only applies to regular signals,thus @current->blocked.sig[0] would be selected
+           * # before take the action @how on @blocked,must acquire @siglock,disable local interrupt at first
+           * # if @set is NULL,this routine will not modify current blocked signal mask
+           *   if @oset is NULL,this routine will not return the old blocked signal mask
+           * !! AFTER THE ACTION @how PROCESSED,ROUTINE recalc_sigpending() WILL BE CALLED TO RE-CALCULATE PENDING
+           *    SIGNALS
+           */
+          SYSCALL_DEFINE3(sigprocmask, int, how, old_sigset_t __user *, set, old_sigset_t __user *, oset);
+          => asmlinkage long sys_sigprocmask(...);        
+
+      Suspending the Process :
+        system call sigsuspend() puts the process in the TASK_INTERRUPTIBLE state,and it will wake up only
+        when a nonignored,nonblocked signal is sent to it.
+        the corresponding kernel routine is sys_sigsuspend().
+
+        <arch/x86/kernel/signal.c>
+          /**
+           * sys_sigsuspend - suspend current process until a nonignored,nonblocked signal is delivered to it
+           * @history0:       unused
+           * @history1:       unused
+           * @mask:           the signal mask is used to reset @blocked for preparing suspend
+           * return:          -ERESTARTNOHAND
+           * # only blockable signals can get appearence in @mask
+           */
+          asmlinkage int sys_sigsuspend(int history0, int history1, old_sigset_t mask);
+
+          brief description for sys_sigsuspend() :
+            disable unblockable signals in the @mask.
+            acquire @siglock and disable local interrupt.
+            temporary stores @blocked into @saved_sigmask.
+            use @mask to reset @blocked.
+            recalculate signals pending.
+            release lock and enable local interrupt.
+            put this process into TASK_INTERRUPTIBLE state.
+            call to schedule().
+            after switch to this process,restore @blocked and return -ERESTARTNOHAND.
+            /**
+             * if we have been woke up by a signal,then -ERESTARTNOHAND will be returned,so it is
+             * stored in eax.
+             * resume_userspace() will check signal delivering,thus do_signal() is invoked.
+             * after the corresponding signal handler accomplished,-EINTR will be return to caller,
+             * and the system call sys_sigsuspend() is finished.
+             */
+
+          ! sys_sigsuspend() swap @blocked atomatically,just combine sigprocmask() and sleep() can not
+            ensure atomic operation.
+
+      System Calls for Real-Time Signals :
+        regular signals and real-time signals associated different system call routines.
+
+        real-time signal system call :
+          rt_sigaction
+          rt_sigpending
+          rt_sigprocmask
+          rt_sigsuspend
+
+          rt_sigqueueinfo => sends a real-time signal so that it is added to the shared pending signal
+                             queue of the destination process.
+                             /* C lib wrapper sigqueue() call to this routine */
+          rt_sigtimedwait => dequeues a blocked pending signal without delivering it and returns the
+                             signal number to the caller;if no blocked signal is pending,suspends the
+                             current process for a fixed amount of time.
+                             /* C lib wrapper sigwaitinfo() and sigtimedwait() call to this routine */
+
