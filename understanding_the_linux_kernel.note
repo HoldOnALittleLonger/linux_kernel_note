@@ -20981,3 +20981,49 @@ Chapter 11 : Signals
                              current process for a fixed amount of time.
                              /* C lib wrapper sigwaitinfo() and sigtimedwait() call to this routine */
 
+
+
+Chapter 12 : The Virtual Filesystem
+    Virtual Filesystem allows Linux to manages multiple filesystem types in the same way.
+
+    The Role of the Virtual Filesystem(VFS) :
+      Virtual Filesystem(Virtual Filesystem Switch OR VFS) is a kernel software layer that handles all
+      system calls related to a standard Unix filesystem.it providing a common interface to several
+      kinds of filesystem.
+
+      [ user program ] <====> [ Linux VFS ] <====> [ real filesystem ]
+      whatever the "real filesystem" it is,user program is able to access the files in the same way.
+
+      The first Virtual Filesystem was inclued in Sun Microsystem's SunOS in 1986.
+
+      Three groups of filesystems supported by the VFS :
+        1> Disk-based filesystems
+           filesystem is installed on the local disk device or disk emulating device.
+             EXT2 EXT3 EXT4 /* Unix and Linux */
+             SYSV UFS MINIX VERITAS VxFS /* Unix variants */
+             MS-DOS VFAT NTFS /* Windows */
+             ISO9660-CD-ROM UDF(Universal Disk Format) /* DVD */
+             HPFS HFS AFFS ADFS /* IMB or Apple,etc */
+             JFS XFS /* journaling filesystems */
+        2> Network filesystems
+           filesystem is installed in the different network computer.
+             NFS
+             Coda
+             AFS /* Andrew filesystem */
+             CIFS /* Common Internet File System */
+             NCP /* Novell's NetWare Core Protocal */
+        3> Special filesystems
+           no manage disk space,either locally or remotely.such filesystem is installed in the memory.
+             devtmpfs
+             tmpfs 
+             sysfs
+             proc
+             cgroup
+             mqueue
+             ...
+
+      VFS can handles virtual block devices such /dev/loop0 .
+      
+            
+
+
