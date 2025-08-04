@@ -21023,7 +21023,63 @@ Chapter 12 : The Virtual Filesystem
              ...
 
       VFS can handles virtual block devices such /dev/loop0 .
-      
-            
 
+    The Common File Model :
+      The key idea behind the VFS consists of introducing a "common file model" capable of representing all
+      supported filesystems.the model is strictly mirros the file model provided by the traditional Unix system.
+      each specific filesystem implementation must translates its physical organaization into the VFS's common
+      file model.
 
+      if some object is necessary for translate file model,Linux would allocates them in the memory,deallocates
+      them when the filesystem is unmounted.
+      Linux use pointer-to-implementation to handles different filesystem operations,the functions are registered
+      by the filesystem and will be called when access to the files on it.
+      /* such operations are contained in @f_op member of struct file */
+
+      The common file model consists of the following object types :
+        The superblock object
+          stores information concerning a mounted filesystem. /* i.e. filesystem control block on the disk */
+        The inode object
+          stores general information about a specific file. /* i.e. file control block on the disk */
+          used to uniquely identifies the file within the filesystem.
+        The file object
+          stores information about the interaction between an open file and a process.
+          this information exists only in kernel memory during the period when the file is opening.
+        The dentry object
+          stores information about the linking of a directory entry with the corresponding file.
+          /* each disk-based filesystem stores this information in its own particular way on disk */
+
+        e.g.
+          +-----------+
+          | disk file |<----+-------------+
+          +-----------+     |             |
+                            |             |
+                        +------------+    +-------+
+                        | superblock |<---| inode |
+                        +------------+    +-------+
+                                            ^   ^
+                                            |   |   
+                                       +----+   +---+
+                                       |            |
+                                    +--------+  +--------+
+                                    | dentry |  | dentry |
+                                    +--------+  +--------+
+                                     ^          ^
+                  +------+           |          |
+                  | file |-----------+          |
+                  +------+(hard link)|          |
+                                     |          |
+                  +------+           |          |
+                  | file |-----------+          |
+                  +------+                      |
+                                                |
+                  +------+                      |
+                  | file |----------------------+ (hard link)
+                  +------+
+
+                  /* private file object */
+
+      except common interface,VFS also provides a disk cache named dentry cache.which is used to
+      speed up the translation from a file pathname to the inode of the last pathname component.
+      it is a software mechanism that alows the kernel to keep in RAM some information that is
+      normally stored on a disk.
