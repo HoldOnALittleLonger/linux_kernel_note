@@ -21083,3 +21083,179 @@ Chapter 12 : The Virtual Filesystem
       speed up the translation from a file pathname to the inode of the last pathname component.
       it is a software mechanism that alows the kernel to keep in RAM some information that is
       normally stored on a disk.
+
+    System Calls Handled by the VFS :
+      there are three groups of system calls handled by the VFS.
+      the first group related to filesystem,regular file,directory,and symbolic.
+      the second group related to device file and pipe.
+      the third group related to network implementation.
+
+      list of system call primitives :
+        mount umount umount2
+        sysfs
+        statfs fstatfs statfs64 fstatfs64 ustat
+        chroot privot_root
+        chdir fchdir getcwd
+        mkdir rmdir
+        getdents getdents64 readdir link unlink rename lookup_dcookie
+        readlink symlink
+        chown fchown lchown chown16 fchown16 lchown16
+        chmod fchmod utime
+        stat fstat lstat access oldstat oldfstat oldlstat stat64 lstat64 fstat64
+        open close creat umask
+        dup dup2 fcntl fcntl64
+        select poll
+        truncate ftruncate truncate64 ftruncate64
+        lseek _llseek
+        read write readv writev sendfile sendfile64 readahead
+        io_setup io_submit io_getevents
+        io_cancel io_destroy
+        pread64 pwrite64
+        mmap mmap2 munmap madvise mincore remap_file_pages
+        fdatasync fsync sync msync
+        flock
+        setxattr lsetxattr fsetxattr getxattr lgetxattr fgetxattr listxattr \
+        llistxattr flistxattr removexattr lremovexattr fremovexattr
+
+    VFS Data Structures :
+     Superblock Objects :
+       structure super_block is used to stores the filesystem control informations.
+       in other word,super block represents a filesystem,inodes must be linked into the super block.
+
+       <linux/fs.h>
+         /* the first super block object */
+         extern struct list_head super_blocks;
+        
+         /* protection for concurent accessing to @super_blocks */
+         extern spinlock_t sb_lock;
+
+         /**
+          * super_block - filesystem super block information
+          * @s_list:      super block list,point to the adjacent super block object
+          * @s_dev:       device identifier
+          * @s_dirt:      number of modified inodes
+          * @s_blocksize_bits: block size in number of bits
+          * @s_blocksize: block size in bytes
+          * @s_maxbytes:  maximum size of file
+          * @s_type:      filesystem type
+          * @s_op:        super block methods
+          * @dq_op:       disk quota handling methods
+          * @s_qcop:      disk quota administration methods
+          * @s_export_op: export operations used by network filesystem
+          * @s_flags:     mount flags
+          * @s_magic:     filesystem magic number
+          * @s_root:      dentry object of the filesystem's root directory
+          * @s_umount:    umounting protection
+          * @s_lock:      super block concurrent protection
+          * @s_count:     reference counter
+          * @s_need_sync: flag indicates filesystem needs synchronization
+          * @s_active:    secondary reference counter
+          * @s_security:  super block security structure
+          * @s_xattr:     super block extended attribute structure
+          * @s_inodes:    list of all inodes
+          * @s_anon:      anonymous dentries for network filesystem exporting
+          * @s_files:     list of file objects
+          * @s_dentry_lru: dentry cache
+          * @s_nr_dentry_unused: number of unused dentry
+          * @s_bdev:      block device driver descriptor
+          * @s_instances: list of super block objects of a given filesystem type
+          * @s_dquot:     disk quota descriptor
+          * @s_frozen:    flag used when freezing the filesystem(forcing it to a consistent state)
+          * @s_wait_unfrozen: wait queue for processes that sleep until the filesystem is unfrozen
+          * @s_id:        name of the block device containing this super block
+          * @s_fs_info:   super block information of a specific filesystem(private information)
+          * @s_time_gran: timestamp's granularity(ns)
+          * @s_vfs_rename_mutex: concurrent protection for file renaming across directories
+          * @s_subtype:   subtype,if it is not NULL,
+          *               the filesystem type field in /proc/mounts will be "type.subtype"
+          * @s_options:   saved mount options for lazy filesystem using generic_show_options()
+          * # all super block objects are linked together through a circular doubly linked list
+          */
+         struct super_block {
+                 struct list_head s_list;
+                 dev_t s_dev;
+                 unsigned char s_dirt;
+                 unsigned char s_blocksize_bits;
+                 unsigned long s_blocksize;
+                 loff_t s_maxbytes;
+                 struct file_system_type *s_type;
+                 const struct super_operations *s_op;
+                 const struct dquot_operations *dq_op;
+                 const struct quotactl_ops *s_qcop;
+                 const struct export_operations *s_export_op;
+                 unsigned long s_flags;
+                 unsigned long s_magic;
+                 struct dentry *s_root;
+                 struct rw_semaphore s_umount;
+                 struct mutex s_lock;
+                 int s_count;
+                 int s_need_sync;
+                 atomic_t s_active;
+         #ifdef CONFIG_SECURITY
+                 void *s_security;
+         #endif
+                 struct xattr_handler **s_xattr;
+                 struct list_head s_inodes;
+                 struct hlist_head s_anon;
+                 struct list_head s_files;
+                 struct list_head s_dentry_lru;
+                 int s_nr_dentry_unused;
+                 
+                 struct block_device *s_bdev;
+                 ...
+                 struct list_head s_instances;
+                 struct quota_info s_dquot;
+                 
+                 int s_frozen;
+                 wait_queue_head_t s_wait_unfrozen;
+                 
+                 char s_id[32];
+
+                 void *s_fs_info;
+                 ...
+                 u32 s_time_gran;
+                 struct mutex s_vfs_rename_mutex;
+                 char *s_subtype;
+                 char *s_options;
+         };
+
+         ! in general,data pointed to by the @s_fs_info field is information from the disk
+           duplicated in memory for reasons of efficiency.
+         ! Linux copying all dirty super blocks to disk periodically.
+
+         /**
+          * super_operations - super block common interfaces defined by VFS
+          * # if a filesystem wants register itself to VFS,it must implements these super block
+          *   operations;for un-supported operation,set it to NULL
+          * # the feature of the function is corresponding to its name
+          */
+         struct super_operations {
+                 struct inode *(*alloc_inode)(struct super_block *sb);
+                 void (*destroy_inode)(struct inode *);
+                 
+                 void (*dirty_inode)(struct inode *);
+                 int (*write_inode)(struct inode *, struct writeback_control *wbc);
+                 void (*drop_inode)(struct inode *);
+                 void (*delete_inode)(struct inode *);
+                 void (*put_super)(struct supber_block *);
+                 void (*write_super)(struct supber_block *);
+                 int (*sync_fs)(struct super_block *sb, int waits);
+                 int (*freeze_fs)(struct super_block *);
+                 int (*unfreeze_fs)(struct super_block *);
+                 int (*statfs)(struct dentry *, struct kstatfs *);
+                 int (*remount_fs)(struct super_block *, int *, char *);
+                 void (*clear_inode)(struct inode *);
+                 void (*umount_begin)(struct super_block *);
+
+                 int (*show_options)(struct seq_file *, struct vfsmount *);
+                 int (*show_stats)(struct seq_file *, struct vfsmount *);
+                 
+         #ifdef CONFIG_QUOTA /* Disk quota system */
+                 ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
+                 ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
+         #endif
+
+                 int (*bdev_try_to_free_page)(struct super_block *, struct page *, gfp_t);
+         };
+        
+      
