@@ -21257,5 +21257,202 @@ Chapter 12 : The Virtual Filesystem
 
                  int (*bdev_try_to_free_page)(struct super_block *, struct page *, gfp_t);
          };
+
+     Inode Objects :
+       the information needed by the filesystem to handles a file is included in inode,each file has a
+       unique inode number;the inode number would not changed as long as the file is exist on the filesystem.
+
+       <linux/fs.h>
+         /**
+          * inode - inode object
+          * @i_hash:    inode hash list,used to speed up the inode search when kernel
+          *             have known the inode number and the super block it belongs to
+          * @i_list:    backing dev IO list
+          * @i_sb_list: inode list of the super block,point to the adjacent inode object
+          * @i_dentry:  dentry object ahead this inode's dentry list
+          * @i_ino:     inode number
+          * @i_count:   usage counter
+          * @i_nlink:   number of hard links
+          * @i_uid:     inode user ID
+          * @i_gid:     inode group ID
+          * @i_rdev:    real device identifier
+          * @i_blkbits: block size in number of bits
+          * @i_version: version number,automatically increased after each use
+          * @i_size:    inode size in bytes
+          * @i_size_seqcount:    sequence counter used in SMP systems to get
+          *                      consistent values for @i_size
+          * @i_atime:   inode access time stamp
+          * @i_mtime:   inode modify time stamp
+          * @i_ctime:   inode change time stamp
+          * @i_blocks:  number of blocks of the inode
+          * @i_bytes:   number of bytes of the last block
+          * @i_mode:    file mode
+          * @i_lock:    member accessing concurrent protection
+          * @i_mutex:   inode concurrent protection
+          *             this mutex would be locked up by some function such pipe_read()
+          * @i_alloc_sem:    direct I/O concurrent protection
+          * @i_op:      inode operations
+          * @i_fop:     file operations
+          * @i_sb:      the super block this inode belongs to
+          * @i_flock:   file lock supporting
+          * @i_mapping: an address space object used to indicates the range in memory
+          *             where this file is mapped
+          * @i_data:    saved inode mapping address space
+          * @i_dquot:   quota system supporting
+          * @i_devices: list of inodes relative to a specific character or block device
+          * @i_pipe:    pipe specific
+          * @i_bdev:    block device driver
+          * @i_cdev:    character device driver
+          * @i_generation:    inode version number used by some filesystems
+          * @i_fsnotify_mask:    filesystem notification mechanism
+          * @i_fsnotify_mark_entries:    filesystem notification mechanism
+          * @inotify_watches:    inotify mechanism
+          * @inotify_mutex:    inotify mechanism
+          * @i_state:   inode state flag
+          * @dirtied_when:    jiffies of first dirtying
+          * @i_flags:   inode flag
+          * @i_writecount:    usage counter for writing processes
+          * @i_security:    security specific
+          * @i_private: private data
+          */
+         struct inode {
+                 struct hlist_node i_hash;
+                 struct list_head i_list;
+                 struct list_head i_sb_list;
+                 struct list_head i_dentry;
+                 unsigned long i_ino;
+                 atomic_t i_count;
+                 unsigned int i_nlink;
+                 uid_t i_uid;
+                 gid_t i_gid;
+                 dev_t i_rdev;
+                 unsigned int i_blkbits;
+                 u64 i_version;
+                 loff_t i_size;
+
+         #ifdef __NEED_I_SIZE_ORDERED
+                 seqcount_t i_size_seqcount;
+         #endif
+
+                 struct timespec i_atime;
+                 struct timespec i_mtime;
+                 struct timespec i_ctime;
+                 blkcnt_t i_blocks;
+                 unsigned short i_bytes;
+                 umode_t i_mode;
+                 spinlock_t i_lock;
+                 struct mutex i_mutex;
+                 struct rw_semaphore i_alloc_sem;
+                 const struct inode_operations *i_op;
+                 const struct file_operations *i_fop;
+                 struct super_block *i_sb;
+                 struct file_lock *i_flock;
+                 struct address_space *i_mapping;
+                 struct address_space i_data;
+
+         #ifdef CONFIG_QUOTA
+                 struct dquot *i_dquot[MAXQUOTAs];
+         #endif
+
+                 struct list_head i_devices;
+                 
+                 union {
+                         struct pipe_inode_info *i_pipe;
+                         struct block_device *i_bdev;
+                         struct cdev *i_cdev;
+                 };
+
+                 __u32 i_generation;
+
+         #ifdef CONFIG_FSNOTIFY
+                 __u32 i_fsnotify_mask;
+                 struct hlist_head i_fsnotify_mark_entries;
+         #endif 
+
+         #ifdef CONFIG_INOTIFY
+                 struct list_head inotify_watches;
+                 struct mutex inotify_mutex;
+         #endif
+
+                 unsigned long i_state;
+                 unsigned long dirtied_when;
+
+                 unsigned int i_flags;
+                 atomic_t i_writecount;
+         
+         #ifdef CONFIG_SECURITY
+                 void *i_security;
+         #endif
+
+                 ...
+
+                 void *i_private;
+         };
+
+       inode in the memory duplicated some information of the inode in the disk device.
+       if @i_state is equal to I_DIRTY_SYNC,I_DIRTY_DATASYNC,I_DIRTY_PAGES,the inode is dirty;
+       the corresponding inode in the disk must be updated.
+       /* macro I_DIRTY combined the three flags,thus we can checks all of them at once */
+       /**
+        * Other states :
+        *   I_NEW - new inodes set I_NEW,if two processes both create the same inode,one of
+        *           them will release its inode and wait for I_NEW to be released before
+        *           returning
+        *   I_WILL_FREE - set when calling write_inode_now() if @i_count is _zero_,
+        *                 I_FREEING must be set when I_WILL_FREE is cleared
+        *   I_FREEING - the inode is about to be freed but still has dirty pages or buffers
+        *               attached or the inode itself is still dirty
+        *   I_CLEAR - the inode is clean and can be destroyed
+        */
+
+      header <linux/writeback.h> extern declared a variable named @inode_unused,it is type of
+      struct list_head.the inodes are not dirty and their @i_count is _zero_,will be putted into
+      the unused inodes list.member @i_list point to the adjacent inode object.
+
+      header <linux/writeback.h> extern declared a variable named @inode_in_use,it also is type
+      of struct list_head,all inodes they are in use will be putted into this list.the inodes
+      are not dirty,but @i_count is positive,@i_list point to the adjacent inode object.
+
+      !! THE BOOK MENTIONED A MEMBER NAMED @s_dirty INSIDE TO SUPER BLOCK OBJECT,BUT LINUX 2.6.31
+         DOES NOT EXIST SUCH MEMBER IN THE STRUCTURE.
+         FOR EXT2 FILESYSTEM,@write_node IS SET TO ext2_write_node(),WHICH ATTEMPTS TO GET A
+         BUFFER AND MARKED IT DIRTY,THE BUFFER WILL BE WRITEBACK BY sync_dirty_buffer() LATER.
+
+      <linux/fs.h>
+        /**
+         * inode_operations - common inode operations defined by VFS,if the filesystem wants to
+         *                    registers itself on VFS,must provides implementations of these interfaces,
+         *                    for un-supported feature,set to NULL
+         */
+        struct inode_operations {
+                int (*create)(struct inode *, struct dentry *, int, struct nameidata *);
+                struct dentry * (*lookup)(struct inode *, struct dentry *, struct nameidata *);
+                int (*link)(struct dentry *, struct inode *, struct dentry *);
+                int (*unlink)(struct inode *, struct dentry *);
+                int (*symlink)(struct inode *, struct dentry *, const char *);
+                int (*mkdir)(struct inode *, struct dentry *, int);
+                int (*rmdir)(struct inode *, struct dentry *);
+                int (*mknod)(struct inode *, struct dentry *, int, dev_t);
+                int (*rename)(struct inode *, struct dentry *, struct inode *, struct dentry *);
+                int (*readlink)(struct dentry *, char __user *, int);
+                void * (*follow_link)(struct dentry *, struct nameidata *);
+                void (*put_link)(struct dentry *, struct nameidata *, void *);
+                void (*truncate)(struct inode *);
+                int (*permission)(struct inode *, int);
+                int (*check_acl)(struct inode *, int);
+                int (*setattr)(struct dentry *, struct iattr *);
+                int (*getattr)(struct vfsmount *mnt, struct dentry *, struct kstat *);
+                int (*setxattr)(struct dentry *, const char *, const void *, size_t, int);
+                ssize_t (*getxattr)(struct dentry *, const char *, void *, size_t);
+                ssize_t (*listxattr)(struct dentry *, char *, size_t);
+                int (*removexattr)(struct dentry *, const char *);
+                void (*truncate_range)(struct inode *, loff_t, loff_t);
+                long (*fallocate)(struct inode *inode, int mode, loff_t offset, loff_t len);
+                int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start, u64 len);
+        };
+      
+
+
+       
         
       
