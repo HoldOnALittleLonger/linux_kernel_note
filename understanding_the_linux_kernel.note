@@ -21154,7 +21154,7 @@ Chapter 12 : The Virtual Filesystem
           * @s_xattr:     super block extended attribute structure
           * @s_inodes:    list of all inodes
           * @s_anon:      anonymous dentries for network filesystem exporting
-          * @s_files:     list of file objects
+          * @s_files:     list of "in use" file objects
           * @s_dentry_lru: dentry cache
           * @s_nr_dentry_unused: number of unused dentry
           * @s_bdev:      block device driver descriptor
@@ -21450,9 +21450,141 @@ Chapter 12 : The Virtual Filesystem
                 long (*fallocate)(struct inode *inode, int mode, loff_t offset, loff_t len);
                 int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start, u64 len);
         };
+
+     File Objects :
+       a file object describes a opened file.structure file is used to represents such object.
+       must pay attention about that file object has no corresponding image on the disk,it is
+       only exists in memory.
+
+       <linux/fs.h>
+         /**
+          * file - file object used to represents an opened file
+          * @fu_list:    file object list
+          * @fu_rcuhead: file list updating protection
+          * @f_path:     file path structure,contains some information about dentry
+          * @f_op:       file operations
+          * @f_lock:     concurent protection
+          * @f_count:    reference counter
+          *              CLONE_FILES flag let lightweight process share the table that
+          *              identifies the open files,thus no reference counter increasing
+          *              # this counter increase when the file is used by kernel itself
+          * @f_flags:    flags specified when opening the file
+          * @f_mode:     file permission
+          * @f_pos:      file position,the next file operations such start from there
+          * @f_owner:    file's owner
+          * @f_cred:     security context,includes some identification info
+          * @f_ra:       file's readahead state,includes some info such start,size,mmap_miss,etc
+          * @f_version:  automatically increased after each use
+          * @f_security: security mechanism related info
+          * @private_data:    private data specified by filesystem or device driver
+          * @f_ep_links:  used by fs/eventpoll.c to link all the hooks to this file
+          * @f_mapping:  address space where the content of this file mapping to
+          * @f_mnt_write_state:    write counter for debug
+          */
+         struct file {
+           union {
+                   struct list_head fu_list;
+                   struct rcu_head fu_rcuhead;
+           } f_u;
+
+           struct path f_path;
+         #define f_dentry f_path.dentry
+         #define f_vfsmnt f_path.mnt
+
+           const struct file_operations *f_op;
+           spinlock_t f_lock;
+           atomic_long_t f_count;
+           unsigned int f_flags;
+           fmode_t f_mode;
+           loff_t f_pos;
+           struct fown_struct f_owner;
+           const struct cred *f_cred;
+           struct file_ra_state f_ra;
+           
+           u64 f_version;
+
+         #ifdef CONFIG_SECURITY
+           void *f_security;
+         #endif
+
+           void *private_data;
+
+         #ifdef CONFIG_EPOLL
+           struct list_head f_ep_links;
+         #endif
+           struct address_space *f_mapping;
+         #ifdef CONFIG_DEBUG_WRITECOUNT
+           unsigned long f_mnt_write_state;
+         #endif
+
+         };
+
+         /**
+          * spinlock used to protect @fu_list member,that is all file objects are linked together,
+          * if you want to modify @fu_list,must lock this spinlock at first,and release it later
+          */
+         extern spinlock_t files_lock;
+
+         /* filp_open - open a file through given pathname,open flags,and mode,returns
+          *             a pointer points to the file object,returns error pointer when failed
+          * # this function creates a file object via call to get_empty_filp(),which is defined in
+          *   <fs/file_table.c> and it use kmem_cache_zalloc() to allocates a new file object from
+          *   filp slab cache,the new file object will be initialized by using current task's cred
+          */
+         extern struct file *filp_open(const char *pathname, int flags, int mode);
       
+       a slab cache named filp is used to handles file object allocating,its descriptor address
+       is stored in the filp_cachep variable.
 
+       structure files_stat_struct is defined in the same header and it described file amount limits.
+       @nr_files means number of files that are using;@nr_free_files means number of files that opened
+       but not in using;@max_files means the maximum number of files that could be opened.(the maximum
+       number of file objects that could be allocated)
 
+       <linux/fs.h>
+         /**
+          * file_operations - common file interfaces defined by VFS,un-support feature should be set to
+          *                   NULL
+          * # member @owner is always initialized with the value THIS_MODULE,it is used to manage the module's
+          *   usage count.when a file associated with the file_operations structure is opened,the kernel calls
+          *   try_module_get() on the @owner to increases its usage count before invokes open() method,
+          *   this mechanism prevents the module from being unloaded while its operations are acrively being
+          *   used by open files
+          * # the first time initialization of a file's @f_op member is initialized with the same value of
+          *   its inode object's @i_fop
+          *   when a inode is loaded from disk,the filesystem driver specifies the file operation implementations
+          *   in @i_fop,but VFS is able to modify the file operations later
+          *   (actually,when a filesystem is installed,the pre-defined file operation implementations is also 
+          *    loaded into memory)
+          */
+         struct file_operations {
+                 struct module *owner;
+                
+                 loff_t (*llseek)(struct file *, loff_t, int);
+                 ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
+                 ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
+                 ssize_t (*aio_read)(struct kiocb *, const struct iovec *, unsigned long, loff_t);
+                 ssize_t (*aio_write)(struct kiocb *, const struct iovec *, unsigned long, loff_t);
+                 int (*readdir)(struct file *, void *, filldir_t);
+                 unsigned int (*poll)(struct file *, struct poll_table_struct *);
+                 int (*ioctl)(struct inode *, struct file *, unsigned int, unsigned long);
+                 long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
+                 long (*compat_ioctl)(struct file *,unsigned int, unsigned long);
+                 int (*mmap)(struct file *, struct vm_area_struct *);
+                 int (*open)(struct inode *, struct file *);
+                 int (*flush)(struct file *, fl_owner_t id);
+                 int (*release)(struct inode *, struct file *);
+                 int (*fsync)(struct file *, struct dentry *, int datasync);
+                 int (*aio_fsync)(struct kiocb *, int datasync);
+                 int (*fasync)(int, struct file *, int);
+                 int (*lock)(struct file *, int, struct file_lock *);
+                 ssize_t (*sendpage)(struct file *, struct page *, int, size_t, loff_t *, int);
+                 unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long,
+                                                    unsigned long, unsigned long);
+                 int (*check_flags)(int);
+                 int (*flock)(struct file *, int, struct file_lock *);
+                 ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
+                 ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
+                 int (*setlease)(struct file *, long, struct file_lock **);
+         };
        
-        
-      
