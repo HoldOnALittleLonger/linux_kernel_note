@@ -21588,3 +21588,124 @@ Chapter 12 : The Virtual Filesystem
                  int (*setlease)(struct file *, long, struct file_lock **);
          };
        
+     Dentry Objects :
+       dentry object is the form of directory implemented by VFS,once a specific directory entry is read into memory,
+       VFS transforms it to a dentry object.
+       the kernel creates a dentry object for every component of a pathname that a process looks up,the dentry object
+       associates the component to its coressponding inode.
+       ! dentry object no corresponding image on disk,so it no the concept about dirty.
+       ! slab cache named dentry_cache(a slab cache descriptor pointer) which is defined in <fs/dcache.c>,and function
+         d_alloc() used to allocate a dentry object.
+
+       <linux/dcache.h>
+         /**
+          * qstr - quick string,eases parameter passing,but more importantly saves "metadata" about
+          *        the string
+          * @hash: hash value
+          * @len:  string length
+          * @name: the name
+          */
+         struct qstr {
+                 unsigned int hash;
+                 unsigned int len;
+                 const unsigned char *name;
+         };
+
+         #ifdef CONFIG_64IT
+         #define DNAME_INLINE_LEN_MIN 32    /* 192B */
+         #else
+         #define DNAME_INLINE_LEN_MIN 40    /* 128B */
+         #endif
+
+         /**
+          * dentry - VFS directory entry object,used to represents the components from pathname
+          * @d_count:    usage counter
+          * @d_flags:    dentry flags
+          * @d_lock:     concurrent protection
+          * @d_mounted:  for directories,counter for the number of filesystems mounted on this dentry
+          * @d_inode:    the corresponding inode
+          * @d_hash:     dentry hash list
+          * @d_parent:   parent dentry of this one
+          * @d_name:     filename
+          * @d_lru:      dentry LRU list
+          * @d_child:    for directories,pointers for the list of directory dentries in the same parent directory
+          *              # child of parent list
+          * @d_rcu:      RCU protection
+          * @d_subdirs:  children(subdirectories) of this one
+          * @d_alias:    inode alias list,that is the pointers for the list of dentries
+          *              associated with the same inode(alias)
+          * @d_time:     used by d_revalidate() */
+          * @d_op:       dentry operations
+          * @d_sb:       the root of the dentry tree,the super block object of the file
+          * @d_fsdata:   filesystem denpendent data
+          * @d_iname:    short filename
+          * # dentry can be a directory,or be a file;if it is a directory,then it might contains some other dentries
+          */
+         struct dentry {
+                 atomic_t d_count;
+                 unsigned int d_flags;
+                 spinlock_t d_lock;
+                 int d_mounted;
+                 struct inode *d_inode;
+                 struct hlist_node d_hash;
+                 struct dentry *d_parent;
+                 struct qstr d_name;
+                 struct list_head d_lru;
+                 
+                 union {
+                         struct list_head d_child;
+                         struct rcu_head d_rcu;
+                 } d_u;
+
+                 struct list_head d_subdirs;
+                 struct list_head d_alias;
+                 unsigned long d_time;
+                 const struct dentry_operations *d_op;
+                 struct super_block *d_sb;
+                 void *d_fsdata;
+                
+                 unsigned char d_iname[DNAME_INLINE_LEN_MIN];
+         };
+
+         four states of a dentry :
+           Free
+             dentry contains no valid info and it is not used by VFS
+             the corresponding memory area is handled by the slab allocator
+           Unused
+             dentry is not currently used by the kernel,@d_count is _zero_,but @d_inode is not NULL
+             the dentry contains valid info but its contents may be discarded if necessary in order to
+             reclaim memory
+           In use
+             dentry is currently used by the kernel,@d_count is positive,@d_inode is not NULL
+             dentry contains valid info and can not be discarded
+           Negative
+             the inode associated with the dentry does not exist,either because the corresponding disk
+             inode has been deleted or because the dentry object was created by resolving a pathname of a
+             nonexistent file
+             @d_inode is NULL,but this dentry still remains in the dentry cache for speed up further same file
+             pathname resolving
+
+       <linux/dcache.h>
+         /**
+          * dentry_operations - common dentry interfaces defined by VFS,filesystem can provides its own
+          *                     implementations,un-supported feature set to NULL;if filesystem does not
+          *                     provide implementations,then VFS set them to default functions
+          */
+         struct dentry_operations {
+                 int (*d_revalidate)(struct dentry *, struct nameidata *);
+                 int (*d_hash)(struct dentry *, struct qstr *);
+                 int (*d_compare)(struct dentry *, struct qstr *, struct qstr *);
+                 int (*d_delete)(struct dentry *);
+                 void (*d_release)(struct dentry *);
+                 void (*d_iput)(struct dentry *, struct inode *);
+                 char *(*d_name)(struct dentry *, char *, int);
+         };
+
+       dentry object locking rules for dentry operations :
+                             big lock        dcache_lock        d_lock        may block
+         d_revalidate        N               N                  N             Y
+         d_hash              N               N                  N             Y
+         d_compare           N               Y                  Y             N
+         d_delete            N               Y                  N             N
+         d_release           N               N                  N             Y
+         d_iput              N               N                  N             Y
