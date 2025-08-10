@@ -2023,7 +2023,7 @@ Chapter 3 : Processes
         only the TASK_RUNNING process is could to be runned on a CPU.
 
       #  earlier version :
-           all TASK_RUNNING processes are putted into runqueue,and scheduler have to scans the whole list in order
+           all TASK_RUNNING processes are putting into runqueue,and scheduler have to scans the whole list in order
            to select the "best" runnable process.(too costly to maintain the list ordered according to process priorities)
     
       Linux 2.6 :
@@ -21269,7 +21269,7 @@ Chapter 12 : The Virtual Filesystem
           *             have known the inode number and the super block it belongs to
           * @i_list:    backing dev IO list
           * @i_sb_list: inode list of the super block,point to the adjacent inode object
-          * @i_dentry:  dentry object ahead this inode's dentry list
+          * @i_dentry:  in-use dentry objects list corresponding to this inode
           * @i_ino:     inode number
           * @i_count:   usage counter
           * @i_nlink:   number of hard links
@@ -21406,11 +21406,11 @@ Chapter 12 : The Virtual Filesystem
         */
 
       header <linux/writeback.h> extern declared a variable named @inode_unused,it is type of
-      struct list_head.the inodes are not dirty and their @i_count is _zero_,will be putted into
+      struct list_head.the inodes are not dirty and their @i_count is _zero_,will be putting into
       the unused inodes list.member @i_list point to the adjacent inode object.
 
       header <linux/writeback.h> extern declared a variable named @inode_in_use,it also is type
-      of struct list_head,all inodes they are in use will be putted into this list.the inodes
+      of struct list_head,all inodes they are in use will be putting into this list.the inodes
       are not dirty,but @i_count is positive,@i_list point to the adjacent inode object.
 
       !! THE BOOK MENTIONED A MEMBER NAMED @s_dirty INSIDE TO SUPER BLOCK OBJECT,BUT LINUX 2.6.31
@@ -21632,7 +21632,7 @@ Chapter 12 : The Virtual Filesystem
           *              # child of parent list
           * @d_rcu:      RCU protection
           * @d_subdirs:  children(subdirectories) of this one
-          * @d_alias:    inode alias list,that is the pointers for the list of dentries
+          * @d_alias:    inode alias list,that is the pointers for the list of dentries(in-use)
           *              associated with the same inode(alias)
           * @d_time:     used by d_revalidate() */
           * @d_op:       dentry operations
@@ -21709,3 +21709,39 @@ Chapter 12 : The Virtual Filesystem
          d_delete            N               Y                  N             N
          d_release           N               N                  N             Y
          d_iput              N               N                  N             Y
+
+         /**
+          * @dcache_lock object is type of spinlock_t which is used to protect dentry cache
+          * concurrently accessing on SMP,it will be putting into hardware cache line for
+          * speed up accessing.
+          */
+
+     The dentry Cache :
+       Linux use dentry cache to speed up dentry object accessing which is constructed and will be
+       accessed later.
+       Linux dentry cache consists two kinds of data structures :
+         1> a set of dentry objects in the in-use,unused,or negative state
+         2> a hash table to derive the dentry object associated with a given filename and a given
+            directory quickly
+       ! because the dentries are in-use or are unused still valid and would not be destroyed by kernel,
+         such dentry is associated with a inode,thus dentry cache can be used to speed up inode
+         searching.
+
+       All "unused" dentries are included in a doubly linked "Least Recently Used"(LRU) list sorted by time
+       of insertion. /* last released dentry is put in front of the list */
+       !! LINUX 2.6.31 DOEST NOT EXIST VARIABLE NAMED "dentry_unused",ALL UNUSED DENTRIES ARE CHAINED TOGETHER
+          IN THE SUPER BLOCK OBJECT'S @s_dentry_lru.
+          THE MEMBER @s_dentry_lru IS THE HEAD OF DENTRY LRU LIST.
+       Each "in-use" dentry is included in the inode's @i_dentry,that is each inode could be associated with
+       several hard links.
+       An dentry becomes negative if the last hard link to the file been deleted,the dentry will be moved into
+       dentry LRU list. /**
+                         * negative dentries would be moved towards to the tail of LRU list when kernel shrinks
+                         * the dentry cache,they are gradually freed.
+                         */
+       static variable named @dentry_hashtable is defined in <fs/dcache.c> which is type of struct hlist_head *.
+       each dentry is placed into the hash table for efficiency.(@d_hash)
+       /**
+        * usually,d_hash() calculates the hash value of the given dentry with its parent and the value @d_name.hash
+        *                                                                     #   parent directory     filename
+        */
