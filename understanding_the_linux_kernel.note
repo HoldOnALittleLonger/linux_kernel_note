@@ -1786,6 +1786,7 @@ Chapter 3 : Processes
          *    # @mm: memory descriptor owned by the process
          *      @active_mm: memory descriptor used by the process when it is in execution
          *      @vfork_done: completion object for vfork() system call
+         *      @fs: process's filesystem info
          */
         !!  the routine task_lock() lock up task_struct.@alloc_lock,task_unlock() does the reverse.
                                                         /* concurrent protection of mm */
@@ -21745,3 +21746,160 @@ Chapter 12 : The Virtual Filesystem
         * usually,d_hash() calculates the hash value of the given dentry with its parent and the value @d_name.hash
         *                                                                     #   parent directory     filename
         */
+
+     Files Associated with a Process :
+       each process has a member named @fs which is type of struct fs_struct *,and the structure is used to represents
+       the interactions between this process and a filesystem.
+
+       <linux/fs_struct.h>
+         /**
+          * fs_struct - interaction between a process and a filesystem
+          * @users:     users sharing this filesystem information
+          * @lock:      concurrent protect
+          * @umask:     file umask
+          * @in_exec:   indicates whether the process is in exec calling
+          * @root:      root directory of this process
+          * @pwd:       process work directory
+          * # allocating for struct fs_struct object is handled by slab allocator through the slab cache named
+          *   @fs_cachep which is type of struct kmem_cache *
+          */
+         struct fs_struct {
+                 int users;
+                 rwlock_t lock;
+                 int umask;
+                 int in_exec;
+                 struct path root, pwd;
+         };
+
+         /**
+          * path - represents a path such "/../xxxx"
+          * @mnt:  VFS mount point,the structure contains all information of
+          *        the mount point
+          *        e.g.
+          *                dentry mount point
+          *                root of the mounted tree
+          *                pointer to super block of the filesystem
+          *                ...
+          * @dentry:    dentry for this path
+          */
+         struct path {
+                 struct vfsmount *mnt;
+                 struct dentry *dentry;
+         };
+
+       <linux/fdtable.h>
+         /**
+          * fdtable - file descriptor table
+          * @max_fds: current maximum number of file descriptor in this table
+          * @fd:      current fd array(@fd_array)
+          * @close_on_exec:    file descriptor set contains the file descriptors
+          *                    they will be closed on exec
+          * @open_fds:         file descriptor set contains the file descriptors
+          *                    they been opened
+          * @rcu:              RCU mechanism used to modify this table
+          * @next:             next file descriptor table from fdtable_defer structure
+          */
+         struct fdtable {
+                 unsigned int max_fds;
+                 struct file **fd;
+                 fd_set *close_on_exec;
+                 fd_set *open_fds;
+                 struct rcu_head rcu;
+                 struct fdtable *next;
+         };
+
+         /**
+          * embedded_fd_set - represents a small fd set
+          */
+         struct embedded_fd_set {
+                 unsigned long fds_bits[1]; /* 32 OR 64 */
+         };
+
+         !! kernel defined a structure __kernel_fd_set which is a larger fd set,and it have been
+            typedefed to fd_set in <linux/types.h>.
+            the structure __kernel_fd_set is defined in <linux/posix_types.h>,it only contains
+            one member @fds_bits.@fds_bits is an array of unsigned long,the maximum number of
+            elements is "1024 / (8 * 4)" or "1024 / (8 * 8)".
+                        /* 32bit            64bit */
+
+         /**
+          * files_struct - represents the files related to a given process,these informations
+          *                are contained in @files member of struct task_struct
+          * @count:        number of processes sharing this structure
+          * @fdt:          pointer to @fdtab,if process have to opens more files,
+          *                this pointer may points to a new allocated one
+          *                (copy_files() invokes dup_fd() to creates a new fdtable,
+          *                 this member of the new one will points to @fdtab when dup_fd()
+          *                 is called,and may be points to another new one when expand_fdtable()
+          *                 is called)
+          * @fdtab:        initial file descriptor table
+          * @file_lock:    concurrent protection
+          * @next_fd:      next fd number of the open file
+          * @close_on_exec_init:    initial files close on exec
+          * @open_fds_init:         initial open file descriptor set
+          * @fd_array:     file descriptor array used to stores the handlers of the open files
+          *                if process needs to open more files,a new fdtable will be allocated and
+          *                the old fdtable @fdt will be copied into the new fdtable,finally,@fdt
+          *                points the new one,@fdt will be freed by RCU @fdt->rcu
+          * # @close_on_exec and @open_fds of struct fdtable are points to @close_on_exec_init and
+          *   @open_fds_init respectively,but the process can modifies these pointers later
+          * # different fd can points to the same file,because the handlers are pointers,they are
+          *   could points to the same file object
+          */
+         struct files_struct {
+                 /* read mostly part */
+                 atomic_t count;
+                 struct fdtable *fdt;
+                 struct fdtable fdtab;
+
+                 /* written part on a separate cache line int SMP */
+                 spinlock_t file_lock ____cacheline_aligned_in_smp;
+
+                 int next_fd;
+                 struct embedded_fd_set close_on_exec_init;
+                 struct embedded_fd_set open_fds_init;
+                 struct file *fd_array[NR_OPEN_DEFAULT];
+                 /* NR_OPEN_DEFAULT := BITS_PER_LONG */
+         };
+
+       !! the fixed maximum number open files is defined by NR_OPEN,but kernel also enforces a dynamic bound on the
+          maximum number of file descriptors in @signal->@rlim[RLIMIT_NOFILE] structure of the process descriptor,
+          thus process can open more files than NR_OPEN if and only if the number does not exceeds hard limit.
+       !! function alloc_fdtable() will invokes alloc_fdmem() to allocate memory for @open_fds and @close_on_exec.
+          @open_fds points to the head of the memory area,and @close_on_exec points to "@mem += @nr / BITS_PER_BYTE",
+          the real size of the memory area is max(2 * @nr / BITS_PER_BYTE, L1_CACHE_BYTES) bytes.
+          so we can know that @open_fds points to front half area and @close_on_exec pointsto back half area.
+          /**
+           * @nr been aligned,and if the aligned @nr is greater than @sysctl_nr_open,then it will be set to
+           *         (@sysctl_nr_open - 1) | (BITS_PER_LONG - 1) + 1
+           */
+
+       <fs/file_table.c>
+         /**
+          * fget - get the corresponding file object from current task's @files member
+          * @fd:   file descriptor number
+          * return:    pointer to file object OR NULL
+          * # EXPORT_SYMBOL
+          * # @f_count will be increased
+          */
+         struct file *fget(unsigned int fd);
+
+         /**
+          * fput - put the given file object
+          * @file: file object pointer
+          * # EXPORT_SYMBOL
+          * # @f_count will be decreased.if @f_count becomes _zero_,__fput() will be called with @file
+          */
+         void fput(struct file *file);
+
+         !! __fput() will destroys the file.
+            it calls to release() method,if it is not NULL;@i_writecount will be decreased if this file
+            is opened for writing;the file will be removed from super block object's @s_files;the usage
+            counter of corresponding dentry and of the filesystem descriptor will be decreased.
+            finally,the memory will be deallocated and back to slab allocator.
+        
+         !! the light version functions fget_light() and fput_light() assume that the current process
+            already owns the file object,that is the process has already previously increased the file
+            object's reference counter.
+            /* fget_light() is defined in <fs/file_table.c>,and fput_light() is defined in <linux/file.h>. */
+         
