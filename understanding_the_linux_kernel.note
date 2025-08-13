@@ -21159,6 +21159,10 @@ Chapter 12 : The Virtual Filesystem
           * @s_dentry_lru: dentry cache
           * @s_nr_dentry_unused: number of unused dentry
           * @s_bdev:      block device driver descriptor
+          * @s_bdi:       backing device info of this super block
+          * @s_mtd:       MTD info of this super block
+          *               # Linux MTD subsystem is made for memory devices
+          *                 MTD - Memory Technology Device
           * @s_instances: list of super block objects of a given filesystem type
           * @s_dquot:     disk quota descriptor
           * @s_frozen:    flag used when freezing the filesystem(forcing it to a consistent state)
@@ -21203,7 +21207,8 @@ Chapter 12 : The Virtual Filesystem
                  int s_nr_dentry_unused;
                  
                  struct block_device *s_bdev;
-                 ...
+                 struct backing_dev_info *s_bdi;
+                 struct mtd_info *s_mtd;
                  struct list_head s_instances;
                  struct quota_info s_dquot;
                  
@@ -21902,4 +21907,84 @@ Chapter 12 : The Virtual Filesystem
             already owns the file object,that is the process has already previously increased the file
             object's reference counter.
             /* fget_light() is defined in <fs/file_table.c>,and fput_light() is defined in <linux/file.h>. */
+
+     Filesystem Types :
+       Before using a filesystem type,must process filesystem registration.
+
+       Special Filesystems :
+                            mount point                description
+         bdev               none                       block devices
+         binfmt_misc        any                        miscellaneous executable formats
+         devpts             /dev/pts                   pseudo terminal support
+         eventpollfs        none                       used by the efficient event polling mechanism
+         futexfs            none                       used by the futex mechanism
+         pipefs             none                       pipes
+         proc               /proc                      general access point to kernel data structures
+         rootfs             none                       provides an empty root directory for the bootstrap phase
+         shm                none                       IPC-shared memory regions
+         mqueue             any                        used to implement POSIX message queues
+         sockfs             none                       sockets
+         sysfs              /sys                       general access point to system data
+         tmpfs              any                        temporary files
+         usbfs              /proc/bus/usb              USB devices
+
+         "none": this filesystem is not provided for user,it is used by kernel to reuse some VFS layer code
+         "any": this filesystem have no fixed mount point,it can be freely mounted and used by the user
+
+         ! special filesystems are not bound to physical block devices.
+           but,the kernel assigns to each mounted special filesystem a fictitious block device that has
+           _zero_ as major number and an arbitrary value as minor number.
+
+         <fs/super.c>
+           static DEFINE_IDA(unnamed_dev_ida);
+           static DEFINE_SPINLOCK(unnamed_dev_lock);
+           static int unnamed_dev_start = 0;
+
+           !! Linux IDR layer provides small id to pointer translation service avoiding
+              fixed sized tables.
+              its purpose is to provide a robust and performant way to allocate and
+              manage integer IDs.
+              the header is <linux/idr.h>,and implementation in <lib/idr.c>.
+
+           /**
+            * set_anon_super - setup an anonymous super block object,such super block
+            * @s:              super block object
+            * @data:           filesystem private data
+            * return:          0 OR error code
+            * # EXPORT_SYMBOL
+            */
+           int set_anon_super(struct super_block *s, void *data);
+
+           brief description for set_anon_super() :
+             generally,kernel call to this function to setup an anonymous super block for special filesystems,
+             that is the filesystem used by kernel to reuse VFS code.
+             first,this routine call to ida_pre_get() on @unnamed_dev_ida with gfp flag GFP_ATOMIC,if failed,
+             returns -ENOMEM to caller.
+             if the prepare works been finished,then lock @unnamed_dev_lock and call to ida_get_new_above()
+             with arguments &@unnamed_dev_ida,@unnamed_dev_start,&@dev /* @dev is a local variable */.
+             the function allocates a new ID above or equal to @unnamed_dev_start and stores it in @dev.
+             @unnamed_dev_start will be increased by set_anon_super() when no error was encountered in
+             ida_get_new_above().but if any error was detected,it will release the lock and retry the phase
+             from ida_pre_get().
+             /**
+              * @dev can not equal to "1 << MINORBITS(the value is 20)",otherwise,remove the connection between
+              * @unnamed_dev_ida and @dev,then set @unnamed_dev_start to @dev if it is greater than @dev,
+              * finally returns -EMFILE to caller.
+              */
+             after we got an appropriate minor number,set the super block object's @s_dev member to the
+             device number (0, @dev & MINORMASK).@s_bdi is set to &@noop_backing_dev_info,that is no backing
+             device.
+             return _zero_ to caller means succeed to setup anonymous super block.
+           
+           /**
+            * kill_anon_super - does the reversing operations to set_anon_super() on an anonymous super block object
+            * @sb:              anonymous super block object
+            * # EXPORT_SYMBOL
+            * # this function will remove the connection between @unnamed_dev_ida and the minor number of @sb
+            *   if its minor number is less than @unnamed_dev_start,set @unnamed_dev_start to the minor number
+            */
+           void kill_anon_super(struct super_block *sb);
+
+         !! EVEN SPECIAL FILESYSTEM IT STILL HAS AN ANONYMOUS SUPER BLOCK USED TO REPRESENTS IT.
+             
          
