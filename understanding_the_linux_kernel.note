@@ -21163,7 +21163,7 @@ Chapter 12 : The Virtual Filesystem
           * @s_mtd:       MTD info of this super block
           *               # Linux MTD subsystem is made for memory devices
           *                 MTD - Memory Technology Device
-          * @s_instances: list of super block objects of a given filesystem type
+          * @s_instances: list of super block objects of a given filesystem type(the same type)
           * @s_dquot:     disk quota descriptor
           * @s_frozen:    flag used when freezing the filesystem(forcing it to a consistent state)
           * @s_wait_unfrozen: wait queue for processes that sleep until the filesystem is unfrozen
@@ -21986,5 +21986,152 @@ Chapter 12 : The Virtual Filesystem
            void kill_anon_super(struct super_block *sb);
 
          !! EVEN SPECIAL FILESYSTEM IT STILL HAS AN ANONYMOUS SUPER BLOCK USED TO REPRESENTS IT.
-             
-         
+
+       Filesystem Type Registration :
+         the VFS must keep track of all filesystem types whose code is currently included in the kernel,it
+         does this by performing filesystem type registration.
+         each registered filesystem is represented as a file_system_type object.
+         /**
+          * as showing above,super block object contains a member named @s_type which is
+          * type of file_system_type *
+          */
+          
+         <linux/fs.h>
+           /**
+            * file_system_type - represents the registered file system
+            * @name:             filesystem name
+            * @fs_flags:         filesystem type flags
+            * @get_sb:           method for reading a super block
+            *                    the routine is depends on the real filesystem,and it 
+            *                    allocate and initialize(if necessary,reading from disk) a
+            *                    new super block
+            * @kill_sb:          method for removing a super block(for destroying)
+            * @owner:            pointer to the module implementing the filesystem,
+            *                    and it can be used to prevent unload filesystem when
+            *                    someone is using it
+            * @next:             pointer to the next element in the list of filesystem types
+            * @fs_supers:        head of a list of super block objects having the same
+            *                    filesystem type
+            *                    # the head is dummy element
+            * @s_lock_key:       runtime locking correctness validator for super block locking
+            * @s_umount_key:                                           for super block umount
+            * @i_lock_key:                                             for inode locking
+            * @i_mutex_key:                                            for inode mutex
+            * @i_mutex_dir_key:                                        for directory inode mutex
+            * @i_alloc_sem_key:                                        for inode allocaing semaphore
+            */
+           struct file_system_type {
+                   const char *name;
+                   int fs_flags;
+
+                   int (*get_sb)(struct file_system_type *, int, const char *, void *, struct vfsmount *);
+                   void (*kill_sb)(struct super_block *);
+
+                   struct module *owner;
+                   struct file_system_type *next;
+                   struct list_head fs_supers;
+
+                   struct lock_class_key s_lock_key;
+                   struct lock_class_key s_umount_key;
+
+                   struct lock_class_key i_lock_key;
+                   struct lock_class_key i_mutex_key;
+                   struct lock_class_key i_mutex_dir_key;
+                   struct lock_class_key i_alloc_sem_key;
+           };
+
+           /* publoc flags for file_system_type */
+
+           /* every filesystem of this type must be located on a physical disk device */
+           #define FS_REQUIRES_DEV 1
+
+           /* the filesystem uses binary mount data */
+           #define FS_BINARY_MOUNTDATA 2
+
+           /* filesystem has subtype */
+           #define FS_HAS_SUBTYPE 4
+
+           /* always revalidate the "." and ".." paths in the dentry cache */
+           #define FS_REVAL_DOT 16384
+
+           /* filesystem will handle d_move() during rename() internally */
+           #define FS_RENAME_DOES_D_MOVE 32768
+
+         <fs/filesystems.c>
+           /* the first element of the list for registered filesystems in the Linux kernel */
+           static struct file_system_type *file_systems;
+            
+           /* lock for @file_systems */
+           static DEFINE_RWLOCK(file_systems_lock);
+
+         <linux/fs.h>
+           /**
+            * register_filesystem - register a given file system on VFS
+            * @fs:                  filesystem type
+            * return: 0 => succeed
+            *         -EBUSY => only permit one file system registration in once calling
+            *                   (@fs->next is TRUE)
+            *                   OR
+            *                   been registered
+            * # EXPORT_SYMBOL
+            * # during kernel initializing,all file system type specified at compile time will be
+            *   registered on VFS,and can not be unregistered
+            */
+           extern int register_filesystem(struct file_system_type *fs);
+          
+           /**
+            * unregister_filesystem - unregister a file system
+            * @fs:                    the file system to be unregistered
+            * return:                 0 => succeed
+            *                         -EINVAL => invalid @fs
+            *                                    OR
+            *                                    no such filesystem been registered
+            * # EXPORT_SYMBOL
+            * # if the file system is implemented by a linux kernel module,
+            *   then register_filesystem() will be called when the module is load,
+            *   and unregister_filesystem() will be called when the module is unload
+            */
+           extern int unregister_filesystem(struct file_system_type *fs);
+
+           /**
+            * get_fs_type - lookup a specified filesystem from @file_systems
+            * @name:        the file system name to be matched
+            * return:       pointer to the file_system_type object OR NULL
+            * # EXPORT_SYMBOL
+            * # this function will attempts to find out dot character in the @name string,
+            *   that is because the file system may be a subtype,in this case,its name contains
+            *   dot character,but we have to get its primary type.
+            *   static function __get_fs_type() is used to traverse list.
+            *   if find out such file system but dot been detected in @name and the file system
+            *   does not enable flag FS_HAS_SUBTYPE,then NULL will be return to caller.
+            *   if no such file system but the file system is implemented by a module and kernel
+            *   can load the module,then call to __get_fs_type() again after the module is loaded.
+            *   finally,returns the pointer to caller.
+            */
+           extern file_system_type *get_fs_type(const char *name);
+
+           !! these functions are defined in <fs/filesystems.c>.
+
+         figure :
+           /* relation between file system type and the super block objects */
+        
+           +----@file_systems
+           |
+           V
+           +------+  +------+  +------+
+           | fst0 |->| fst1 |->| fst2 |-> ...
+           +------+  +------+  +------+
+           | | |     |         | |
+           | | |     +-sbX   | +-sbT
+           | | |               +-sbK
+           | | +-sbC
+           | +-sbB
+           +-sbA
+
+           /* file system type and super block is associated by struct super_block.@s_type */
+           
+           /* linked together by struct super_block.@s_instances */
+           sbA <-> sbB <-> sbC <-> sbA
+           sbX
+           sbK <-> sbT <-> sbK
+           
