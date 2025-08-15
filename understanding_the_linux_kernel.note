@@ -2277,6 +2277,9 @@ Chapter 3 : Processes
           typedef struct __wait_queue_head wait_queue_head_t;
 
           wait_queue_head_t {
+                                            wait_queue_head_t.@task_list
+                                                        |
+                                                        V
                   ... -> wait_queue_t.task_list - > task_list -> wait_queue_t.task_list {
                           ... -> wait_queue_t.task_list -> wait_queue_t.task_list -> wait_queue_t.task_list -> ...
                   };
@@ -2299,8 +2302,15 @@ Chapter 3 : Processes
           #define DECLARE_WAIT_QUEUE_HEAD(name)  \
                   wait_queue_head_t name = __WAIT_QUEUE_HEAD_INITIALIZER(name);
 
-          extern void __init_waitqueue_head(wait_queue_head_t *q, struct lock_class_key *);
-          /*  init_waitqueue_head - initialize a wait_queue_head_t object which is dynamically allocated.  */
+          /**
+           *  __init_waitqueue_head - initialize a wait_queue_head_t object which is dynamically allocated.
+           *  @q:                   waitqueue head
+           *  @key:                 lock correctness validator
+           *  # this rountine initialize @lock member of wait_queue_head_t with @key,and then
+           *    initialize the doubly linked list @task_list member
+           */ 
+          extern void __init_waitqueue_head(wait_queue_head_t *q, struct lock_class_key *key);
+
           #define init_waitqueue_head(q)                     \
                   do {                                       \
                       static struct lock_class_key __key;    \
@@ -22134,4 +22144,109 @@ Chapter 12 : The Virtual Filesystem
            sbA <-> sbB <-> sbC <-> sbA
            sbX
            sbK <-> sbT <-> sbK
+
+     Filesystem Handling :
+       traditional Unix and Linux make use of a system's root filesystem("/"),it is the filesystem that is directly
+       mounted by the kernel during the booting phase and that holds the system initialization scripts and
+       the most essential system programs.
+       /* other filesystems can be mounted by initialization scripts or by users.
+        * by users - mounted on the directories of already mounted filesystem
+        */
+
+       ! every filesystem has its own root directory.
+         directory on which a filesystem is mounted is called mount point.
+         mounted filesystem is a child of the mounted filesystem to which the mount point directory belongs.
+         root of a mounted filesystem hides the content of the mount point directory of the parent filesystem.
+         /* include whole subtree of the directory */
+
+       Namespaces :
+         traditional Unix has only one tree of mounted filesystems,that is starting from the system root directory.
+         /* process can access every file in a mounted filesystem */
+         Linux 2.6 refined this :
+           every process might have its own tree of mounted filesystems,so called namespace of the process.
+
+         generally,processes share the same namespace,that is system root tree,because process "init" used it.
+         a process can have a new namespace through set CLONE_NEWNS flag of clone(). /* since Linux 2.4.19 */
+         ! the new ns is initialized with a copy of parent's namespace.
+           if no CLONE_NEWNS has set,child shares the namespace of its parent process.
+           # can not specify CLONE_NEWNS and CLONE_FS in the same clone call.
+         when a process mounts/unmounts a filesystem,it only modifies its namespace,the change is visible to
+         all processes that share the same namespace.
+         ! system call pivot_root() can change the root filesystem.
+
+         a member named @nsproxy is type of struct nsproxy *,which contains pointers to all per-process namespaces.
+         /**
+          * uts_namespace - Unix Timesharing System(provides system identifiers)
+          * ipc_namespace - SystemV IPC
+          * mnt_namespace - filesystem mounting
+          * pid_namespace - process identifier
+          * net           - network namespace
+          */
+
+         <linux/nsproxy.h>
+           /**
+            * nsproxy - task namespace set
+            * @count:   number of tasks holding a reference
+            * # if tasks share all namespaces,then they share the same namespace proxy,
+            *   and namespace proxy will be copied as soon as a single namespace is cloned or
+            *   unshared
+            */
+           struct nsproxy {
+                   atomic_t count;
+                   struct uts_namespace *uts_ns;
+                   struct ipc_namespace *ipc_ns;
+                   struct mnt_namespace *mnt_ns;
+                   struct pid_namespace *pid_ns;
+                   struct net *net_ns;
+           };
+
+         <linux/mnt_namespace.h>
+           /**
+            * mnt_namespace - process filesystem namespace
+            * @count:         reference counter
+            *                 # new allocated mnt_ns.@count is 1
+            *                 # its value increased by get_mnt_ns(),
+            *                   and decreased by put_mnt_ns()
+            * @root:          VFS mount point
+            *                 # process root directory can be different to filesystem's
+            *                   root directory,member @root of fs_struct corresponding to
+            *                   the "/" pathname,but this can be changed by chroot() system
+            *                   call
+            *                   
+            * @list:          list of all mounted filesystems that belong to the namespace
+            * @poll:          for poll mechanism
+            * @event:         poll event indicator
+            */
+           struct mnt_namespace {
+                   atomic_t count;
+                   struct vfsmount *root;
+                   struct list_head list;
+                   wait_queue_head_t poll;
+                   int event;
+           };
+
+           About @list :
            
+                     +---------------------+
+                     | mnt_namespace.@list |
+                     +---------------------+
+                                |
+                                V
+                     +---------------------+     +---------------------+
+             ... <-> | vfsmount0.@mnt_list | <-> | vfsmount1.@mnt_list | <-> ...
+                     +---------------------+     +---------------------+
+
+         <fs/namespace.c>
+           /**
+            * namespace_sem - rw semaphore for filesystem related namespace concorrect operations
+            */
+           static struct rw_semaphore namespace_sem;
+
+           /**
+            * alloc_mnt_ns - attempts to allocate a new mnt_ns from generic slab cache with
+            *                gfp flag GFP_KERNEL
+            * return:        pointer to the new allocate mnt_ns object or NULL
+            * # this routine initializes all members inside to structure mnt_namespace,and it
+            *   set mnt_namespace.@count to 1,mnt_namespace.@event to 0
+            */
+           static struct mnt_namespace *alloc_mnt_ns(void);
