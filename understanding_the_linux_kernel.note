@@ -22213,7 +22213,8 @@ Chapter 12 : The Virtual Filesystem
             *                   the "/" pathname,but this can be changed by chroot() system
             *                   call
             *                   
-            * @list:          list of all mounted filesystems that belong to the namespace
+            * @list:          head of the list for all mounted filesystems that belong to this
+            *                 namespace
             * @poll:          for poll mechanism
             * @event:         poll event indicator
             */
@@ -22250,3 +22251,158 @@ Chapter 12 : The Virtual Filesystem
             *   set mnt_namespace.@count to 1,mnt_namespace.@event to 0
             */
            static struct mnt_namespace *alloc_mnt_ns(void);
+
+       Filesystem Mounting :
+         traditional Unix system can only mount a filesystem once,but Linux is different.it is possible
+         to mount the same filesystem several times,and of course,several mount points would be created.
+         if the filesystem have been mounted more than once,then all mount points will share the same
+         super block object.
+
+         Linux mounting :
+                                                 +----> system root
+                                                 /
+                         bin    boot    dev    etc    home    lib    lib64    mnt    sbin    proc    ...
+                         /      /       /      /      /       /      /        /      /       /
+                       ...    ...     ...    ...    Subdir  ...     ...     ...     ...     ...
+                              +                      +
+                              |                      |
+                              |                      V
+                              |           VFS mount point for a Ext4 filesystem (device: /dev/sdb1)
+                              |           /* mount point : /home/Subdir */
+                              |                      /
+                              |                    ForSDB2
+                              |                      +
+                              |                      |
+                              |                      V
+                              |           VFS mount point for a XFS filesystem (device: /dev/sdb2)
+                              |           /* mount point : /home/Subdir/ForSDB2 */
+                              |                      /
+                              |                     ...
+                              V
+                         Boot partition (device: /dev/sda1)
+                         /* mount point : /boot */
+
+         
+         Linux allows filesystem stacking,the newly mounted filesystem will hides the previous filesystem
+         mounted on the same mount point.the processes already using the old mounting can continue to do so.
+         Linux have to keep track of mounted filesystems and the relationship between the filesystem to be
+         mounted and the other mounted filesystems,structure vfsmount used to stores the necessary infos.
+
+         <linux/mount.h>
+
+           /**
+            * mount_hashtable - vfs mount point hash table indexed by the address of vfsmount descriptor
+            *                   of the parent filesystem and the address of the dentry object of the mount
+            *                   point directory
+            * # each element is the head of the list for vfsmount objects their hash value is the same
+            */
+           static struct list_head *mount_hashtable __read_mostly;
+
+           /* vfsmount_lock - spinlock used for vfsmount related operations,inplace of dcache_lock */
+           __cacheline_aligned_in_smp DEFINE_SPINLOCK(vfsmount_lock);
+
+           /* vfsmount initial identifiers */
+           static int mnt_id_start = 0;
+           static int mnt_group_start = 1;
+
+           /* for vfsmount ID management */
+           static DEFINE_IDA(mnt_id_ida);
+           static DEFINE_IDA(mnt_group_ida);
+
+           /**
+            * mnt_cache - slab cache for vfsmount object,a new vfsmount object is allocated by
+            *             call to alloc_vfsmnt() routine
+            */
+           static struct kmem_cache *mnt_cache __read_mostly;
+
+           /**
+            * vfsmount - VFS mount point,that is the mounted filesystem
+            * @mnt_hash: mount point hash list stores the pointers to the vfsmounts they have the same
+            *            hash value
+            * @mnt_parent:    this mount point's parent,the fs this one mounted on
+            * @mnt_mountpoint:    dentry of mount point
+            * @mnt_root: root of the mounted tree
+            * @mnt_sb:   super block of this fs
+            *
+            * @mnt_mounts:    list of children,anchored here
+            * @mnt_child:     and going through their @mnt_child
+            *                 # list @mnt_mounts of parent stored the address of @mnt_child of 
+            *                   children's
+            *                 # list @mnt_child is the real children list
+            *
+            * @mnt_flags:    mounting flags
+            * @mnt_devname:    name of device
+            * @mnt_list: list of VFS mount points belong to the same namespace
+            * @mnt_expire:    link in fs-specific expiry list
+            * @mnt_share:    list of shared mounts
+            * @mnt_slave_list:    list of slave mounts
+            * @mnt_slave:    slave list entry
+            * @mnt_master:    slave is on master->@mnt_slave_list
+            * @mnt_ns:   namespace this mount point belongs to
+            * @mnt_id:   mount identifier
+            * @mnt_group_id:    peer group identifier
+            * @mnt_count:    usage counter
+            * @mnt_expiry_mark:    expiry mark
+            * @mnt_pinned:    pinned vfs mount point can not be removed immediately
+            *                 # this will be checked in mntput_no_expire(),
+            *                   routines mnt_pin() and mnt_unpin() pins and unpins
+            *                   this vfs mount point,respectively
+            * @mnt_ghosts:    number of mount points under the this VFS mount point
+            *                 been unmounted but yet destoryed
+            *                 # this field may be increased in umount_tree() and be
+            *                   decreased in release_mounts()
+            * @mnt_writers:    number of task got write access to this mount point
+            *
+            * # when a new vfsmount object is created,its @mnt_count set to 1,and
+            *   an ID(Linux idr) distributed through mnt_alloc_id() will associated
+            *   with it,memory for @mnt_devname will be allocated from generic slab
+            *   cache and the content is copied from parameter @name which is type of
+            *   const char *
+            * # vfsmount object is allocated through alloc_vfsmnt(),destroyed through
+            *   free_vfsmnt();routine lookup_mnt() attempts to find out a vfsmount object
+            *   by a given path structure pointer,if such vfmount is existing,then returns
+            *   it to the caller with increased reference count
+            */
+           struct vfsmount {
+                   struct list_head mnt_hash;
+                   struct vfsmount *mnt_parent;
+                   struct dentry *mnt_mountpoint;
+                   struct dentry *mnt_root;
+                   struct super_block *mnt_sb;
+                   struct list_head mnt_mounts;
+                   struct list_head mnt_child;
+                   int mnt_flags;
+                   const char *mnt_devname;
+                   struct list_head mnt_list;
+                   struct list_head mnt_expire;
+                   struct list_head mnt_share;
+                   struct list_head mnt_slave_list;
+                   struct list_head mnt_slave;
+                   struct vfsmount *mnt_master;
+                   struct mnt_namespace *mnt_ns;
+                   int mnt_id;
+                   int mnt_group_id;
+                   atomic_t mnt_count;
+                   int mnt_expiry_mark;
+                   int mnt_pinned;
+                   int mnt_ghosts;
+           #ifdef CONFIG_SMP
+                   int __percpu *mnt_writers;
+           #else
+                   int mnt_writers;
+           #endif
+           };
+
+           /* VFS mount point flags */
+           #define MNT_NOSUID 0x01
+           #define MNT_NODEV 0x02
+           #define MNT_NOEXEC 0x04
+           #define MNT_NOATIME 0x08
+           #define MNT_NODIRATIME 0x10
+           #define MNT_RELATIME 0x20
+           #define MNT_READONLY 0x40
+           #define MNT_STRICTATIME 0x80
+           #define MNT_SHRINKABLE 0x100
+           #define MNT_WRITE_HOLD 0x200
+           #define MNT_SHARED 0x1000
+           #define MNT_UNBINDABLE 0x2000
