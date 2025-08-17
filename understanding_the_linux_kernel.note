@@ -22244,7 +22244,7 @@ Chapter 12 : The Virtual Filesystem
            static struct rw_semaphore namespace_sem;
 
            /**
-            * alloc_mnt_ns - attempts to allocate a new mnt_ns from generic slab cache with
+            * alloc_mnt_ns - attempts to allocate a new mnt_ns from general slab cache with
             *                gfp flag GFP_KERNEL
             * return:        pointer to the new allocate mnt_ns object or NULL
             * # this routine initializes all members inside to structure mnt_namespace,and it
@@ -22406,3 +22406,117 @@ Chapter 12 : The Virtual Filesystem
            #define MNT_WRITE_HOLD 0x200
            #define MNT_SHARED 0x1000
            #define MNT_UNBINDABLE 0x2000
+
+     Mounting a Generic Filesystem :
+       shell command "mount" is used to mount a filesystem,it is implemented through call to libc
+       wrapper mount(),the wrapper is call to system call sys_mount(),and finally,do_mount() will
+       be called.
+
+       <fs/namespace.c>
+         /**
+          * sys_mount - system call service rountine for mount()
+          * @dev_name:  device name on which the filesystem been installed,can be NULL for network fs
+          * @dir_name:  mount point pathname
+          * @type:      filesystem type,it must been registred in the kernel
+          * @flags:     mounting flags
+          * @data:      filesystem-dependent data
+          * return:     0 OR error code
+          * # the flags supported by sys_mount() can be found in manual page
+          */
+         SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name, char __user *,
+                         type, unsigned long, flags, void __user *, data);
+         => asmlinkage long sys_mount(char __user *dev_name, char __user *dir_name, char __user *type,
+                                      unsigned long flags, void __user *data);
+
+           flags refered from manual page :
+             MS_DIRSYNC                write operations on directories are immediate
+             MS_LAZYTIME               lazy update timestamp of disk file
+             (since Linux 4.0)
+             MS_MANDLOCK               mandatory locking allowed
+             MS_NOATIME                no atime
+             MS_NODEV                  dont allow accesss to device files on this filesystem
+             MS_NODIRATIME             no directory atime
+             MS_NOEXEC                 disallow program execution
+             MS_NOSUID                 forbid set uid and set gid
+             MS_RDONLY                 read only
+             MS_REC                    used in onjunction with MS_BIND to create a recrusive bind mount
+             MS_RELATIME               update accessed file's atime only if the current value is less than
+                                       or equal to mtime
+             MS_SLIENT                 dont print warning messages in kernel log
+             MS_STRICTATIME            always update atime when files on this filesystem are accessed
+             MS_SYNCHRONOUS            make writes on this filesystem synchronous
+             MS_NOSYMFOLLOW            dont follow symbol link when resolving path
+             (since Linux 5.10)
+             MS_REMOUNT                remount a mounted filesystem
+             MS_BIND                   bind mount,a bind mount makes a file or a directory subtree visible
+                                       at anoter point within the single directory hierarchy
+             MS_SHARED                 make this mount shared
+             MS_PRIVATE                make this mount private
+             MS_SLAVE                  convert this one to a slave mount if it is a shared mount that is a
+                                       member of a peer group
+                                       that contains other members
+             MS_UNBINDABLE             make this mount unbindable
+             MS_MOVE                   move mount point(moving is atomic)
+
+         brief description for sys_mount() :
+           this routine's purpose it prepares environment for call to do_mount().
+           it copies @dev_name,@dir_name,@data to the Kernel Mode address space,memory allocating is
+           necessary.
+           for @dir_name,memory is allocated from slab cache named @names_cachep;for @data,a page will
+           be allocated;for others,memory is allocated from general slab cache with gfp flag GFP_KERNEL.
+           if everything is OK,call to do_mount() with the new memory addresses and returns the result
+           of do_mount() to caller.
+           /**
+            * whenever encountered errors or after do_mount() returned,the memory areas allocated
+            * previously will be deallocated.
+            */
+
+         /**
+          * do_mount - mount a speficied filesystem
+          * @dev_name: string of device name
+          * @dir_name: string of mount point
+          * @type_page:    string of filesystem type
+          * @flags:    mounting flags
+          * @data_page:    address to a page where contains filesystem-dependent data
+          * return:    0 OR error code
+          */
+         long do_mount(char *dev_name, char *dir_name, char *type_page,
+                       unsigned long flags, void *data_page);
+
+         brief description for do_mount() :
+           do_mount() checks parapeters and flags to determines what next to do.
+           first,it discard magic in @flags,if MS_MGC_VAL been matched.
+           second,checks whether parameters are valid,returns -EINVAL when encountered invalid params.
+           next,try to get an object is type of struct path through kern_path() routine from the parameter
+           @dir_name.
+           then performs security checking about super block mounting through security_sb_mount().
+           and now,seperate the per-mountpoint flags.
+           setup a local variable named @mnt_flags :
+             set MNT_NOSUID <-> MS_NOSUID
+             set MNT_NODEV  <-> MS_NODEV
+             set MNT_NOEXEC <-> MS_NOEXEC
+             set MNT_NOATIME <-> MS_NOATIME
+             set MNT_NODIRATIME <-> MS_NODIRATIME
+             disable MNT_RELATIME | MNT_NOATIME <-> MS_STRICTATIME
+             set MNT_READONLY <-> MS_RDONLY
+
+            disable MS_NOSUID,MS_NOEXEC,MS_NODEV,MS_ACTIVE,MS_NOATIME,MS_NODIRATIME,MS_RELATIME,MS_KERNMOUNT,
+            MS_STRICTATIME in parameter @flags.
+            after finished flags separating,we can determine what next action should to be executed,this is
+            indicated by @flags.
+            if MS_REMOUNT
+                    do_remount()
+            else if MS_BIND
+                    do_loopback()
+            else if MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE
+                    do_change_type()
+            else if MS_MOVE
+                    do_move_mount()
+            else
+                    do_new_mount()
+            finally,call to path_put() to put the dentry accquired previously by kern_path(),and returns
+            the return value get from if-else action to caller.
+            /**
+             * path_put() is defined in <fs/namei.c>,which call to dput() to put the dentry object of the path,
+             * and call to mntput() to put the vfsmount object of the path.
+             */
