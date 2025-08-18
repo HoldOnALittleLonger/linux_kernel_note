@@ -22505,18 +22505,144 @@ Chapter 12 : The Virtual Filesystem
             after finished flags separating,we can determine what next action should to be executed,this is
             indicated by @flags.
             if MS_REMOUNT
-                    do_remount()
+                    do_remount(&@path, @flags & MS_REC, @mnt_flags, @data_page);
             else if MS_BIND
-                    do_loopback()
+                    do_loopback(&@path, @dev_name, @flags & MS_REC);
             else if MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE
-                    do_change_type()
+                    do_change_type(&@path, @flags);
             else if MS_MOVE
-                    do_move_mount()
+                    do_move_mount(&@path, @dev_name);
             else
-                    do_new_mount()
+                    do_new_mount(&@path, @type_page, @flags, @mnt_flags, @dev_name, @data_page);
             finally,call to path_put() to put the dentry accquired previously by kern_path(),and returns
             the return value get from if-else action to caller.
             /**
              * path_put() is defined in <fs/namei.c>,which call to dput() to put the dentry object of the path,
              * and call to mntput() to put the vfsmount object of the path.
              */
+
+         /**
+          * do_new_mount - create a new mount for userspace and request it to be added into the namespace's tree
+          * @path:         struct path object used to indicates mount point path
+          * @type:         filesystem type string
+          * @flags:        flags
+          * @mnt_flags:    mounting flags
+          * @name:         name string
+          * @data:         filesystem-dependent data
+          * return:        0 OR error code
+          * # this function's body is very short,there are three steps it must to done,
+          *   first,checks CAP_SYS_ADMIN,only administrator can mount a filesystem,
+          *   second,lock kernel and call to do_kern_mount(),
+          *   third,returned with call to do_add_mount(),
+          *   ! this function locks the kernel through macro function lock_kernel(),and it will be expanded to
+          *     _lock_kernel(__func__, __FILE__, __LINE__) /* these are C compiler macros */;function
+          *     _lock_kenrel_() is defined in <lib/kernel_lock.c>,which will disable preemption at first then
+          *     try to lock up spinlock
+          *     @kernel_flag,function unlock_kernel() is used to release kernel lock
+          *   ! function do_kern_mount() process the main mounting work through vfs_kern_mount()
+          *   ! function do_add_mount() adds a mount into a namespace's mount tree
+          *   ! @flags as argument for do_kern_mount(),@mnt_flags as argument for do_add_mount()
+          */
+         static int do_new_mount(struct path *path, char *type, int flags,
+                                 int mnt_flags, char *name, void *data);
+
+         /**
+          * do_add_mount - add a mount into a namespace's mount tree
+          * @newmnt:       newly allocated VFS mount point
+          * @path:         the path @newmnt will be mounted on
+          * @mnt_flags:    mounting flags
+          * @fslist:       special expiration list,if this parameter is not NULL,
+          *                &@newmnt->mnt_expire will be inserted into this list
+          * return:        0 OR error code
+          */
+         int do_add_mount(struct vfsmount *newmnt, struct path *path, int mnt_flags,
+                          struct list_head *fslist);
+
+         brief description for do_add_mount() :
+           first,it disables MNT_SHARED,MNT_WRITE_HOLD,MNT_INTERNAL in @mnt_flags.
+           next,acquires @namespace_sem for writing.
+           a while-cycle with condition "d_mountpoint(@path->dentry) AND follow_down(@path)"
+           is used to get the path object of the last component in the path.
+           mntput(@newmnt) and return to caller with -EINVAL,if @mnt_flags forbid
+           MNT_SHRINKABLE AND the namespace of @mnt of the path is not same as current task's namespace.
+           @mnt_sb of vfsmount of the path can not same as @newmnt->mnt_sb,@mnt_root of vfsmount of
+           the path can not same as the path's dentry object,because the same filesystem on the same
+           mount point is refused.in this case,returns -EBUSY to caller.
+           @newmnt's root dentry can not be a symbol link,otherwise,returns -EINVAL to caller.
+           now we prepare to add the mount,set @newmnt->@mnt_flags to @mnt_flags,add the mount
+           into namespace's mount tree through routine graft_tree(@newmnt, @path).
+           @mnt_parent and @mnt_mountpoint of @newmnt will be set to the @mnt of @path and
+           the @dentry of @path,respectively.
+           if @fslist is not NULL,then insert &@newmnt->mnt_expire to @fslist.
+           finally,release writing for @namespace_sem,return _zero_ to caller.
+
+       <fs/super.c>
+         /**
+          * do_kern_mount - this function gets the given filesystem type,invokes vfs_kern_mount() to
+          *                 mount a filesystem on VFS,setup subtype for the VFS mount point if subtype
+          *                 have existed,return the new VFS mount point object to caller
+          * # error code:   -ENODEV => no such filesystem type
+          */
+         struct vfsmount *do_kern_mount(const char *fstype, int flags, const char *name, void *data);
+
+         /**
+          * vfs_kern_mount - mount a filesystem on Linux VFS
+          * @type:           filesystem type
+          * @flags:          flags
+          * @name:           mounting name
+          * @data:           filesystem-dependent data
+          * return:          0 OR error code
+          */
+         struct vfsmount *vfs_kern_mount(struct file_system_type *type, int flags, const char *name,
+                                         void *data);
+         
+         what vfs_kern_mount() does :
+           1> checks @type,if it is NULL then returns -ENODEV to caller.
+           2> allocate a new vfsmount object through alloc_vfsmnt(),@name is the device name.
+           3> if failed to allocate new vfsmount object,then returns the error to caller.
+           4> if enabled MS_KERNMOUNT in @flags,then sets @mnt_flags of the new vfsmount to MNT_INTERNAL.
+           5> if fs-dependent data have given and no FS_BINARY_MOUNTDATA is enabled in filesystem type's
+              @fs_flags,then prepare security checking data,a new zeroed page will be allocated through
+              routine alloc_secdata().proceed copy @data to @secdata the new memory area,call to
+              free_secdata() and deallocate the newly allocated vfsmount object,then to caller
+              if failed to copying
+           6> use the method get_sb() setup in filesystem type object to get a super block for newly
+              allocated vfsmount object;if failed,then free secdata and the vfsmount object then
+              return to caller with error code.
+              /**
+               * if @mnt_sb of the vfsmount object is NULL,then must a BUG encountered,kernel will
+               * panic.
+               * if the super block's backing devince is NULL,then kernel will print a warning.
+               */
+           7> do secuiry checking for super block mounting through secuirty_sb_kern_mount().
+              if we failed on security checking,then we can not mount this filesystem,so we have to
+              put the dcache of @mnt_root,put the super block,free secdata and vfsmount object,return
+              to caller with the error code.
+           8> now we passed security checking,so we can setup the newly allocated vfsmount object @mnt.
+              @mnt->@mnt_mountpoint := @mnt->@mnt_root /* the root is our mount point */
+              @mnt->@mnt_parent := @mnt                /**
+                                                        * because we have not been added into namespace's
+                                                        * mount tree
+                                                        */
+           9> finally,up_write() @s_umount of the super block object,free secdata,returns @mnt to caller.
+
+         ! get_sb() method of the filesystem type object is depends on the filesystem implementation.
+           but the real implementation often has only one statement which invokes to one VFS defined
+           get_sb_XXX() routine.
+           the routines :
+             get_sb_ns          -        for filesystem no super block,such IPC mechanism
+             get_sb_bdev        -        for filesystem installed in a disk device
+             get_sb_nodev       -        for filesystem no disk device,such autofs,fuse,ramfs
+             get_sb_single      -        for filesystem has single mount point,such devptfs,sysfs
+             get_sb_pseudo      -        for filesystem with no mount point,such pipefs,libfs
+           function sget() is invoked by these get_sb_XXX() to get an appropriate super block object which been
+           existed in @fs_supers of the filesystem type object or allocates a new super block object and inserts
+           it into @fs_supers of the filesystem type object and the global super block list.
+           if the super block object is not newly allocated,get_sb_XXX() just returns it as well.
+           a callback function named @fill_super is required by these routines to fill the super block object.
+           the callback function usually passed by filesystem implementation,for disk-based filesystem such ext2,
+           this callback function should read the super block from disk device partition and use the data to fill the
+           new super block object.
+           function open_bdev_exclusive() is used to open a device,if no error encountered,open_bdev_exclusive() will
+           returns a handler corresponding to the device which is type of struct block_device *;function
+           close_bdev_exclusive() is used to close the device opended by open_bdev_exclusive() previously.
