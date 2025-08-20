@@ -22635,6 +22635,9 @@ Chapter 12 : The Virtual Filesystem
              get_sb_nodev       -        for filesystem no disk device,such autofs,fuse,ramfs
              get_sb_single      -        for filesystem has single mount point,such devptfs,sysfs
              get_sb_pseudo      -        for filesystem with no mount point,such pipefs,libfs
+
+           function get_sb_nodev() call to sget() with setup callback set_anon_super().
+
            function sget() is invoked by these get_sb_XXX() to get an appropriate super block object which been
            existed in @fs_supers of the filesystem type object or allocates a new super block object and inserts
            it into @fs_supers of the filesystem type object and the global super block list.
@@ -22643,6 +22646,146 @@ Chapter 12 : The Virtual Filesystem
            the callback function usually passed by filesystem implementation,for disk-based filesystem such ext2,
            this callback function should read the super block from disk device partition and use the data to fill the
            new super block object.
+
            function open_bdev_exclusive() is used to open a device,if no error encountered,open_bdev_exclusive() will
            returns a handler corresponding to the device which is type of struct block_device *;function
            close_bdev_exclusive() is used to close the device opended by open_bdev_exclusive() previously.
+
+     Mounting the Root Filesystem :
+       Linux allows the root filesystem is stored in a hard disk partition,a floppy disk,a remote filesystem shared via
+       NFS,or even a ramdisk.generally,the root filesystem is stored in disk partition 1.
+       global variable named @ROOT_DEV is used to stores the device info about where the root filesystem is stored.
+       the rootfs can be specified as a device file in the "/dev" directory either when compiling the kernel or by
+       passing a suitable "root" option to the initial bootstrap loader.
+       /**
+        * the grub bootloader command "linux" can select which kernel to be booted,and parameter "root" is used to
+        * tell the kernel where the root filesystem stored.
+        */
+       the mounting flags of root filesystem is stored in global variable @root_mountflags,user can specifies the
+       mounting flags via program "rdev" on a selected kernel image or through "root-flags" option of the bootloader.
+       /* ROOT_DEV <linux/root_dev.h>, root_mountflags <linux/kernel.h> */
+
+       Two stages for mounting the root filesystem :
+         1> the kernel mounts the special rootfs filesystem,which simply provides an empty directory that
+            serves as initial mount point.
+         2> the kernel mounts the real root filesystem over the empty directory.
+       /**
+        * grub command "initrd" requires a pathname to the initramfs image for current kernel.
+        * when booting the kernel,it installs the initramfs in the memory,then tell the kernel where to find the
+        * components needed when initializes the system.if the kernel supports initramfs,function unpack_to_rootfs()
+        * will be called,it unpacks the components into the initial rootfs filesystem,then kernel can access them
+        * to initializes the system.
+        * kernel image and initramfs image are stored in the directory "/boot",and it is stored in the disk
+        * partition 0.
+        * after bios self-checking completed,the bootloader will be read from disk to memory,ip register of CPU
+        * will be set to the instruction of bootloader.
+        * the kernel would be booted after the enviroment been setup by grub.
+        */
+        
+       ! the kernel bother to mounts the initial rootfs before the real one can allows the kernel easily
+         change the real root filesystem.
+
+       Mounting the initial rootfs filesystem :
+         function init_rootfs() is used to register @rootfs_fs_type on VFS,function init_mount_tree() is
+         used to setup the vfsmount object of initial rootfs,the task "init" will use the vfsmount object.
+         these two function are called by routine mnt_init().
+         /* mnt_init() is called by vfs_caches_init(),and which is called by start_kernel() */
+
+         <fs/ramfs/inode.c>
+           /**
+            * init_rootfs - register rootfs filesystem type on VFS during system initialization
+            * return:       0 or error code
+            * # this function invokes bdi_init() to initializes backing device info about ramfs,the
+            *   object is named @ramfs_backing_dev_info;and next,call to register_filesystem()
+            *   to register @root_fs_type on linux VFS
+            */
+           int __init init_rootfs(void);
+
+         <fs/namespace.c>
+           /**
+            * init_mount_tree - initialize the mount tree,and the tree is come from the initial
+            *                   rootfs filesystem
+            */
+           static void __init init_mount_tree(void);
+
+           brief description for init_mount_tree() :
+             call to do_kern_mount(),a new vfsmount object for "rootfs" is returned through do_kern_mount().
+             this vfsmount represents the mounted initial rootfs filesystem.
+             if the object IS_ERR,then kernel will be panic.
+             next,call to create_mnt_ns() to create a namespace for this vfs mount point,and set the @mnt_ns
+             of @nsproxy of @init_task.
+             increase namespace reference counter,set @mnt and @dentry of a local variable named @root is type
+             of struct path by @ns->root and @ns->root->mnt_root. /* @ns is the namespace of rootfs */
+             setup filesystem process work directory and root directory of current task with @root the vfs mount point.
+             /**
+              * the get_sb() method of rootfs type will be called by vfs_kern_mount(),it is the routine ram_get_sb()
+              * defined in <fs/ramfs/inode.c>.finally,get_sb_nodev() will be called to get super block object for
+              * the inital rootfs.
+              * the parameter @fill_super points to ramfs_fill_super().
+              */
+
+       Mounting the real root filesystem :
+         function prepare_namespace() is used to mounts real root filesystem during system initialization,it is
+         called by kernel_init() before invokes to init_post(). /* the next statement is "return 0;" */
+         the name of root device is passed by bootloader through command line option "root=",and the calling
+         __setup("root=", root_dev_setup) means call to root_dev_setup() in the section ".init.setup".
+         function root_dev_setup() stores the parameter of "root=" to the array @saved_root_name,it will be
+         used by prepare_namespace() to set @root_device_name.
+
+         <init/do_mounts.c>
+           /**
+            * prepare_namespace - mounts the real rootfs filesystem and prepares namespace
+            *                     it decides what/where to mount,load ramdisks, etc
+            */
+           void __init prepare_namespace(void);
+
+           brief description for prepare_namespace() :
+             after slept @root_delay(if it is not _zero_),the routine call to wait_for_device_probe() to
+             waiting for the known devices to complete their probing.
+             next call to md_run_setup() to setup memory disk environment.
+             set @root_device_name and @ROOT_DEV through @saved_root_name[0],if the root device is mtd or
+             ubi device,call to mount_block_root() and return to caller.
+             if @saved_root_name[0] is NULL,then attempts initrd_load(),in this case,the rootfs come from
+             a ram disk,it loads the filesystem and return to caller.
+             the last case is the rootfs come from a hard disk partition,function mount_root() take care of
+             rootfs mounting.
+             if @ROOT_DEV is _zero_ AND @root_wait is true,before call to mount_root(),have to wait for any
+             asynchronous scanning to the root device @saved_root_name,and wait for driver probe completed.
+             if @ROOT_DEV's major number same as FLOPPY_MAJOR AND @rd_doload is true AND rd_load_disk(0)
+             returned true,ROOT_DEV will be set to Root_RAM0.
+             finally,call to mount_root(),then mount devtmpfs "dev",mount "/",chroot to ".".
+                                               /* these is the common end-up for all cases described above */
+           /**
+            * mount_root - mount the real rootfs filesystem
+            */
+           void __init mount_root(void);
+
+           brief description for mount_root() :
+             #ifdef CONFIG_ROOT_NFS /* network booting */
+                     ROOT_DEV's major number same as UNNAMED_MAJOR
+                     call to mount_nfs_root(),return to caller if succed,set ROOT_DEV to Root_FD0 if failed.
+                     /* also log message in kernel log */
+             #endif
+             #ifdef CONFIG_BLK_DEV_FD /* floppy root */
+                     if ROOT_DEV's major number same as FLOPPY_MAJOR
+                             if @rd_doload is 2 /* for a dual initrd/ramload setup */
+                                     call to rd_load_disk(1),if succeed,then set ROOT_DEV to Root_RAM1,
+                                     set @root_device_name to NULL
+                     else call to change_floppy("root floppy")
+             #endif
+             #ifdef CONFIG_BLOCK
+                     create "/dev/root" through create_dev() with ROOT_DEV
+                     call to mount_block_root() attempts to mount "/dev/root" with @root_mountflags
+             #endif
+             /**
+              * kernel will panic after mount_block_root() tried all do_mount_root() on available filesystem
+              * names registered in the kernel(passed by bootloader or built when compiling kernel),but no one
+              * can be mounted.
+              * kernel log message such "VFS: Cannot open root device ...","VFS: Unableto mount root fs on ..."
+              * will be printed.
+              * if sys_mount() called by do_mount_root() try to mounts the filesystem on "/root",and do_mount_root()
+              * is called by mount_block_root().
+              * if succed to mount root filesystem,then do_mount_root() will chdir to "/root",thus the namespace
+              * of init task will has a new root.
+              * the initial rootfs is hidden by the real root filesystem.
+              */
