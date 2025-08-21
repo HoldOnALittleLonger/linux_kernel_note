@@ -22846,8 +22846,15 @@ Chapter 12 : The Virtual Filesystem
                               @mnt == @current->fs->root.mnt OR @flags enabled MNT_FORCE | MNT_DETACH
                                       return -EINVAL
                               @mnt->mnt_count != 2 /* this filesystem is using by other objects */
-                                      return -BUSY
-                              no expiry marked in @mnt /* mount point is not expired */
+                                      return -EBUSY
+                              /**
+                               * xchg(a, b) => exchange @a and @b then returns @b
+                               * if the vfs mount point is not marked expired previously,then
+                               * the initial MNT_EXPIRE will mark the mount point expired and
+                               * returns -EAGAIN;the second MNT_EXPIRE will umount the expired
+                               * filesystem.
+                               */
+                              xchg @mnt->mnt_expiry_mark 1
                                       return -EAGAIN
                       }
            4> if enabled MNT_FORCE AND umount_begin() method of super block is implemented,
