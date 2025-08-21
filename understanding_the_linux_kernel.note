@@ -22789,3 +22789,113 @@ Chapter 12 : The Virtual Filesystem
               * of init task will has a new root.
               * the initial rootfs is hidden by the real root filesystem.
               */
+
+     Unmounting a Filesystem :
+       system call umount() is used to issue a request for unmount a mounted filesystem,the corresponding system call
+       service routine is sys_umount().
+
+       <fs/namespace.c>
+         /**
+          * sys_umount - system call service routine for umount() the C lib wrapper
+          * @name:       pathname to the mount point or the device file
+          * @flags:      flags used to control behavior
+          * return:      0 OR error code
+          */
+         SYSCALL_DEFINE2(umount, char __user *, name, int, flags);
+         => asmlinkage long sys_umount(char __user *name, int flags);
+
+         brief description for sys_umount() :
+           @flags can not specified MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW at
+           the same time,if it was,-EINVAL will be returned.
+           call to user_path_at() use @name and @lookup_flags(local variable, 0 or LOOKUP_FOLLOW)
+           attempts find out the path object corresponding to @name.
+           /* this will increase references to @dentry and @mnt that corresponding to the mount point */
+           if unfound,then returns error code to caller.
+           the path object @path's @dentry is not same as its @mnt_root,then put @dentry,
+           mntput_no_expire() @mnt_root;that means the path is invalid,return -EINVAL to caller.
+           otherwise,checks if the namespace of the @mnt of @path is same as current task's @mnt_ns,
+           put @dentry and @mnt when they are not same,and return -EINVAL to caller.
+           /**
+            * each task can only modifies its own namespace,if they are not same,means the filesystem is not
+            * contained in this namespace
+            */  
+           next,checks permission CAP_SYS_ADMIN,non root user can not modify namespace,so if this task
+           have not root permission,-EPERM would be returned. /* of course,destroy @dentry and @mnt of @path */
+           if everything is OK,call to do_umount(@path.mnt, @flags),which processes the main work.
+           finally,put @dentry and @mnt of @path,returns the value what do_umount() returned to
+           caller.
+
+         /**
+          * do_umount - umount a filesystem registered on Linux VFS,behavior is depends on flags
+          * @mnt:       the vfs mount point
+          * @flags:     flags related to routine behavior
+          * return:     0 OR error code
+          */
+         static int do_umount(struct vfsmount *mnt, int flags);
+          
+         what do_umount() doest :
+           1> get super block object for @mnt through @mnt->mnt_sb.
+           2> initializes local list @umount_list,process security checking about sb umount,
+              return to caller the error code if un-satisfied the conditions.
+           3> check @flags :
+                      enabled MNT_EXPIRE {
+                              /**
+                               * current task cannot unmount its root
+                               * MNT_EXPIRE is exclusive flag
+                               */
+                              @mnt == @current->fs->root.mnt OR @flags enabled MNT_FORCE | MNT_DETACH
+                                      return -EINVAL
+                              @mnt->mnt_count != 2 /* this filesystem is using by other objects */
+                                      return -BUSY
+                              no expiry marked in @mnt /* mount point is not expired */
+                                      return -EAGAIN
+                      }
+           4> if enabled MNT_FORCE AND umount_begin() method of super block is implemented,
+              call umount_begin() befor do realy unmounting.
+           5> @mnt is the root's mount point of @current AND no MNT_DETACH
+                      special case for "unmounting" root
+                      we just try to remount it readonly
+                      acquire @sb->s_umount for writing
+                      if @sb->s_flags no MS_RDONLY enabled,that means this filesyste is not mounted
+                      with readonly,then call to do_remount_sb() with MS_RDONLY on @sb
+                      release lock and return 0 or value what do_remounted_sb() returned
+           6> acquire @namespace_sem for writing.
+              acquire @vfsmount_lock.
+              increase @event the namespace event indicator which is defined in the same file with static
+              linkage.
+           7> if no MNT_DETACH
+                      call to shrink_submounts() to process a list of expirable mountpoints with the intent
+                      of discarding any submounts of @mnt
+           8> enabled MNT_DETACH OR @mnt can be unmounted successfully(checked by propagate_mount_busy())
+                      if @mnt->mnt_list is not empty /* more vfs mount points are contained in this namespace */
+                              call to umount_tree(@mnt, 1, &@umount_list)
+                              /* collects all submounts under this filesystem in @umount_list contains @mnt */
+                      set return value to _zero_
+           9> release @vfsmount_lock.
+              if return value is not _zero_,do security checking for sb_umount_busy on @mnt
+           10> release @namespace_sme
+               release all mount points contained in @umount_list(by release_mounts())
+               /**
+                * for each element in the list
+                *   delete the element from vfs mount point hash list
+                *   # if @mnt->mnt_parent != @mnt
+                *     lock @vfsmount_lock
+                *     get mount point dentry
+                *     get parent vfs mount point through @mnt_parent
+                *     modify @mnt_mountpoint to @mnt_root
+                *     modify @mnt_parent to mnt
+                *     decrease @mnt_ghosts of parent
+                *     unlock @vfsmount_lock
+                *     dput() the dentry
+                *     mntput() parent
+                *   mntput() the element
+                * # notice that,mntput() is a static function defined in <linux/mount.h>,if the parameter
+                *   @mnt is TRUE,then @mnt_expiry_mark of @mnt will be set to _zero_,proceeds calling
+                *   to mntput_no_expire(@mnt).
+                *   and routien mntput_no_expire() will decrease usage counter of @mnt and test it,call to
+                *   __mntput(@mnt) when usage counter becomes to _zero_.
+                *   ! if counter of @mnt's parent becomes to _zero_,so the parent should be __mntput(),too.
+                *     but the initial usage counter of a mounted vfs mount point usually equal to 2,
+                *     one for parent vfsmount,another because sys_mount().
+                */
+               return the return value.
