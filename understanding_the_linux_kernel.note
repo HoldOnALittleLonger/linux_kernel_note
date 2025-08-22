@@ -22906,3 +22906,152 @@ Chapter 12 : The Virtual Filesystem
                 *     one for parent vfsmount,another because sys_mount().
                 */
                return the return value.
+
+     Pathname Lookup :
+       VFS pathname lookup actually is derive an inode from the corresponding file pathname.
+       for a given pathname,VFS have to analyzes each component except the last filename in the pathname.
+       except the last,each component must identifies a directory,thus the corresponding dentry object
+       must exists.
+       start with "/" => full pathname,the lookup start from root /* current->fs->root */
+       start with "./" => lookup start from PWD                   /* current->fs->pwd  */
+       start with "../" => lookup start from PWD's parent
+       only filename is given => lookup start from PWD
+       
+       because,the dentry in state "Unused" OR "In-use" has a inode associated to it,the inode identified
+       by @d_inode.
+       so the lookup just is "get dentry via component name,get the corresponding inode via dentry,read the
+       directory has that inode from disk".whenever kernel read a existed directory from the disk,a dentry
+       object will be created and associated to its inode.for full pathname,the first component is "/",the
+       filesystem's root,and the fs must be mounted during system initialization.now we got the first
+       component,so we can find the second,the third,and so on.
+       /* if the task has different namespace,then "/" points to different root */
+       /* dcache can speed up the searching,the recently accessed dentry will not be destroyed immediately */
+
+       ! VFS must checks acess rights for each component.
+         if the filename is a symbolic link,the analysis must be extended to all components of that pathname.
+         symbolic link may induce circular references,the kernel must pay attention to this.
+         a filename can be the mount point of a munted filesystem,this situation must be detected,and the
+         lookup operation must continue into the new filesystem.
+         pathname lookup have to be done inside the namespace of the process that issued the system call.
+         /* same pathname used by two procs with different ns may specify different files */
+
+       path_lookup() :
+         the routine used to process pathname lookup.
+
+         <linux/namei.h>
+           /**
+            * open_intent - file accessing intent
+            * @flags:       open flags
+            * @create_mode: file mode
+            * @file:        file object
+            */
+           struct open_intent {
+                   int flags;
+                   int create_mode;
+                   struct file *file;
+           };
+
+           /* number of nested symbolic links can not exceeds 8 */
+           enum { MAX_NESTED_LINKS = 8 };
+
+           /**
+            * nameidata - pathname analysis data
+            * @path:      record current status of path walk
+            *             it start out referring to the starting point,
+            *             and finally to the last component in the pathname
+            *             if no error encountered during path walk
+            * @last:      quick string for the last component,that is the next
+            *             component
+            * @root:      root of this task
+            * @flags:     lookup flags
+            * @last_type: type of last component of the pathname
+            * @depth:     current level of symbolic link nesting
+            * @saved_names:    array of pathnames associated with nested symbolic links
+            * @intent:    specifying how the file will be accessed
+            */
+           struct nameidata {
+                   struct path path;
+                   struct qstr last;
+                   struct path root;
+                   unsigned int flags;
+                   int last_type;
+                   unsigned depth;
+                   char *saved_names[MAX_NESTED_LINKS + 1];
+
+                   union {
+                           struct open_intent open;
+                   } intent;
+           };
+         
+         <fs/namei.c>
+           /**
+            * path_init - setup nameidata object through the given dfd and pathname
+            * @dfd:       where to start
+            * @name:      pathname
+            * @flags:     accessing flags
+            * @nd:        result where to be stored
+            * return:     0 OR error code
+            */
+           static int path_init(int dfd, const char *name, unsigned int flags, struct nameidata *nd);
+
+           brief description for path_init() :
+             this routine setup @nd through @dfd,@name,@flags.
+             first setup
+                     @nd->last_type = LAST_ROOT
+                     @nd->flags = flags
+                     @nd->depth = 0
+                     @nd->root.mnt =NULL
+             next
+                     if the pathname is full pathname,that is it started with "/"
+                     then use the root of current task,and increase the counter of
+                     the corresponding vfsmount object and dentry object(by set_root())
+                     set @nd->path to @nd->root
+
+                     else if @dfd is AT_FDCWD
+                     then use current task's current work directory
+
+                     else
+                             @dfd refers to a different directory,we have to start from the dir
+                             use fget_light() on @dfd to get the corresponding file descriptor of
+                             the directory
+                             check it with S_ISDIR(),and check file permission MAY_EXEC
+                             if everything is OK,use it to setup @nd,and fput_light() the dir
+             finally,returns 0 or error code to caller.
+
+           /**
+            * path_lookup - pathname analysis routine
+            * @name:        pathname
+            * @flags:       represent how the looked-up file is going to be accessed
+            * @nd:          stores the result of the lookup operation
+            * return:       0 OR error code
+            * # EXPORT_SYMBOL
+            * # this routine actually call to do_path_lookup() with @dfd AT_FDCWD
+            */
+           int path_lookup(const char *name, unsigned int flags, struct nameidata *nd);
+
+           /**
+            * do_path_lookup - do path lookup
+            * @dfd:            directory file descriptor specifies where to start,a special
+            *                  value is defined in <linux/fcntl.h>,AT_FDCWD means use the
+            *                  current work directory
+            *                  # same feature as in system call openat2 
+            *                  # if pathname is the full pathname,this would be ignored
+            *                  # this parameter is used by path_init() which is called by this
+            *                    routine
+            * @name:           pathname
+            * @flags:          accessing flags
+            * @nd:             stores lookup result
+            * return:          0 OR error code
+            */
+           static int do_path_lookup(int dfd, const char *name, unsigned int flags, struct nameidata *nd);
+
+           brief description for do_path_lookup() :
+             call to path_init() to initializes @nd.
+             next,process three if statements.
+             the first,if we succeed to initializes @nd,then call to path_walk() for pathname lookup.
+             the second,if path_walk() succeed,and audit_dummy_context() on current task is succceed,
+             and both the dentry of the last component and the corresponding inode existed,then
+             call to audit_inode() to audit the inode.
+             the third,if @nd->root.mnt is not NULL,then path_put the root and reset it to NULL.
+             finally,returns 0 or error code from path_init() or path_walk() to caller.
+             
