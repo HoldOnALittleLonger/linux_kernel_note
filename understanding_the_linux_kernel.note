@@ -22954,6 +22954,25 @@ Chapter 12 : The Virtual Filesystem
            /* number of nested symbolic links can not exceeds 8 */
            enum { MAX_NESTED_LINKS = 8 };
 
+           /* type of the last recorded component */
+           enum { LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT, LAST_BIND };
+
+           /* bitmask for a lookup event */
+           #define LOOKUP_FOLLOW 1              /* follow links at the end */
+           #define LOOKUP_DIRECTORY 2           /* require a directory */
+           #define LOOKUP_CONTINUE 4            /* ending slashes ok even for nonexistent files */
+           #define LOOKUP_PARENT 16             /* internal "there are more path components" flag */
+           #define LOOKUP_REVAL 64              /**
+                                                 * locked when lookup done with dcache_lock held detnry
+                                                 * cache is untrusted;force a real lookup
+                                                 */
+           
+           /* bitmask for intent data about file open flags */
+           #define LOOKUP_OPEN 0x0100
+           #define LOOKUP_CREATE 0x0200
+           #define LOOKUP_EXCL 0x0400
+           #define LOOKUP_RENAME_TARGET 0x0800
+
            /**
             * nameidata - pathname analysis data
             * @path:      record current status of path walk
@@ -23009,6 +23028,7 @@ Chapter 12 : The Virtual Filesystem
 
                      else if @dfd is AT_FDCWD
                      then use current task's current work directory
+                     set @nd->path to @current->fs->pwd
 
                      else
                              @dfd refers to a different directory,we have to start from the dir
@@ -23054,4 +23074,169 @@ Chapter 12 : The Virtual Filesystem
              call to audit_inode() to audit the inode.
              the third,if @nd->root.mnt is not NULL,then path_put the root and reset it to NULL.
              finally,returns 0 or error code from path_init() or path_walk() to caller.
-             
+
+           /**
+            * path_walk - walk through the pathname to process lookup
+            * @name:      pathname
+            * @nd:        lookup result recorder
+            * return:     0 OR error code
+            */
+           static int path_walk(const char *name, struct nameidata *nd);
+
+           brief description for path_walk() :
+             the main work for lookup will be done by link_path_walk(),and which is called
+             by this routine.
+             path_walk() saves @nd->path in a local variable,then set this task's @total_link_count to _zero_.
+             increase usage counter of @mnt and @dentry of @nd->path.
+             call to link_path_walk().
+             if the result is -ESTALE,that means the record been expired,it will repeat lookup again.
+             /**
+              * reset @total_link_count,save @nd->path,increase usage counter
+              * and enable LOOKUP_REVAL in @nd->flags to force the next link_path_walk() process lookup.
+              */
+             if the result is _zero_,then decrease the usage counters and return the result to caller.
+
+     The link_path_walk() function :
+       link_path_walk() is the main routine processes lookup.
+       it will has different behavior determined by nameidata object's @flags.
+       
+       <fs/namei.c>
+         /**
+          * link_path_walk - do pathname lookup
+          * @name:           pathname
+          * @nd:             resolving result recorder
+          * return:          0 OR error code
+          */
+         static int link_path_walk(const char *name, struct nameidata *nd);
+
+         what link_path_walk() does :
+           1> updates @name to skip "/",if @name is not valid,goto label "return_reval".
+           2> get inode of current dentry in @nd->path in local variable @inode(pointer to inode structure).
+              reset lookup flags to LOOKUP_FOLLOW | (@nd->flags & LOOKUP_CONTINUE),if
+              @nd->depth is not _zero_. /* otherwise,lookup flags is assigned to @nd->flags */
+                                        /* @lookup_flags */
+           3> enter a infinite for-cycle.
+              as this point we know we have a real path component.
+              for-cycle :
+                      enables LOOKUP_CONTINUE in @nd->flags
+                      check inode permission,break cycle when permission disallowed
+                      an object is type of struct qstr named @this is declared
+                      set @this.name to @name /* a const char * */
+                      get the first character in @name,store it in local variable @c
+                      enter a do-while cycle,it will ends when @c is '\0' OR @c is "/"
+                      /**
+                       * we can easily to know that,the do-while cycle calculates
+                       * the hash value of current component of the pathname
+                       */
+                      do-while :
+                              updates @name
+                              calculates hash for @c by call to partial_name_hash()
+                              updates @c to the next character
+                      calculates the length of the string of this component
+                      set @this.hash to end_name_hash(calculated hash value)
+                      if current component is the last component,then goto label "last_component"
+                      enter a while cycle to updates @name to skip "/" before next component
+                      goto label "last_with_slashes" when *@name is '\0'
+                      check current component,"." and ".." are special cases :
+                              "." => current work directory
+                              ".." => parent directory of current work directory
+                              in the case "..",have to follow_dotdot(@nd),this will updates
+                              @nd to records the parent directory's info,then reset inode to
+                              @nd->path.dentry->d_inode
+                      now we can process the actual lookups through do_lookup(@nd, &@this, &@next),
+                      break for-cycle when any error was encountered in do_lookup()
+                      /**
+                       * @next is an object is type of struct path
+                       * it is set to { @nd->path.mnt, __d_lookup(@nd->path.dentry, @this) }
+                       * if @next is a vfs mount point and some filesystems have mounted on it,
+                       * then @next will stores the vfsmount object of the first or the last filesystem
+                       * mounted on current dentry in @mnt,and stores the root dentry object of the mounted
+                       * filesystem in @dentry.
+                       * # __d_lookup() is defined in <fs/dcache.c>,which use a qstr object and a directory
+                       *   as the starting point to find out the corresponding dentry object in dcache,
+                       *   if unfound,returns NULL
+                       */
+                      updates @inode(the local variable) to @next.dentry->d_inode,goto lable "out_dput" with
+                      error code -ENOENT if the @inode is NULL
+                      if @inode->i_op->follow_link is TRUE
+                      then
+                              call to do_follow_link() on @next with @nd,goto "return_err" if do_follow_link()
+                              detected an error
+                              updates @inode to the new directory's inode,if the inode is NULL,then break for-cycle
+                              with error code -ENOENT
+                              /**
+                               * do_follow_link() will process a recursive symlink following,the maximum is 8,and
+                               * consecutive symlinks is 40
+                               * if the @inode is not a symlink,then would not cause symlink following,that is
+                               * method follow_link() is not implemented.
+                               */
+                      else
+                              path_to_nameidata() &@next, @nd
+                              /* this will updates @nd->path to @next */
+                      checks if lookup() method been implemented in @inode's operation,break for-cycle when it is
+                      not implemented
+                      /* if lookup() is not implemented,how can we lookup a file under a directory? */
+                      continue to next iteration /* ends the main loop */
+
+                      last_with_slashes:
+                              enables LOOKUP_FOLLOW | LOOKUP_DIRECTORY in @lookup_flags
+
+                      last_component:
+                              /* there we are deal with the last component */
+                              set @nd->flags to @lookup_flags | ~LOOKUP_CONTINUE
+                              goto label "lookup_parent" if LOOKUP_PARENT is enabled in @lookup_flags
+                              process the same checking for special cases "." and "..",but goto label
+                              "return_reval" when it is the first case
+                              do_lookup() again on @nd, &@this, &@next,break for-cycel if error
+                              updates @inode to @next.dentry->d_inode
+                              call to follow_on_final() on @inode, @lookup_flags
+                              /**
+                               * it returns TRUE if 
+                               *         @inode AND @inode->i_op->follow_link AND
+                               *         (@lookup_flags & LOOKUP_FOLLOW OR S_ISDIR(@inode->i_mode))
+                               */
+                              if follow_on_final() returned TRUE
+                              then
+                                      repeat once do_follow_link()
+                              else
+                                      path_to_nameidata() &@next, @nd
+                              checks if @inode is exist,break for-cycle if it is FALSE with -ENOENT
+                              checks lookup() method whether implemented if LOOKUP_DIRECTORY is enabled
+                              in @lookup_flags,break for-cycle with -ENOTDIR if it is not implemented
+                              goto label "return_base"
+
+                      lookup_parent:
+                              /* in this case,we have to lookup parent directory */
+                              set @last of @nd to @this,@last_type to LAST_NORM
+                              goto label "return_base" if the first character in @this.name is not "."
+                              if the length of @this is 1 and which is starting with ".",then the @last_type
+                              of @nd must be set to LAST_DOT
+                              else if length is 2 and which is starting with "..",then the @last_type must
+                              be set to LAST_DOTDOT
+                              else goto label "return_base"
+
+                      return_reval:
+                              /* in this case,we will checks the cached dentry for staleness */
+                              if @nd->path.dentry AND @nd->path.dentry->d_sb AND 
+                                 @nd->path.dentry->d_sb->s_type->fs_flags & FS_REVAL_DOT
+                              then
+                                      set error code to -ESTALE
+                                      if we failed on
+                                              @nd->path.dentry->d_op->d_revalidate(@nd->path.dentry, @nd)
+                                      then
+                                              break the for-cycle
+                                              /* that is,we can not revalidate a expired dentry */
+                              
+                      return_base:
+                              just returns _zero_ to caller as well
+
+                      out_dput:
+                              path_put_conditional() &@next, @nd
+                              break for-cycle
+
+           4> path_put() @nd's @path member and returns error code to caller
+                
+
+
+                      
+
