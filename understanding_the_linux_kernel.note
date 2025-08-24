@@ -23109,8 +23109,13 @@ Chapter 12 : The Virtual Filesystem
           */
          static int link_path_walk(const char *name, struct nameidata *nd);
 
+         !! "." in pathname has no effect
+
          what link_path_walk() does :
-           1> updates @name to skip "/",if @name is not valid,goto label "return_reval".
+           1> updates @name to skip "/",if the remaining @name is '\0',goto label "return_reval".
+              /**
+               * that is the pathname is "/" or "//"
+               */
            2> get inode of current dentry in @nd->path in local variable @inode(pointer to inode structure).
               reset lookup flags to LOOKUP_FOLLOW | (@nd->flags & LOOKUP_CONTINUE),if
               @nd->depth is not _zero_. /* otherwise,lookup flags is assigned to @nd->flags */
@@ -23120,6 +23125,19 @@ Chapter 12 : The Virtual Filesystem
               for-cycle :
                       enables LOOKUP_CONTINUE in @nd->flags
                       check inode permission,break cycle when permission disallowed
+                                             /**
+                                              * inode execution permission,MAY_EXEC
+                                              * the permission checking :
+                                              *   call to @inode->i_op->permission() if implemented,
+                                              *   return with security checking inode_permission if
+                                              *   the method returned 0
+                                              *   call to acl_permission_check,and return with security
+                                              *   checking inode_permission if returned 0
+                                              *   checks CAP_DAC_OVERRIDE AND CAP_DAC_READ_SEARCH,either
+                                              *   of them is OK then returned with security checking
+                                              *   inode_permission
+                                              * # the checking returns positive value if condition un-satisfied
+                                              */
                       an object is type of struct qstr named @this is declared
                       set @this.name to @name /* a const char * */
                       get the first character in @name,store it in local variable @c
@@ -23128,7 +23146,7 @@ Chapter 12 : The Virtual Filesystem
                        * we can easily to know that,the do-while cycle calculates
                        * the hash value of current component of the pathname
                        */
-                      do-while :
+                      do-while : /* until @c is '\0' OR @c is "/" */
                               updates @name
                               calculates hash for @c by call to partial_name_hash()
                               updates @c to the next character
@@ -23138,23 +23156,66 @@ Chapter 12 : The Virtual Filesystem
                       enter a while cycle to updates @name to skip "/" before next component
                       goto label "last_with_slashes" when *@name is '\0'
                       check current component,"." and ".." are special cases :
-                              "." => current work directory
+                              "." => current work directory,for-cycle continue
                               ".." => parent directory of current work directory
                               in the case "..",have to follow_dotdot(@nd),this will updates
                               @nd to records the parent directory's info,then reset inode to
-                              @nd->path.dentry->d_inode
+                              @nd->path.dentry->d_inode,and continue for-cycle to next component
+                              /**
+                               * if current dentry is the root,then can not change to its parent,
+                               * thus follow_dotdot() will call to follow_mount() with &@nd->path.
+                               * # @nd->path.dentry == @nd->root.dentry AND
+                               *   @nd->path.mnt == @nd->root.mnt
+                               * if current dentry is not the root of this vfsmount,then reset
+                               * it to the parent dentry,and call to follow_mount(&@nd->path) to
+                               * see whether it is a mount point.
+                               * # @nd->path.dentry != @nd->path.mnt->mnt_root
+                               * else,call to follow_up(),and call to follow_mount(&@nd->path) when the
+                               * routine failed to follow up(current dentry is the top),otherwise,restart
+                               * the checking 
+                               *
+                               * ! actually,the checkings are included in a infinite while-cycle,and calling
+                               *   to follow_mount() is outside to the cycle.
+                               * # follow_up(),get parent vfsmount of current mnt,returns _zero_ if
+                               *   no parent vfsmount;returns 1 with reset the dentry to
+                               *   { parent vfsmount, @path->mnt->mnt_mountpoin }.
+                               *
+                               * # follow_mount(),cycle until @path->dentry is not a mount point
+                               *   use lookup_mnt() to find out the vfsmount object corresponding
+                               *   to the @path
+                               *   if unfound,then return to caller without modify @path.
+                               *   else,dput() current @dentry,mntput() current @mnt,reset @path
+                               *   to { mounted vfsmount, mounted vfsmount's @mnt_root } and start
+                               *   next cycle
+                               */
                       now we can process the actual lookups through do_lookup(@nd, &@this, &@next),
                       break for-cycle when any error was encountered in do_lookup()
                       /**
                        * @next is an object is type of struct path
                        * it is set to { @nd->path.mnt, __d_lookup(@nd->path.dentry, @this) }
-                       * if @next is a vfs mount point and some filesystems have mounted on it,
+                       * if @next is a vfs mount point(__follow_mount()) and some filesystems have mounted on it,
                        * then @next will stores the vfsmount object of the first or the last filesystem
                        * mounted on current dentry in @mnt,and stores the root dentry object of the mounted
                        * filesystem in @dentry.
                        * # __d_lookup() is defined in <fs/dcache.c>,which use a qstr object and a directory
-                       *   as the starting point to find out the corresponding dentry object in dcache,
-                       *   if unfound,returns NULL
+                       *   as the starting point(the parent dir) to find out the corresponding dentry object
+                       *   in dcache,if unfound,returns NULL,otherwise,returns the found dentry with increase
+                       *   usage counter.
+                       * !! IF NO SUCH DENTRY WAS FOUND IN dcache,do_lookup() WILL CALL TO d_alloc() WITH THE PARENT
+                       *    DIRECTORY @nd->path.dentry AND @this.
+                       *    THE ROUTINE d_alloc() WILL ALLOCATEs A NEW dentry OBJECT,INITIALIZES IT AND PLACES INTO dcache.
+                       *    OF COURSE,AN INODE OBJECT ALSO BE CREATED(TRY TO FIND IT AT FIRST) TO ASSOCIAT WITH IT.
+                       *    # THE INODE IS GET BY CALL TO @nd->path.dentry.d_inode->i_op->lookup(),THIS METHOD
+                       *      IS CALLED BY do_lookup() AFTER d_alloc() SUCCEED.IF i_op->lookup() RETURNED A
+                       *      DENTRY,THEN dput() THE NEWLY ALLOCATED DENTRY BY d_alloc();OTHERWISE,THE NEWLY
+                       *      ALLOCATED DENTRY IS THE dentry OBJECT WE NEED.
+                       *      ! for example,lookup() of ext2 filesystem is ext2_lookup(),which use ino to get
+                       *        an inode from inode cache through iget_locked().if unfound such inode,then
+                       *        allocated an new inode object and returns it to ext2_lookup().
+                       *        finally,ext2_lookup() call to d_splice_alias() to associates the inode and the
+                       *        dentry.
+                       *        # the raw inode is read from disk by ext2 fs,by call to ext2_inode_by_name(),
+                       *          which will call to ext2_find_entry().
                        */
                       updates @inode(the local variable) to @next.dentry->d_inode,goto lable "out_dput" with
                       error code -ENOENT if the @inode is NULL
@@ -23169,12 +23230,13 @@ Chapter 12 : The Virtual Filesystem
                                * consecutive symlinks is 40
                                * if the @inode is not a symlink,then would not cause symlink following,that is
                                * method follow_link() is not implemented.
+                               * it is recursive by call to link_path_walk().
                                */
                       else
                               path_to_nameidata() &@next, @nd
                               /* this will updates @nd->path to @next */
-                      checks if lookup() method been implemented in @inode's operation,break for-cycle when it is
-                      not implemented
+                      checks if lookup() method been implemented in @inode's operation,break for-cycle with error code
+                      -ENOTDIR when it is not implemented
                       /* if lookup() is not implemented,how can we lookup a file under a directory? */
                       continue to next iteration /* ends the main loop */
 
@@ -23185,8 +23247,11 @@ Chapter 12 : The Virtual Filesystem
                               /* there we are deal with the last component */
                               set @nd->flags to @lookup_flags | ~LOOKUP_CONTINUE
                               goto label "lookup_parent" if LOOKUP_PARENT is enabled in @lookup_flags
-                              process the same checking for special cases "." and "..",but goto label
-                              "return_reval" when it is the first case
+                              process the checking for special cases "." and "..",but goto label
+                              "return_reval" when it is the first case;call to follow_dotdot(@nd) and reset
+                              @inode,then goto label "return_reval" if it is the second case.
+                              /* "." => @nd records the next-to-last component in pathname */
+
                               do_lookup() again on @nd, &@this, &@next,break for-cycel if error
                               updates @inode to @next.dentry->d_inode
                               call to follow_on_final() on @inode, @lookup_flags
@@ -23200,7 +23265,7 @@ Chapter 12 : The Virtual Filesystem
                                       repeat once do_follow_link()
                               else
                                       path_to_nameidata() &@next, @nd
-                              checks if @inode is exist,break for-cycle if it is FALSE with -ENOENT
+                              checks if @inode is exist,break for-cycle with -ENOENT if it is FALSE
                               checks lookup() method whether implemented if LOOKUP_DIRECTORY is enabled
                               in @lookup_flags,break for-cycle with -ENOTDIR if it is not implemented
                               goto label "return_base"
