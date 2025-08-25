@@ -22956,12 +22956,25 @@ Chapter 12 : The Virtual Filesystem
 
            /* type of the last recorded component */
            enum { LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT, LAST_BIND };
+                  |          |          |         |            |
+                  |          |          |         |            +--> last component is a symbolic link
+                  |          |          |         |                 into a special filesystem
+                  |          |          |         |
+                  |          |          |         +--> last component is ".."
+                  |          |          +--> last component is "."
+                  |          +--> last component is "/"
+                  +--> last component is a regular filename
 
            /* bitmask for a lookup event */
            #define LOOKUP_FOLLOW 1              /* follow links at the end */
            #define LOOKUP_DIRECTORY 2           /* require a directory */
            #define LOOKUP_CONTINUE 4            /* ending slashes ok even for nonexistent files */
            #define LOOKUP_PARENT 16             /* internal "there are more path components" flag */
+                                                /**
+                                                 * lookup operation resolves next-to-last component
+                                                 * rather than the last component,so the next-to-last
+                                                 * component is the parent directory of the last component
+                                                 */
            #define LOOKUP_REVAL 64              /**
                                                  * locked when lookup done with dcache_lock held detnry
                                                  * cache is untrusted;force a real lookup
@@ -23231,6 +23244,37 @@ Chapter 12 : The Virtual Filesystem
                                * if the @inode is not a symlink,then would not cause symlink following,that is
                                * method follow_link() is not implemented.
                                * it is recursive by call to link_path_walk().
+                               * struct task.@link_count and @nd->depth will be increased before do_follow_link()
+                               * call to the primary link resolving routine __do_follow_link(),decrease them after
+                               * __do_follow_link() have returned.
+                               * of course,member named @total_link_count of task structure also increased before
+                               * call to __do_follow_link(),but it would not be decreased even __do_follow_link()
+                               * returned.
+                               * # cond_resched() is called by do_follow_link() before does security checking and
+                               *   right after BUG_ON() checking completed.if necessary,a process switch will happens.
+                               * !! ROUTINE do_follow_link() CHECKS @link_count,@total_link_count AND @nd->depth
+                               *    RIGHT AFTER THE CONTROL ENTERED IT.
+                               *    @link_count CAN NOT GREATER THAN OR EQUAL TO MAX_NESTED_LINKS
+                               *    @total_link_count CAN NOT GREATER THAN OR EQUAL TO 40
+                               *    BUG_ON() @nd->depth IS GREATHER THAN OR EQUAL TO MAX_NESTED_LINKS
+                               *    IF @link_count AND @total_link_count EXCEEDED THE LIMIT,IT WILL GOTO LABEL "loop",
+                               *    AT THERE,THE ROUTINE WILL path_put() @path AND @nd->path,RETURNS -ELOOP.
+                               *             # BECAUSE IT HAVE TO DOES SECURITY CHECKING FOR inode_follow_link ON
+                               *               @path->dentry AND @nd,SO MAY BE THE ERROR CODE IS NOT -ELOOP.
+                               *    BUG_ON() WILL LET KERNEL PANIC.      /* the @next variable passed by link_path_walk() */
+                               * # if @cookie set by __do_follow_link() is TRUE,AND put_link() method of the symblink inode
+                               *   is implemented,do_follow_link() will call to the method for destory the temporary data
+                               *   structure created by follow_link() after __do_follow_link() returned.
+                               * # __do_follow_link() will set @nd->last_type to LAST_BIND.if follow_link() routine of
+                               *   the inode of @path(the first parameter)->dentry returned a valid pointer,then it will
+                               *   call to __vfs_follow_link() if nd_get_link(@nd) returned a valid pointer;otherwise,call
+                               *   to force_reval_path() if @nd->last_type is LAST_BIND.
+                               *     # no recursion happens,but force revalidate the dentry.
+                               *     # nd_get_link() retrives the link through @nd->saved_names[@nd->depth],the path that symlink
+                               *       points to will be placed at there by follow_link().
+                               * # __vfs_follow_link(),which is defined in the same file.it reset root of @nd,@path of @nd,
+                               *   if the argument of second parameter @link is "/".next,call to link_path_walk(@link, @nd).
+                               *   it will returns @link if @link IS_ERR() pointer.
                                */
                       else
                               path_to_nameidata() &@next, @nd
@@ -23279,6 +23323,11 @@ Chapter 12 : The Virtual Filesystem
                               else if length is 2 and which is starting with "..",then the @last_type must
                               be set to LAST_DOTDOT
                               else goto label "return_base"
+                              /**
+                               * for-cycle goto label "last_compoent" when no more characters in the pathname
+                               * string.but when the goto happens,@nd still records the info of next-to-last
+                               * component.that is,the parent directory which contains the last component.
+                               */
 
                       return_reval:
                               /* in this case,we will checks the cached dentry for staleness */
@@ -23293,7 +23342,7 @@ Chapter 12 : The Virtual Filesystem
                                               /* that is,we can not revalidate a expired dentry */
                               
                       return_base:
-                              just returns _zero_ to caller as well
+                              just returns _zero_ to caller as well /* no error */
 
                       out_dput:
                               path_put_conditional() &@next, @nd
