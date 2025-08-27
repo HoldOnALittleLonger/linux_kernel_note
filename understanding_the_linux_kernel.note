@@ -23020,7 +23020,7 @@ Chapter 12 : The Virtual Filesystem
             * path_init - setup nameidata object through the given dfd and pathname
             * @dfd:       where to start
             * @name:      pathname
-            * @flags:     accessing flags
+            * @flags:     lookup flags
             * @nd:        result where to be stored
             * return:     0 OR error code
             */
@@ -23349,6 +23349,129 @@ Chapter 12 : The Virtual Filesystem
                               break for-cycle
 
            4> path_put() @nd's @path member and returns error code to caller
+
+     Implementations of VFS System Calls :
+       The open() System Call :
+         <fs/open.c>
+           /**
+            * sys_open - syscall open service routine is used to open a file
+            * @filename: file pathname
+            * @flags:    open flags
+            * @mode:     access mode used when creating a new file
+            * return:    file descriptor number OR invalid pointer value
+            * # this routine actually call to do_sys_open() with AT_FDCWD,
+            *   if force_o_largefile() returned TRUE,the flag O_LARGEFILE will be enabled in @flags
+            */
+           SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, int, mode);
+           => asmlinkage long sys_open(const char __user *filename, int flags, int mode);
+
+           @flags :
+             O_ACCMODE               0x00000003
+             O_RDONLY                0x00000000
+             O_WRONLY                0x00000001
+             O_RDWR                  0x00000002
+             O_CREAT                 0x00000100
+             O_EXCL                  0x00000200
+             O_NOCTTY                0x00000400     /* never consider the file as a controlling terminal */
+             O_TRUNC                 0x00001000
+             O_APPEND                0x00002000
+             O_NONBLOCK              0x00004000
+             O_DSYNC                 0x00010000
+             FASYNC                  0x00020000     /* I/O event notification via signals */
+             O_DIRECT                0x00040000
+             O_LARGEFILE             0x00100000     /* large file,the size greater than 2GB */
+             O_DIRECTORY             0x00200000
+             O_NOFOLLOW              0x00400000
+             O_NOATIME               0x01000000
+             O_CLOEXEC               0x02000000
+             O_SYNC                  0x04000000
+             O_NDELAY                O_NONBLOCK
+
+           /**
+            * do_sys_open - do system call open
+            * @dfd:         directory file descriptor,used as starting point
+            * @filename:    file pathname
+            * @flags:       open flags
+            * @mode:        access mode used when creating a new file
+            * return:       file descriptor number OR invalid pointer value
+            */
+           long do_sys_open(int dfd, const char __user *filename, int flags, int mode);
+
+           brief description for do_sys_open() :
+             first,it call to getname(@filename),the routine allocates memory area with GFP_KENREL from
+             slab cache named @names_cachep,and copy the filename from user space to kernel space.
+             /* putname() recycle the allocated memory */
+             if failed to allocate memory or failed to copy filename,an invalid pointer value will be returned
+             in @tmp,then returns the error to caller.
+             next,use get_unused_fd_flags(@flags) to get an unused file descriptor number.
+             call to do_filp_open(@dfd, @tmp, @flags, @mode, 0) try to open the file if we succeed to get a
+             file descriptor number.
+             associates the new fd and file descriptor,fsnotify_open() notify the open event.
+             returns the new fd to caller.
+
+         <fs/namei.c>
+           /**
+            * do_filp_open - do filp_open
+            * @dfd:          directory fd
+            * @pathname:     file pathname
+            * @open_flag:    open flag
+            * @mode:         creating mode
+            * @acc_mode:     access mode
+            * return:        pointer to the file descriptor OR invalid pointer value
+            * # routine filp_open() actually call to this function
+            * # if we wants kernel to open a file,should use this function to instead of sys_open() 
+            *   in Kernel Mode
+            */
+           struct file *do_filp_open(int dfd, const char *pathname, int open_flag, int mode, int acc_mode);
+
+           brief description for do_filp_open() :
+             at the beginning,convert @open_flag to namei flags(@flag,local variable).checks O_CREAT flag
+             in @open_flag,reset @mode to _zero_ if it is not enabled.
+             convert O_SYNC or __O_SYNC to O_DSYNC in @open_flag.
+             modify @acc_mode to MAY_OPEN | ACC_MODE(@open_flag) if @acc_mode is not _zero_.
+             add MAY_WRITE in @acc_mode if O_TRUNC is enabled.
+             add MAY_APPEND in @acc_mode if O_APPEND is enabled.
+
+             "reval" label :
+
+             invokes path_init() to prepare pathname lookup,the @flags parameter is LOOKUP_PARENT,return error
+             to caller if failed.
+             enable LOOKUP_REVAL in local variable @nd's flags if @force_reval is TRUE.
+             set @total_link_count to _zero_.
+             invokes link_path_walk() to lookup @pathname's parent,return error if failed;audit inode of the
+             @nd.path.dentry with @pathname if necessary. /* we tried to find out the parent directory */
+             use get_empty_filp() to makeup an empty file descriptor structure,return error if have any.
+             setup @nd.intent and @nd.flags,@filp->f_flags :
+                     @nd.intent.open.file := @filp
+                     @filp->f_flags := @open_flag
+                     @nd.intent.open.flags := @flag
+                     @nd.intent.open.create_mode := @mode
+                     @nd.flags &= ~LOOKUP_PARENT            /* we do not need LOOKUP PARENT any more */
+                     @nd.flags |= LOOKUP_OPEN
+                     O_CREAT -> @nd.flags |= LOOKUP_CREATE
+                     O_CREAT AND O_EXCL -> @nd.flags |= LOOKUP_EXCL
+                     O_DIRECTORY -> @nd.flags |= LOOKUP_DIRECTORY
+                     O_NOFOLLOW -> @nd.flags |= LOOKUP_FOLLOW
+             call to do_last() to get the last component in @pathname,the previous link_path_walk(),we
+             stopped at the next-to-last component,that is the parent directory.
+             /* the returned pointer is saved in @flip the local variable */
+             do_last() use @nd.last_type to update its @path member,if the file is not exist,then create
+             it when O_CREAT is speficied.finally,it convert the namei data to file descriptor and returns
+             the pointer to caller,that is the do_filp_open().the converting will done by nameidata_to_filp(),
+             because we have set @nd.intent.open.file to the empty @filp,so @filp will represents the opened file.
+             if @filp is NULL,that means the last component may be a symlink,so we have to follow the link
+             and call do_last() again.
+             at the end of this function,path_put() @nd.root if necessary,and returns @filp to caller.
+             /**
+              * if -ESTALE(expired) is specified in @filp and @force_reval is FALSE,then goto label "reval"
+              * to repeat the work agian for revalidate the file descriptor.
+              */
+             !! put dentry,intent open(put_filp() OR fput()),@nd.path when error detected.
+
+                     
+             
+             
+
                 
 
 
