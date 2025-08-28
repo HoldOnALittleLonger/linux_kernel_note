@@ -23468,10 +23468,98 @@ Chapter 12 : The Virtual Filesystem
               */
              !! put dentry,intent open(put_filp() OR fput()),@nd.path when error detected.
 
-                     
-             
-             
+       The read() and write() System Calls :
+         system calls read() and write() are wrappers from C lib,the corresponding system call service routine
+         is sys_read() and sys_write(),respectively.
+        
+         <fs/read_write.c>
+           /**
+            * sys_read - system call service routine for read()
+            * @fd:       file descriptor number
+            * @buf:      data buffer
+            * @count:    number of bytes to reading
+            * return:    number of bytes been readed OR error code
+            */
+           SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count);
+           => asmlinkage long sys_read(unsigned int fd, char __user *buf, size_t count);
 
+           brief description for sys_read() :
+             get file descriptor through @fd.
+             if failed to get the file,returns -EBADF.
+             otherwise,get current file position through file_pos_read(),then call to vfs_read()
+             to process the real reading.updates file position.fput() the file and returns what
+             vfs_read() returned to caller.
+
+
+           /**
+            * sys_write - system call service routine for write()
+            * @fd:        file descriptor number
+            * @buf:       data buffer
+            * @count:     number of bytes to write
+            * return:     number of bytes been written OR error code
+            * # this routine similar to the sys_read(),but it call to vfs_write() to write data
+            *   to the file @fd
+            */
+           SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf, size_t, count);
+           => asmlinkage long sys_write(unsigned int fd, const char __user *buf, size_t count);
+
+           /**
+            * vfs_read - VFS reading routine
+            * @file:     file descriptor
+            * @buf:      data buffer
+            * @count:    number of bytes to read
+            * @pos:      file position where at the starting point to read
+            * return:    number of bytes been readed OR error code
+            * # EXPORT_SYMBOL
+            */
+           ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos);
+
+           brief description for vfs_read() :
+             first,checks file access mode,FMODE_READ must be allowed,otherwise returns -EBADF.
+             second,checks whether either file operation read() method or aio_read() is implemented,
+             if no one is implemented,then returns -EINVAL.
+             third,access_ok() VERIFY_WRITE must be OK,otherwise returns -EFAULT to caller.
+             then call to rw_verify_area() READ to verify the file whether it been locked by
+             someone,and whether security checking is OK.besides,@count can not exceeds MAX_RW_COUNT.
+             if the verification is failed,then returns the value returned by the routine to caller.
+             now,everything is OK,call to @file->f_op->read() if the method is implemented;otherwise,
+             call to do_sync_read().
+             if we succeed to readed something,that is return value is greater than 0,call to
+             fsnotify_access() to notify a filesystem access event,and call to add_rchar() and inc_syscr()
+             to update this task's account data.
+             finally,returns the number of bytes we have readed.
+             /**
+              * about do_sync_read() :
+              *   it is defined in the same file.
+              *   this function will creates a iovec structure for reading,and a structure kiocb for
+              *   I/O control.
+              *   # kiocb => kernel I/O control block for asynchronous I/O
+              *   call to @file->f_op->aio_read() in a infinite for-cycle,call to wait_on_retry_sync_kiocb()
+              *   at the end of each iteration for synchronization.
+              *   break the cycle if return value is not -EIOCBRETRY.
+              *   call to wait_on_sync_kiocb() if -EIOCBQUEUED is returned,the routine set current task to
+              *   TASK_UNINTERRUPTIBLE until the I/O event is completed.
+              *   finally,returns the number of bytes been readed.
+              */
+
+           /**
+            * vfs_write - VFS write
+            * @file:      file descriptor
+            * @buf:       data buffer
+            * @count:     number of bytes to write
+            * @pos:       starting point
+            * return:     number of bytes been written OR error code
+            * # EXPORT_SYMBOL
+            * # this routine is similar to vfs_read(),but it will checks FMODE_WRITE,VERIFY_READ,WRITE on
+            *   the file
+            *   if write() method,then call to it,otherwise,call to do_sync_write()
+            *   do_sync_write() is similar to do_sync_read(),but it will call to @file->f_op->aio_write()
+            */
+           ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos);
+
+           !! attention,the buffer pointer required by vfs_read() and vfs_write() is User Mode address,
+              if we want use these two routines in Kernel Mode,must call to set_fs(KERNEL_DS) at first.that will
+              bypass the User Mode address checking.
                 
 
 
