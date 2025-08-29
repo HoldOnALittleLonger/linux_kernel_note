@@ -21892,7 +21892,7 @@ Chapter 12 : The Virtual Filesystem
        <fs/file_table.c>
          /**
           * fget - get the corresponding file object from current task's @files member
-          * @fd:   file descriptor number
+          * @fd:   file descriptor
           * return:    pointer to file object OR NULL
           * # EXPORT_SYMBOL
           * # @f_count will be increased
@@ -23045,7 +23045,7 @@ Chapter 12 : The Virtual Filesystem
 
                      else
                              @dfd refers to a different directory,we have to start from the dir
-                             use fget_light() on @dfd to get the corresponding file descriptor of
+                             use fget_light() on @dfd to get the corresponding file object of
                              the directory
                              check it with S_ISDIR(),and check file permission MAY_EXEC
                              if everything is OK,use it to setup @nd,and fput_light() the dir
@@ -23358,7 +23358,7 @@ Chapter 12 : The Virtual Filesystem
             * @filename: file pathname
             * @flags:    open flags
             * @mode:     access mode used when creating a new file
-            * return:    file descriptor number OR invalid pointer value
+            * return:    file descriptor OR invalid pointer value
             * # this routine actually call to do_sys_open() with AT_FDCWD,
             *   if force_o_largefile() returned TRUE,the flag O_LARGEFILE will be enabled in @flags
             */
@@ -23393,7 +23393,7 @@ Chapter 12 : The Virtual Filesystem
             * @filename:    file pathname
             * @flags:       open flags
             * @mode:        access mode used when creating a new file
-            * return:       file descriptor number OR invalid pointer value
+            * return:       file descriptor OR invalid pointer value
             */
            long do_sys_open(int dfd, const char __user *filename, int flags, int mode);
 
@@ -23403,10 +23403,10 @@ Chapter 12 : The Virtual Filesystem
              /* putname() recycle the allocated memory */
              if failed to allocate memory or failed to copy filename,an invalid pointer value will be returned
              in @tmp,then returns the error to caller.
-             next,use get_unused_fd_flags(@flags) to get an unused file descriptor number.
+             next,use get_unused_fd_flags(@flags) to get an unused file descriptor.
              call to do_filp_open(@dfd, @tmp, @flags, @mode, 0) try to open the file if we succeed to get a
-             file descriptor number.
-             associates the new fd and file descriptor,fsnotify_open() notify the open event.
+             file descriptor
+             associates the new fd and file object,fsnotify_open() notify the open event.
              returns the new fd to caller.
 
          <fs/namei.c>
@@ -23417,7 +23417,7 @@ Chapter 12 : The Virtual Filesystem
             * @open_flag:    open flag
             * @mode:         creating mode
             * @acc_mode:     access mode
-            * return:        pointer to the file descriptor OR invalid pointer value
+            * return:        pointer to the file object OR invalid pointer value
             * # routine filp_open() actually call to this function
             * # if we wants kernel to open a file,should use this function to instead of sys_open() 
             *   in Kernel Mode
@@ -23440,7 +23440,7 @@ Chapter 12 : The Virtual Filesystem
              set @total_link_count to _zero_.
              invokes link_path_walk() to lookup @pathname's parent,return error if failed;audit inode of the
              @nd.path.dentry with @pathname if necessary. /* we tried to find out the parent directory */
-             use get_empty_filp() to makeup an empty file descriptor structure,return error if have any.
+             use get_empty_filp() to makeup an empty file object,return error if have any.
              setup @nd.intent and @nd.flags,@filp->f_flags :
                      @nd.intent.open.file := @filp
                      @filp->f_flags := @open_flag
@@ -23456,7 +23456,7 @@ Chapter 12 : The Virtual Filesystem
              stopped at the next-to-last component,that is the parent directory.
              /* the returned pointer is saved in @flip the local variable */
              do_last() use @nd.last_type to update its @path member,if the file is not exist,then create
-             it when O_CREAT is speficied.finally,it convert the namei data to file descriptor and returns
+             it when O_CREAT is speficied.finally,it convert the namei data to file object and returns
              the pointer to caller,that is the do_filp_open().the converting will done by nameidata_to_filp(),
              because we have set @nd.intent.open.file to the empty @filp,so @filp will represents the opened file.
              if @filp is NULL,that means the last component may be a symlink,so we have to follow the link
@@ -23464,7 +23464,7 @@ Chapter 12 : The Virtual Filesystem
              at the end of this function,path_put() @nd.root if necessary,and returns @filp to caller.
              /**
               * if -ESTALE(expired) is specified in @filp and @force_reval is FALSE,then goto label "reval"
-              * to repeat the work agian for revalidate the file descriptor.
+              * to repeat the work agian for revalidate the file object.
               */
              !! put dentry,intent open(put_filp() OR fput()),@nd.path when error detected.
 
@@ -23475,7 +23475,7 @@ Chapter 12 : The Virtual Filesystem
          <fs/read_write.c>
            /**
             * sys_read - system call service routine for read()
-            * @fd:       file descriptor number
+            * @fd:       file descriptor
             * @buf:      data buffer
             * @count:    number of bytes to reading
             * return:    number of bytes been readed OR error code
@@ -23484,7 +23484,7 @@ Chapter 12 : The Virtual Filesystem
            => asmlinkage long sys_read(unsigned int fd, char __user *buf, size_t count);
 
            brief description for sys_read() :
-             get file descriptor through @fd.
+             get file object through @fd.
              if failed to get the file,returns -EBADF.
              otherwise,get current file position through file_pos_read(),then call to vfs_read()
              to process the real reading.updates file position.fput() the file and returns what
@@ -23493,7 +23493,7 @@ Chapter 12 : The Virtual Filesystem
 
            /**
             * sys_write - system call service routine for write()
-            * @fd:        file descriptor number
+            * @fd:        file descriptor
             * @buf:       data buffer
             * @count:     number of bytes to write
             * return:     number of bytes been written OR error code
@@ -23560,7 +23560,52 @@ Chapter 12 : The Virtual Filesystem
            !! attention,the buffer pointer required by vfs_read() and vfs_write() is User Mode address,
               if we want use these two routines in Kernel Mode,must call to set_fs(KERNEL_DS) at first.that will
               bypass the User Mode address checking.
-                
+
+       The close() System Call :
+         system call close() is used to close an opened file,the corresponding service routine is sys_close().
+         
+         <fs/open.c>
+           /**
+            * sys_close - system call service routine for close()
+            * @fd:        file descriptor
+            * return:     0 OR error code
+            */
+           SYSCALL_DEFINE1(close, unsigned int, fd);
+           => asmlinkage long sys_close(unsigned int fd);
+        
+           brief description for sys_close() :
+             the routine get file object through @fd from current task's fdtable.
+             /* @file_lock is required, @filp := @fdt->fd[@fd] */
+             before do the real closing,it must checks whether the file @filp is NULL.
+             if @filp is NULL,then it do not call to filp_close(),this can prevents one
+             clone task can not release an fd while another clone is opening it.
+             after got the @filp,call to rcu_assign_pointer() on @fdt->fd[@fd] to set the
+             element to NULL,call to FD_CLR() on the file to disable close-on-exec flag,
+             __put_unused_fd() to release the @fd.
+             then,release @file_lock and call to filp_close(),the routine is the primary
+             routine for file closing.
+             finally,returns the value got from filp_close() to caller.
+             ! if the return value is
+                 -ERESTARTSYS || -ERESTARTNOINTR || -ERESTARTNOHAND || -ERESTART_RESTARTBLOCK
+               then returns -EINTR to caller
+
+           /**
+            * filp_close - close a file descriptor
+            * @filp:       pointer to the file object
+            * @id:         identification info,usually is the @files member of current task
+            * return:      0 OR error code
+            * # EXPORT_SYMBOL
+            */
+           int filp_close(struct file *filp, fl_owner_t id);
+
+           brief description for filp_close() :
+             at the beginning,this routine have to checks file usage counter of @filp,we
+             can not close an file whose counter is _zero_.
+             next,checks whether flush() method of the file operation is implemented.
+             if flush() is implemented,call to it with @filp and @id.
+             call to dnotify_flush() to makeup a directory notification.
+             call to locks_remove_posix() to removes all locks associated to this file.
+             fput() @filp,and returns the return value got from flush() method.
 
 
                       
