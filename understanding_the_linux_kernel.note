@@ -23607,6 +23607,78 @@ Chapter 12 : The Virtual Filesystem
              call to locks_remove_posix() to removes all locks associated to this file.
              fput() @filp,and returns the return value got from flush() method.
 
+     File Locking :
+       the POSIX standard requires file lock mechanism implemented through system call fcntl().
+       fcntl command F_SETLK can either lock a region of file or whole file,and command F_GETLK
+       can get current lock's information,F_SETLKW might block caller until acquired the lock.
+       for release a file lock,still use the F_SETLK command.when call to fcntl() for acquire or
+       release a file lock,the third parameter is a pointer to an object is type of struct flock.
+       Traditional BSD variants implement file lock through flock() system call.
+       SystemV provides lockf() library function which is an interface to fcntl().
+       !! ALL THESE FILE LOCK ARE ADVISORY LOCKING.
+       ! SystemV Release 3 provides mandatory file lock.when a mandatory lock have been placed
+         on a file,the Kernel will checks every open(),read(),write() system calls to the file,
+         if any conflict happened,the system call will failed.
+         # even a file was locked by a mandatory lock,another process can still delete it by
+           call to unlink() system call.because when unlink a hard link,must have write permission
+           to its parent directory,not to the file.
+       ! as usually,read lock is shared,and write lock is exclusive.write lock can not lock the
+         region where been some read locks placed on,or read lock can not lock the region where a
+         exclusive write lock have locked it.
 
-                      
+     Linux File Locking :
+       Linux supports all types of file locking : mandatory locking, advisory locking, fcntl(),
+       flock(), lockf().
+       every Unix-like OS,flock() always produce an advisory lock,without regard to mount flag
+       MS_MANDLOCK.
+       but in Linux,a special kind of flock()'s mandatory lock is used to support some proprietary
+       network filesystems - it is called "share-mode mandatory lock".
 
+       share-mode mandatory lock :
+         when set this lock,no other process may open a file that would conflict with the access
+         mode of the lock.
+         ! do not use such lock for native Unix applications,this lock is nonportable.
+
+       lease :
+         fcntl()-based mandatory lock.
+         when a process tries to open a file protected by a lease,it is blocked as usualy,
+         the process owns the lease will be informed by a signal.that process should writeback
+         the updating to the file,and then release the lease.because,if the process refused to
+         do these steps,kernel will release the lease automatically in a pre-defined time interval.
+         /* can be modified through /proc/sys/fs/lease-break-time,usually 45s */
+         /**
+          * fcntl() commands F_SETLEASE and F_GETLEASE are used acquire and release lease,respectively.
+          * the process who issued the fcntl() system call must have CAP_LEASE capability.
+          * lease actions :
+          *   F_RDLOCK  - set read lock(shared)
+          *               owner will be informed when file is opened for writing or is truncated
+          *   F_WRLOCK  - set write lock(exclusive)
+          *               owner will be informed when file is opened for reading,writing,or is truncated
+          *   F_UNLCK   - unlock
+          * signal : SIGIO(default),but fcntl() command F_SETSIG can change the signal type.
+          *          # (0 means default sig).
+          * # can not holding read lease and write lease at the same time.
+          * # only regular files could be leased.
+          * # lease do not support file region.
+          */
+
+       advisory locking :
+         acquire or release an advisory lock by either call to flock() or issue fcntl() system call.
+         ! flock() always locks whole file.
+         ! both flock() and fcntl() can be used on the same file at the same time,but a file locked
+           through fcntl() does not appear locked to flock(),and vice versa.
+           # the purpose is to avoid deadlocks.
+
+       mandatory locking :
+         for set mandatory lock,must :
+           >
+             set flag MS_MANDLOCK when mounting a filesystem.the mount command default do not set
+             the flag.the filesystem independent mount options "mand" and "nomand" enable MS_MANDLOCK
+             and disable MS_MANDLOCK,respectively.
+           >
+             enable SGID bit on the file as candiates for mandatory locking,and the file must under
+             the filesystem with MS_MANDLOCK been setup.
+           >
+             use system call fcntl() to acquire or release mandatory lock.(F_SETLK)
+
+           
