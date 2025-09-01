@@ -23681,4 +23681,107 @@ Chapter 12 : The Virtual Filesystem
            >
              use system call fcntl() to acquire or release mandatory lock.(F_SETLK)
 
-           
+     File-Locking Data Structures :
+       all type of Linux locks are represented by the same file_lock data structure.
+
+       <linux/fs.h>
+         /**
+          * file_lock - structure used to represent file lock
+          * @fl_next:   singly linked list of file locks for this inode(@i_flock)
+          * @fl_link:   doubly linked list of all file locks
+          * @fl_block:  circular list of blocked processes waiting on this lock
+          * @fl_owner:  file lock owner information
+          * @fl_flags:  file lock flags
+          *             # available values :
+          *                 FL_POSIX 1     
+          *                 FL_FLOCK 2     
+          *                 FL_ACCESS 8    not trying to lock,just looking
+          *                 FL_EXISTS 16   when unlocking,test for existence
+          *                 FL_LEASE 32    lease held on this file
+          *                 FL_CLOSE 64    unlock on close
+          *                 FL_SLEEP 128   a blocking lock
+          * @fl_type:   file lock type
+          *             # available values : (defined in <asm-generic/fcntl.h>)
+          *                 F_RDLCK 0      read lock
+          *                 F_WRLCK 1      write lock
+          *                 F_UNLCK 2      unlock
+          * @fl_pid:    pid of the process who owns to this lock
+          * @fl_nspid:  pid structure get from the owner's task_tgid()
+          * @fl_wait:   wait queue of blocked processes
+          * @fl_file:   the file this lock associate to
+          * @fl_start:  start offset of the file lock scope
+          * @fl_end:    end offset of the file lock scope
+          * @fl_fasync: lease break notifications
+          * @fl_break_time:    nonblocking lease breaks
+          * @fl_ops:    file lock operations
+          * @fl_lmops:  lock manager operations
+          * @fl_u:      network filesystem supporting
+          */
+         struct file_lock {
+                 struct file_lock *fl_next;
+                 struct list_head fl_link;
+                 struct list_head fl_block;
+                 fl_owner_t fl_owner;
+                 unsigned char fl_flags;
+                 unsigned char fl_type;
+                 unsigned int fl_pid;
+                 struct pid *fl_nspid;
+                 wait_queue_head_t fl_wait;
+                 struct file *fl_file;
+                 loff_t fl_start;
+                 loff_t fl_end;
+
+                 struct fasync_struct *fl_fasync;
+                 unsigned long fl_break_time;
+
+                 const struct file_lock_operations *fl_ops;
+                 const struct lock_manager_operations *fl_lmops;
+                 union {
+                         struct nfs_lock_info nfs_fl;
+                         struct nfs4_lock_info nfs4_fl;
+                         struct {
+                                 struct list_head link;
+                                 int state;
+                         } afs;
+                 } fl_u;
+         };
+
+         /* file_lock_operations - file lock methods */
+         struct file_lock_operations {
+                 void (*fl_copy_lock)(struct file_lock *, struct file_lock *);
+                 void (*fl_release_private)(struct file_lock *);
+         };
+
+         /* lock_manager_operations - lock manager methods for file lock */
+         struct lock_manager_operations {
+                 int (*fl_compare_owner)(struct file_lock *, struct file_lock *);
+                 void (*fl_notify)(struct file_lock *);
+                 int (*fl_grant)(struct file_lock *, struct file_lock *, int);
+                 void (*fl_copy_lock)(struct file_lock *, struct file_lock *);
+                 void (*fl_release_private)(struct file_lock *);
+                 void (*fl_break)(struct file_lock *);
+                 int (*fl_mylease)(struct file_lock *, struct file_lock *);
+                 int (*fl_change)(struct file_lock **, int);
+         };
+
+       <fs/locks.c>
+         /**
+          * file_lock_list - list linked @fl_link for all satisfied lock entities
+          *                  with any type of lock
+          */
+         static LIST_HEAD(file_lock_list);
+
+         /**
+          * blocked_list - list linked @fl_link for all un-satisfied lock entities
+          *                with type POSIX lock
+          */
+         static LIST_HEAD(blocked_list);
+
+       ! if a process want to acquires a file lock,then it must makeup an object is
+         type of struct file_lock,and then insert it into the file inode's @i_flock.
+         the procedure will traverse @i_flock to checks whether a file lock entity
+         is exist and which conflict to the request lock,if it is,then the request
+         lock will be inserted into the @fl_block of the conflict lock;if no conflict,
+         then the lock request can be satisfied.
+         shared lock could have more than one entities,but exclusive lock can only have
+         one entity.
