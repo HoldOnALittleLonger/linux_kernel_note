@@ -23785,3 +23785,510 @@ Chapter 12 : The Virtual Filesystem
          then the lock request can be satisfied.
          shared lock could have more than one entities,but exclusive lock can only have
          one entity.
+
+     for_each_lock() macro :
+       this routine is used to traverse the locks on a given inode.
+       <fs/locks.c>
+         #define for_each_lock(inode, lockp) \
+                 for (lockp = &inode->i_flock; *lockp != NULL; lockp = &(*lockp)->fl_next)
+
+     FL_FLOCK Locks :
+       an FL_FLOCK lock is always associated with a file object and it is owned by the process that
+       opened the file(or by all clone processes sharing the same opened file).
+       When a process wants to change an already owned read lock into a write lock,or vice versa,
+       the kernel will replace every other lock that the process is holding on the same file object
+       with the new lock,
+       when call to fput() to destory a file object,the locks on it will also be destroyed,but if 
+       there are some processes set read locks on the file,they still remain active.
+
+       system call flock() is used to place an advisory FL_FLOCK on a specified file,the system call
+       service routine is sys_flock().          
+
+       <fs/locks.c>
+         /**
+          * sys_flock - system call service routine for flock()
+          * @fd:        file descriptor
+          * @cmd:       the type of lock to apply
+          *             # available values :
+          *                 LOCK_SH        shared lock(reading)
+          *                 LOCK_EX        exclusive lock(writing)
+          *                 LOCK_UN        unlock
+          *                 LOCK_MAND      mandatory flock
+          *                 LOCK_NB        nonblocking
+          * return:     0 OR error code
+          */
+         SYSCALL_DEFINE2(flock, unsigned int, fd, unsigned int, cmd);
+         => asmlinkage long sys_flock(unsigned int fd, unsigned int cmd);
+
+         brief description for sys_flock() :
+           get file object through fget() on @fd,if failed,then return error code -EBADF.
+           stores !LOCK_NB in local variable @can_sleep,disable LOCK_NB in @cmd.
+           fput() file object and return error code -EBADF if !LOCK_UN AND !LOCK_MAND AND
+           FMODE_READ | FMODE_WRITE disabled in file mode.
+           now,we can attempts to acquire FL_FLOCK.
+           call to flock_make_lock() to makeup an file lock structure in type FL_FLOCK,return
+           error code if failed.
+           /**
+            * file_lock.fl_flags = FL_FLOCK
+            * file_lock.fl_type = flock_translate_cmd(@cmd)
+            * ! FL_FLOCK do not support lock on a part of file.
+            * file_lock object is allocated by routine locks_alloc_lock(),which allocates
+            * a file_lock object from slab cache named @filelock_cache with gfp flag GFP_KERNEL.
+            */
+           do security checking for file_lock,if un-satisfied,then free file_lock object and
+           fput() file object,return error code to caller.
+           sys_flock() may call to file method flock() of file's operation @f_op,if the method
+           is implemented;otherwise,call to flock_lock_file_wait() to process common locking
+           procedure.
+           finally,free file_lock object,fput() file object,return error code to caller.if
+           no error happened,return 0 to caller.
+
+         /**
+          * flock_lock_file_wait - place an FL_FLOCK on a given file,may sleep
+          * @filp:                 file object
+          * @fl:                   file lock entity
+          * return:                0 OR error code
+          * # EXPORT_SYMBOL
+          * # this routine will enter an infinite for-cycle,in the cycle,it
+          *   attempts lock file by call to flock_lock_file().if the return value is
+          *   not FILE_LOCK_DEFERRED,then break cycle and return the value to caller;
+          *   otherwise,call to wait_event_interruptible() on @fl->fl_wait until
+          *   @fl->fl_next is NULL(that means we can acquire the lock).if wait_event()
+          *   is interrupted,then delete @fl from block list and break cycle,returns
+          *   -ERESTARTSYS to caller
+          */
+         int flock_lock_file_wait(struct file *filp, struct file_lock *fl);
+
+         /**
+          * flock_lock_file - main procedure for place an FL_FLOCK on a given file
+          * @filp:            file object
+          * @request:         file lock that request 
+          * return:           0 OR error code
+          */
+         static int flock_lock_file(struct file *filp, struct file_lock *request);
+
+         what flock_lock_file() doest :
+           1> lock_kernel().
+           2> if @request->fl_flags enabled FL_ACCESS,then goto label "find_conflict".
+           3> if @request->fl_type is not F_UNLCK,then try to allocate a new file lock
+              named @new_fl;goto out with error code -ENOMEN if failed to allocating.
+           4> for_each_lock(@filp->f_path.dentry->d_inode, struct file_lock **before) {
+                /* traverse @inode->i_flock,each element in the list will be represented by @before */
+                if **before is POSIX lock,then break. /* the file been locked by a posix file lock */
+                if **before is LEASE,then continue.   /* someone leased the file */
+                if @filp != *before->fl_file,then continue. /* different file object */
+                if @request->fl_type == *before->fl_type,then goto label "out".
+                /**
+                 * same type,LOCK_SH or LOCK_EX or LOCK_UN.
+                 * such file lock been exsted,do nothing.
+                 */
+                set local variable @found to TRUE.
+                locks_delete_lock(before) /* this will unlink *before from @fl_link,and free it */
+                                          /* remove the older FL_FLOCK entity */
+                break cycle.
+                /**
+                 * we finally find out an older FL_FLOCK whose type is different from @request,then we
+                 * can use the newer @request to instead it later.
+                 * current task can change its own file lock.
+                 */
+              }
+           5> if @request->fl_type is F_UNLCK,then checks if @request->fl_flags enabled FL_EXISTS AND
+              @found is FALSE.if condition satisfied,then set error code to -ENOENT.
+              goto label "out". /* we are going to unlock a file lock */
+           6> call to cond_resched() if @found is TRUE,we will place the lock at next schedule.
+
+           find_conflict:
+           7> for_each_lock(@filp->f_path.dentry->d_inode, struct file_lock **before) {
+                      if **before is POSIX lock,then break. /* POSIX lock do not effect FL_FLOCK */
+                      if **before is LEASE,then continue.
+                      if !flock_locks_conflict(@request, *before),then continue.
+                      /**
+                       * flock_locks_conflict() returns :
+                       *   TRUE - either @request or @before is F_WRLCK
+                       *   FALSE - other cases
+                       *           @before is not FL_FLOCK OR @request->fl_file == *@before->fl_file
+                       *           @request->fl_type is LOCK_MAND OR *@before->fl_type is LOCK_MAND
+                       */
+                      set error code to -EAGAIN.
+                      if FL_SLEEP disabled in @request->fl_flags,then goto label "out".
+                      /* we find conflict,so we have to block current task,but LOCK_NB enabled. */
+                      locks_insert_block(*before, @request);
+                      /**
+                       * insert @request->fl_block into @before->fl_block
+                       * set @request->fl_next to @before
+                       * add @request->fl_link to @blocked_list,if @request is a POSIX file lock
+                       */
+                      goto out.
+              }
+           8> if @request enabled FL_ACCESS,then goto label "out".
+           9> copy @request into @new fl.
+              insert @new_fl->fl_link to @file_lock_list,set @new_fl->fl_next to *before.
+              reset @new_fl to NULL.
+              set error code to _zero_(no error was encountered)
+           
+           out:
+           10> unlock_kernel().
+               locks_free_lock(@new_fl) if @new_fl is not NULL.
+               return error code.
+
+     FL_POSIX Locks :
+       an FL_POSIX lock is always associated with a process and with an inode,the lock is
+       automatically released either when the process dies or when a file descriptor is closed.
+       /* even if the process opened the same file twice or duplicated a file descriptor */
+       FL_POSIX lock never inherited by a child process across a fork().
+       POSIX file lock is supported by fcntl() system call.
+
+       <asm-generic/fcntl.h>
+         /**
+          * flock - POSIX file lock structure
+          * @l_type: lock type
+          *          # available values :
+          *              F_RDLCK 0
+          *              F_WRLCK 1
+          *              F_UNLCK 2
+          * @l_whence: file position seek
+          * @l_len:  scope length in bytes
+          * @l_pid:  owner pid
+          */
+         struct flock {
+                 short l_type;
+                 short l_whence;
+                 __kernel_off_t l_start;
+                 __kernel_off_t l_len;
+                 __kernel_pid_t l_pid;
+                 __ARCH_FLOCK_PAD /* __ARCH_FLOCK64_PAD for struct flock64 */
+         };
+
+         ! fcntl() cmd : F_SETLK, F_GETLK, F_SETLKW(blocking version)
+                         F_SETLK64, F_GETLK64, F_SETLKW64
+
+       <fs/fcntl.c>
+         /**
+          * sys_fcntl - system call service routine for fcntl()
+          * @fd:        file descriptor
+          * @cmd:       command
+          * @arg:       pointer value to argument corresponding to @cmd
+          * return:     0 OR error code
+          * # this routine just get file object through @fd and checks security for file_fcntl,
+          *   then call to do_fcntl()
+          */
+         SYSCALL_DEFINE3(fcntl, unsigned int, fd, unsigned int, cmd, unsigned long, arg);
+         => asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg);
+
+         /**
+          * do_fcntl - do file control
+          * @fd:       file descriptor
+          * @cmd:      command
+          * @arg:      argument pointer
+          * @filp:     file object
+          * return:    0 OR error code
+          */
+         static long do_fcntl(int fd, unsigned int cmd, unsigned long arg, struct file *filp);
+
+         do_fcntl() on F_SETLK,F_GETLK,F_SETLKW :
+           F_SETLK,F_SETLKW -> fcntl_setlk(@fd, @filp, @cmd, (struct flock __user *)@arg);
+           F_GETLK -> fcntl_getlk(@filp, (struct flock __user *)@arg);
+
+       <fs/locks.c>
+         /**
+          * fcntl_getlk - get POSIX file lock info and return to userspace
+          * @filp:        file object
+          * @l:           User Mode buffer
+          * return:       0 OR error code
+          * # this routine :
+          *     copy @l from user to local @flock
+          *     check @l_type of @flock,in the case that type neither is F_RDLCK nor F_WRLCK,error
+          *     flock_to_posix_lock(@filp, &@file_lock(local file_lock object), &@flock)
+          *     vfs_test_lock(@filp, &@file_lock)
+          *     @flock.l_type := @file_lock.fl_type
+          *     posix_lock_to_flock(&@flock, &@file_lock) if @file_lock.fl_type is not F_UNLCK
+          *     copy @flock to user @l
+          */
+         int fcntl_getlk(struct file *filp, struct flock __user *l);
+
+         /**
+          * fcntl_setlk - set POSIX file lock on a given file
+          * @fd:          file descriptor
+          * @filp:        file object
+          * @cmd:         fcntl cmd
+          * @l:           User Mode variable stored lock info
+          * return:       0 OR error code
+          */
+         int fcntl_setlk(unsigned int fd, struct file *filp, unsigned int cmd, struct flock __user *l);
+
+         brief description for fcntl_setlk() :
+           allocates file_lock object,return -ENOLCK if failed to allocating the object.
+           copy @l from user to local @flock is type of struct flock,return -EFAULT if failed.
+           get inode of @filp.
+           free file_lock object allocated previously and return -EAGAIN,if mandatory_lock(@inode) AND
+           mapping_writably_mapped(@filp->f_mapping).
+           /* do not allow mandatory locks on files that may be memory mapped and shared */
+           again:
+           call to flock_to_posix_lock(@filp, @file_lock, &@flock) try to convert flock to posix file_lock
+           with @filp,return error code if failed.
+           enable FL_SLEEP in @file_lock->fl_flags,if @cmd is F_SETLKW.
+           checks @flock.l_type,if it is
+             F_RDLCK,checks file mode FMODE_READ
+             F_WRLCK,checks file mode FMODE_WRITE
+             F_UNLCK,nothing
+             undefined,set free file_lock object and returns -EINVAL(invalid lock type)
+           do_lock_file_wait(@filp, @cmd, @file_lock).
+           acquire spinlock @current->files->file_lock.
+           fcheck(@fd).
+           release the spinlock.
+           if the file object @f returned by fcheck() is not equal to @filp,and @flock.l_type is not F_UNLCK,
+           and no error been encountered,then reset @flock.l_type to F_UNLCK,goto label "again".
+           finally,locks_free_lock(@file_lock) and returns error code.if no error happened,it is _zero_.
+
+         /**
+          * do_lock_file_wait - place a file lock on a given file,may sleep
+          * @filp:              file object
+          * @cmd:               command
+          * @fl:                file lock object
+          * return:             0 OR error code
+          * # the primary work will be done in an infinite for-cycle
+          *   in the cycle :
+          *     vfs_lock_file(@filp, @cmd, @fl, NULL)
+          *     if the routine did not returned FILE_LOCK_DEFERRED,then break cycle
+          *     call to wait_event_interruptible() until @fl->fl_next it NULL
+          *     continue next cycle,if wait_event() did not returned -ERESTARTSYS
+          *     if wait_event() have returned -ERESTARTSYS,then locks_delete_block(@fl),then
+          *     break cycle(system call was interrupted)
+          *   finally,return error code to caller
+          * # vfs_lock_file() is defined in the same file,if method lock() of the file operation
+          *   been implemented,then call to it;otherwise call to posix_lock_file()
+          *   EXPORT_SYMBOL_GPL on vfs_lock_file
+          */
+         static int do_lock_file_wait(struct file *filp, unsigned int cmd, struct file_lock *fl);
+
+         /**
+          * posix_lock_file - place a POSIX file lock on a given file,if necessary,return the conflicting
+          *                   lock(if found) in third parameter
+          * @filp:            file object
+          * @fl:              POSIX file lock
+          * @conflock:        place to return a copy of the conflicting lock,if found
+          * return:           0 OR error code
+          * # EXPORT_SYMBOL
+          * # this routine actually call to __posix_lock_file()
+          * # if this routine called with FL_EXISTS,the caller may determine whether or not a lock was
+          *   successfully freed by testing the return value for -ENOENT
+          */
+         int posix_lock_file(struct file *filp, struct file_lock *fl, struct file_lock *conflock);
+
+         /**
+          * __posix_lock_file - primary procedure to place a POSIX file lock on a given file inode
+          * @inode:             file's inode
+          * @request:           request for file lock
+          * @conflock:          place to return a copy of the conflicting lock,if found
+          *                     set to NULL means do not need the copying
+          * return:             0 OR error code
+          */
+         static int __posix_lock_file(struct inode *inode, struct file_lock *request,
+                                      struct file_lock *conflock);
+
+         what __posix_lock_file() does :
+           1> if FL_ACCESS unspecified AND (@fl_type of @request is not F_UNLCK OR
+              @request->fl_start != 0 OR @request->fl_end != OFFSET_MAX)
+              then
+                      locks_alloc_lock() for local variable @new_fl
+                      locks_alloc_lock() for local variable @new_fl2
+              /**
+               * we are going to place a file lock,not to look or unlock
+               * but the locking scope have to be checked
+               */
+           2> lock_kernel().
+           3> if @request->fl_type is not F_UNLCK
+              then    /* conflicting checking */
+                      /* we are going to place a file lock,thus have to
+                       * checks lock conflicting at first.
+                       * file locks owned by the same process would never conflict.
+                       */
+                      for_each_lock(@inode, struct file_lock **before) {
+                              if **before is not POSIX lock,then continue.
+                              if !posix_locks_conflict(@request, *@before),then continue.
+                              /* this routine is similar to flock_locks_conflict() */
+                              if @conflock is not NULL,then copy *@before into @conflock
+                              set error code to -EGAIN
+                              if FL_SLEEP unspecified in @request->fl_flags,then goto label "out"
+                              /* we found out conflict lock,but nonblock been specified */
+                              set error code to -EDEADLK
+                              if posix_locks_deadlock(@request, *@before),then goto label "out"
+                              /**
+                               * deadlock checking
+                               * owner of @before is same as @request
+                               * and MAX_DEADLK_ITERATIONS been exceeded
+                               */
+                              set error code to FILE_LOCK_DEFERRED
+                              locks_insert_block(*@before, @request)
+                              /* @before is conflicting with @request */
+                              goto label out
+                      }
+           4> we can place @request on the file.
+              set error code to 0.
+              if FL_ACCESS been specified,then goto label "out".
+              set @before to &@inode->i_flock.
+
+              skip locks owned by other processes via a while-cycle.
+              while ((@fl(local file_lock pointer) = *@before) AND
+                     (!IS_POSIX(@fl) OR !posix_same_owner(@request, @fl)))
+                      @before = &@fl->fl_next
+           5> process locks with this owner.
+              while ((@fl = *@before) AND posix_same_owner(@request, fl)) {
+                                                 /* F_RDLCK or F_WRLCK */
+                      checks if @request has the same type with @fl,then {
+
+                                    +-> fl->fl_end
+                                    |
+                              --------------------------------------------
+                                      |
+                                      +-> request->fl_start
+                                
+                              if @fl->fl_end < @request->fl_start - 1 then
+                              set @before to &@fl->fl_next,and continue.
+
+                                            +-> fl->fl_start
+                                            |
+                              --------------------------------------------
+                                          |
+                                          +-> request->fl_end
+
+                              if @fl->fl_start - 1 > @request->fl_end,then
+                              break. /* we can insert @request at there */
+
+                              /* the new and old lock are of the same type and
+                               * adjacent or overlapping.make one lock yielding
+                               * from the lower start address of both locks
+                               * to the higher end address.
+                               */
+
+                              /* merge two file lock to remove overlapping */
+                                        +-> fl->fl_start
+                                        |          +-> request->fl_start
+                              --------------------------------------------
+                                                  |                 +-> request->fl_end
+                                                  +-> fl->fl_end
+
+                              if @fl->fl_start > @request->fl_start,then
+                              @fl->fl-start = @request->fl_start.
+                              else,@request->fl_start = @fl->fl_start.
+
+                              if @fl->fl_end < @request->fl_end,then
+                              @fl->fl_end = @request->fl_end.
+                              else,@request->fl_end = @fl->fl_end.
+
+                              if @added(local variable,default is _zero_) is TRUE,
+                              then,locks_delete_lock(@before) and continue.
+
+                              set @request to @fl
+                              set @added to 1
+                      }
+                      else {
+                              /* processing for different lock types */
+
+                                       +-> fl->fl_end
+                                       |
+                              --------------------------------------------
+                                         |
+                                         +-> request->fl_start
+
+                              if @fl->fl_end < @request->fl_start,then goto label "next_lock".
+
+                                                    +-> fl->fl_start
+                                                    |
+                              --------------------------------------------
+                                                  |
+                                                  +-> request->fl_end
+
+                              if @fl->fl_start > @request->fl_end,then break cycle.
+                              /* we can place @request at there */
+                              
+                              if @request->fl_type is F_UNLCK,then set @added to 1.
+
+                              /**
+                               * if new lock falls the region of old lock,then splite the old
+                               * lock to three parts.
+                               * [left, request, right]
+                               * left and right have the same type,but request is different from
+                               * them.
+                               */
+
+                                        (left)
+                                        +-> fl->fl_start
+                                        |         +-> request->fl_start
+                              --------------------------------------------
+
+                              if @fl->fl_start < @request->fl_start,then set @left(local variable) to @fl.
+
+                                        (right)
+                                        +-> fl->fl_end
+                                        |
+                              --------------------------------------------
+                                       |
+                                       +-> request->fl_end
+
+                              if @fl->fl_end > @request->fl_end,then set @right(local variable) to @fl,break
+                              cycle.
+
+                              /* request lock covers the old one,then use new one to instead the old one,
+                               * and of course,the file lock type will also be changed.
+                               */
+                                       +-> request->fl_start
+                                       |  +-> fl->fl_start
+                              --------------------------------------------
+                                                     +-> fl->fl_end  |
+                                                                     +-> request->fl_end
+
+                              if @fl->fl_start >= @request->fl_start,then {
+                                      /* the new lock completely replaces an old one */
+                                      if @added is TRUE,then locks_delete_lock(@before),delete the old one,
+                                      and continue.
+
+                                      locks_wake_up_blocks(@fl),wake up waiters,because we are going to
+                                      delete the old one.
+                                      
+                                      @fl->fl_start := @request->fl_start
+                                      @fl->fl_end := @request->fl_end
+                                      @fl->fl_type := @request->fl_type
+
+                                      locks_release_private(@fl) /* release private info */
+                                      locks_copy_private(@fl, @request) /* copy private info */
+                                      
+                                      @request := @fl (pointer assignment)
+                                      set @added to 1                    
+                              }
+                      }
+                      next_lock:
+                              @before = &@fl->fl_next
+              }
+           6> /* new lock(s) need to be inserted */
+              set error code to -ENOLCK
+              if @right is not NULL AND @left is equal to @right AND @new_fl2 is NULL
+                      goto label "out"
+              set error code to 0
+           7> if @added is FALSE,then
+                      if @request->fl_type is F_UNLCK,then checks if @request->fl_flags enabled
+                      FL_EXISTS,the condition is TRUE,then set error code to -ENOENT;else,goto
+                      label "out".
+
+                      if @new_fl is NUL,then set error code to -ENOLCK,and goto label "out".
+
+                      locks_copy_lock(@new_fl, @request)  /* copy arg2 to arg1 */
+                      locks_insert_lock(@before, @new_fl) /* @new_fl->next = *@before */
+                                                          /* @new_fl->fl_link added into @file_lock_list */
+                      set @new_fl to NULL
+           8> if @right is not NULL,then
+                      checks if @left is equal to @right,then
+                              set @left to @new_fl2
+                              set @new_fl2 to NULL
+                              locks_copy_lock(@left, @right)
+                              locks_insert_lock(@before, @left)
+                      set @right->fl_start to @request->fl_end + 1
+                      locks_wake_up_blocks(@right)
+           9> if @left is not NULL,then
+                      set @left->fl_end to @request->fl_start - 1
+                      locks_wake_up_blocks(@left)
+           out:
+           10> unlock_kernel()
+               locks_free_lock() @new_fl,if it is not NULL
+               locks_free_lock() @new_fl2,if it is not NULL
+               return error code to caller.
