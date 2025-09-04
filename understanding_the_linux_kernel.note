@@ -24292,3 +24292,135 @@ Chapter 12 : The Virtual Filesystem
                locks_free_lock() @new_fl,if it is not NULL
                locks_free_lock() @new_fl2,if it is not NULL
                return error code to caller.
+
+
+
+Chapter 13 : I/O Architecture and Device Drivers
+    I/O Architecture :
+      buses >
+        data paths let information flow between CPU(s),RAM,and the I/O devices that can be connected
+        to the paths.
+        such data paths are buses.
+        bus act as the primary communication channels inside the computer.
+
+      Any computer has a "system bus" that connects most of the internal hardware devices.
+      PCI bus - Peripheral Component Interconnect bus,a typical system bus.
+      Others - ISA bus,EISA bus,MCA bus, SCSI bus,USB bus,etc.
+      ! typically,the same computer includes several buses of different types,linked together by
+        hardware devices called bridges.
+      ! any I/O devices is hosted by one,and only one,bus.the bus type affects the internal design
+        of the I/O device,as well as how the device has to handled by the kernel.
+      
+      two high-speed buses :
+        frontside bus - connects the CPUs to the RAM controller,used to transfers data from CPUs to memory
+                        chips,and transfers data from memory chips to CPUs.
+        backside bus - connects the CPUs directly to the external hardware cache.
+
+      host-bridge :
+        links together the system bus and the frontside bus.
+
+      I/O bus :
+        data path that connects a CPU to an I/O device is generically called an I/O bus.
+        the I/O bus is connected to each I/O device by means of a hierarchy of hardware components including
+        up to three elements: I/O ports, interfaces, device controllers.
+
+      ! 80x86 microprocessors use 16 of their address pins to "address I/O devices",and 8,16,or 32 of
+        their data pins to "transfer data".
+
+
+                                      +-----+
+                                      |     |
+                                      | CPU |
+                                      |     |
+                                      +-----+
+                                         |
+                                         |
+                         ------------------------------------- (I/O bus)
+                                     |              |
+                             +-------|--------------|---------+
+                             | +-----|--------------|-------+ |
+                             | | +----------+  +----------+ | |         +------------+
+                             | | | I/O Port |  | I/O Port | | | <-----> | I/O Device |
+                             | | +----------+  +----------+ | |         +------------+
+                             | +----------------------------+ |
+                             |       I/O Interface            |
+                             +--------------------------------+
+                                     I/O Controller
+
+      I/O Ports :
+        each device connected to the I/O bus has its own set of I/O addresses,that are the
+        I/O Ports.
+
+        I/O Ports in IBM PC architecture :
+          the I/O address space provides up to 65536 8-bit I/O ports.
+          16-bit I/O port - two consecutive 8-bit I/O ports,the starting address must be even address.
+          32-bit I/O port - two consecutive 16-bit I/O ports,the starting address must be multiple of 4.
+
+        Asssembly instructions for I/O in IA-32 architecture :
+          in{bwl} imm8 / (%dx)
+            imm - immediate port
+            8/16/32 - 8-bit 16-bit 32-bit
+            DX -> register used to store the immediate port number
+                  when 8-bit immediate port is specified,the upper-eight bits will be 0
+            in - transfers a byte,word,or long from the immediate port into the byte,word,or
+                 long memory address pointed to by the AL,AX or EAX
+                 transfers a byte,word,or long from the immediate port stored in DX into the
+                 byte,word,or long memory address pointed by the AL,AX or EAX
+
+          ins{bwl}
+            /* DX to ES:(E)DI */
+            DX - register used to store the immediate port number
+            ES:(E)DI - section pointer:string operation destination pointer
+            ins - transfers byte,word,or long from the immediate port into the byte,word,
+                  or long memory address specified by ES:(E)DI
+                  the counter of transfers is stored in CX,and flag DF used to control direction
+                  of (E)DI
+                  ins is used to transfers string.
+
+          out{bwl} imm8/(%dx)
+            out - AL / AX / EAX -> imm8 / imm16 / imm32 /* AL / AX / EAX to imm8 / imm16 / imm32 */
+                  AL / AX / EAX -> DX                   /* AL / AX / EAX to DX */
+          outs{bwl}
+            outs - ES:(E)DI -> DX /* ES:(E)DI to DX */
+                   CX as counter
+                   DF control direction
+            
+        I/O ports may also be mapped into addresses of the physical address space,then CPU can communicate
+        to the I/O device via the physical memory address.modern hardware devices are more suited to mapped
+        I/O,because it is faster and can be combined with DMA(Directly Memory Access).
+
+        I/O device registers :
+          for offer a unified approach to I/O programming without down performance,the I/O ports of
+          each device are structed into a set of specialized registers.
+
+          device control register :
+            this register used to command the device,CPU can writes the commands into this register for
+            control the device.
+
+          device status register :
+            this register stores the current internal status of the I/O device,CPU can read from this
+            register to knows what this I/O device is doing.
+
+          device input register :
+            this register is used by CPU to fetches data from the I/O device.
+
+          device output register :
+            this register is used by CPU to send data into the I/O device.
+
+                                 | Control Register |
+
+                                 | Status Register  |
+                                 
+                  CPU <----------|                  |---------> Device's I/O Interface
+
+                                 | Input Register   |
+
+                                 | Output Register  |
+
+          ! to lower costs,the same I/O port is often used for different purpose.
+            e.g.
+              device control register is combined with device status register
+              device input register can be used as device output register
+
+          
+    
