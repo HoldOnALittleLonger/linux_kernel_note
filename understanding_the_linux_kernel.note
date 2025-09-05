@@ -24422,5 +24422,167 @@ Chapter 13 : I/O Architecture and Device Drivers
               device control register is combined with device status register
               device input register can be used as device output register
 
+        Accessing I/O ports :
+          kernel has wrapped up the assembly instructions "in","out","ins","outs" into several 
+          auxiliary functions.
+          ! in the header for generic assembly I/O <asm-generic/io.h>,these functions are implemented
+            by access to the memory address where mapped an I/O port.
+            but in the header for architecture dependent assembly I/O  <arch/x86/include/asm/io.h>,
+            these functions are implemented by inline assembly,and functions readX(),writeX() are 
+            used to read/write a memory address where mapped an I/O port.    /* X => b, w, l */
+
+          kernel defined :
+            inb, inw, inl               =>  in[b/w/l]
+            inb_p, inw_p, inl_p         =>  in[b/w/l] with an io delay
+            outb, outw, outl            =>  out[b/w/l]
+            outb_p, outw_p, outl_p      =>  out[b/w/l] with an io delay
+            insb, insw, insl            =>  ins[b/w/l]
+            outsb, outsw, outsl         =>  outs[b/w/l]
+          
+          <arch/x86/include/asm/io.h>
+            #define BUILDIO(bwl, bw, type)                             \
+            static inline void out##bwl(unsigned type value, int port) \
+            {                                                          \
+                    asm volatile("out" #bwl " %" #bw "0, %wl"          \
+                                 : : "a"(value), "Nd"(port));          \
+            }                                                          \
+                                                                       \
+            static inline unsigned type in##bwl(int port)              \
+            {                                                          \
+                    ...                                                \
+            }                                                          \
+                    ...                                                \
+                    ...                                                \
+                                                                       \
+            static inline void outs##bwl(int port, const void *addr,   \
+                                         unsigned long count)          \
+            {                                                          \
+                    asm volatile("rep; outs" #bwl                      \
+                                 : "+S"(addr), "+c"(count) : "d"(port)); \
+            }                                                          \
+                    ...
+            
+            ! for the function execute a "dummy" instruction to introduce pause
+              is implemented by call to slow_down_io() right after the auxiliary
+              function.
+            ! slow_down_io() is implemented by native_io_delay(),which is defined in
+              <arch/x86/kernel/io_delay.c>.
+              the kernel supports three io delay types :
+                "0x80" -> outb %al, $0x80 /* transfer one byte in AL to I/O port 0x80 */
+                "0xed" -> outb %al, $0xed
+                "udelay" -> udelay(2)
+                "none" -> none io delay
+              ! the delay type can be selected by send kernel parameter io_delay="<type>".
+              # I/O port 0x80 => POST - Power On Self Test
+              # I/O port 0xed => an alternative for I/O port 0x80 while conflict with
+                                 other hardware
+
+          detecting which I/O ports have been assigned to I/O devices is more complex than accessing
+          an I/O port,in paritcular,for systems based on an ISA bus.
+          often a device driver must blindly write into some I/O ports to probe the hardware device,
+          but in the case that I/O ports been assigned to another hardwar device,this writing may
+          cause system crash.for prevent such case,kernel have to keep track of I/O ports assigned to
+          each hardware device by means of "resources".
+
+          the structure resource :
+            <linux/types.h>
+              typedef phys_addr_t resource_size_t;
+
+            <linux/ioport.h>
+              /**
+               * ioport_resource - the root of I/O port tree of this system,
+               *                   it spans the whole I/O address space from
+               *                   port number 0 to 65535
+               */
+              extern struct resource ioport_resource;
+
+              /**
+               * resource - I/O port resource tree node
+               * @start:    start of resource range
+               *            # @start it is not the I/O port number,
+               *              it is the starting address of memory area
+               *              where mapped some device I/O ports
+               * @end:      end of resource range
+               * @name:     description of owner of the resource
+               * @flags:    various flags
+               * @parent:   parent of this node
+               * @sibling:  sibling of this node
+               * @child:    the first child of this node
+               * # general rule :
+               *     each node of the tree must correspond to a subrange of the
+               *     range associated with the parent node
+               *   follow this rule,we can split a range of I/O port to several
+               *   subranges to satisfy device requirement
+               *   # e.g.
+               *       IDE disk interface - 0xf000 to 0xf00f as the I/O port addresses,
+               *                            0xf000 to 0xf007 is used for the master disk
+               *                            of the IDE chain
+               *                            0xf008 to 0xf00f is used for the slave disk
+               */   
+              struct resource {
+                      resource_size_t start;
+                      resource_size_t end;
+                      const char *name;
+                      unsigned long flags;
+                      struct resource *parent, *sibling, *child;
+              };
+
+              /**
+               * request_region - shortcut for get a new resource object which spanned
+               *                  subrange[@start, @start + n - 1] of resource of @ioport_resource,
+               *                  returns the new allocated resource object
+               * # kzalloc() with gfp flag GFP_KERNEL
+               */
+              #define request_region(start, n, name) __request_region(&ioport_resource, (start), (n), (name), 0)
+
+              /**
+               * release_region - release a resource which spanned subrange[@start, @start + n - 1] of
+               *                  resource of @ioport_resource
+               */
+              #define release_region(start, n) __release_region(&ioport_resource, (start), (n))
+
+              /**
+               * request_resource - try to request a resource range in the resource
+               *                    tree
+               * @root:             the resource tree
+               * @new:              new resource node spans a resource range
+               * return:            NULL(succeed) OR address of a child of @root which
+               *                    have spanned the new subrange
+               * # EXPORT_SYMBOL
+               */
+              extern int request_resource(struct resource *root, struct resource *new);
+
+              /**
+               * allocate_resource - allocate empty slot in the resource tree given range
+               *                     & alignment
+               * @root:              root resource descriptor
+               * @new:               resource descriptor desired by caller
+               * @size:              requested resource region size
+               * @min:               minimum size to allocate
+               * @max:               maximum size to allocate
+               * @align:             alignment requested,in bytes
+               * @alignf:            alignment function,optional,called if not NULL
+               * @alignf_data:       arbitrary data to pass to the @alignf function
+               * return:             0 OR error code
+               * # EXPORT_SYMBOL
+               * # this function do not allocate memory for @new,the caller have to prepare
+               *   a resource object before call to this function
+               * # if all conditions been satisfied,then @new will spans the new subrange
+               *   of @root,then __request_resource() will be called for insert @new
+               * # this routine will write_lock @resource_lock before call to find_resource(),
+               *   and release the lock before return to caller
+               *   (@resource_lock - static DEFINE_RWLOCK(resource_lock) in <kernel/resource.c>)
+               */
+              extern int allocate_resource(struct resource *root, struct resource *new,
+                                           resource_size_t size, resource_size_t min,
+                                           resource_size_t (*alignf)(void *,
+                                                                     const struct resource *,
+                                                                     resource_size_t,
+                                                                     resource_size_t),
+                                           void *alignf_data);
+
+            
+              
+
           
     
