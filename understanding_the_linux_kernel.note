@@ -24581,8 +24581,96 @@ Chapter 13 : I/O Architecture and Device Drivers
                                                                      resource_size_t),
                                            void *alignf_data);
 
-            
-              
+      I/O Interfaces :
+        an I/O Interface is a hardware circuit inserted between a group of I/O ports and the
+        corresponding device controller.
+                     
+                      [I/O port]                               +----------------+
+                      [I/O port]                               |                |
+                      [I/O port]        [I/O Interface]        | I/O Controller |       
+                         ...                   |               |                |
+                      [I/O port]               |               +----------------+
+                                               |
+                                               | => IRQ Line
+                                               |
+                                               V
+                                            [ PIC ]
 
-          
-    
+        the I/O interface as an interpreter that translate the values in the I/O ports into
+        commands and data for the device;in the opposite direction,it detects change in the
+        device state and correspondingly updates the I/O port that plays the role of status
+        register.
+        use the IRQ Line,I/O Interface could be connected to PIC,then allows the CPU interactive
+        with the device.
+
+        type of I/O Interfaces :
+          1> Custom I/O Interfaces
+               Custom I/O Interface is used for one specific hardware device.In some cases,the
+               device controller is located in the same "card" that contains the I/O interface.
+               the devices attached to a custom I/O interface can be either internal devices or
+               external devices.
+               /**
+                * card :
+                *   each card must be inserted in one of the available free bus slots of the PC
+                *   if the card can be connected to an external device through an external cable,
+                *   the card supports a suitable connector in the rear panel of the PC.
+                *   e.g. built-in network card
+                */
+               the common custom I/O interfaces :
+                 Keyboard interface          -       connected to a keyboard controller
+                 Graphic interface           -       packed together withe the graphic controller
+                 Disk interface              -       connected by a cable to the disk controller
+                 Bus mouse interface         -       connected by a cable to the mouse controller
+                 Network interface           -       packed together with the network card controller
+          2> General Purpose I/O Interfaces
+               General Purpose I/O Interface is used to connect several different hardware device.
+               devices attached to a general-purpose I/O interface are usually external devices.
+
+               the most common general purpose I/O interfaces :
+                 Parallel port
+                   - tranditionally used to connect printers,removable disks,scanners,backup units
+                     and other computers.the data transfered once on parallel port is 8-bit.
+                 Serial port
+                   - link the parallel port,but the data is transferred 1 bit at a time.
+                     it includes a Universal Asynchronous Receiver and Transmitter(UART) chip to
+                     string out the bytes to be sent into a sequence of bits and to reassemble the
+                     received bits into bytes.
+                     speed is lower than parallel port,usually used for external devices that do not
+                     operate at a high speed.
+                 PCMCIA interface
+                   - included mostly on portable computers.the external device,which has the shape of
+                     a credit card,can be inserted into and removed from a slot without rebooting the
+                     system.
+                     the most common PCMCIA devices are hard disks,moderns,network cards,and RAM expansions.
+                 SCSI interface(Small Computer System Interface)
+                   - a circuit that connects the main PC bus to a secondary bus called the SCSI bus.
+                     SCSI-2 bus allows up to eight PCs and external devices.
+                     Wide SCSI-2 and SCSI-3 interfaces allow connec to 16 devices or more if additional
+                     interfaces are present.
+                 Universal serial bus(USB)
+                   - a general purpose I/O interface that operates as a high speed and may be used for
+                     the external devices traditionally connected to the parallel port,the serial port,
+                     and the SCSI interface.
+
+      Device Controllers :
+        a complex device may require a device controller to drive it.
+        the roles that device controller plays :
+          1> it interprets the high-level commands received from the I/O interface and forces
+             the device to execute specific actions by sending proper sequences of electrical
+             signals to it.
+          2> it converts and properly interprets the electrical signals received from the device
+             and modifies the value of the status register through the I/O interface.
+
+        for example,the disk device controller,which interprets the command from I/O interface(from CPU),
+        and then read from/write into the disk.before read and write,it have to move disk head on the
+        right track,and then let disk process read/write action.everytime the action finished,an interrupt
+        would be raised on the IRQ line.
+        /**
+         * modern disk controllers can keep the disk data in on-board fast disk caches,and can reorder the
+         * CPU high-level requests to make an optimization for disk behavior.
+         */
+
+        the device no device controller,such PIT,the Programmable Interval Timer.
+
+        I/O Shared Memory :
+          the memory chip that is built-in the hardware device.such graphic card RAM,or network card RAM.
