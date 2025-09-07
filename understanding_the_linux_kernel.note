@@ -24674,3 +24674,267 @@ Chapter 13 : I/O Architecture and Device Drivers
 
         I/O Shared Memory :
           the memory chip that is built-in the hardware device.such graphic card RAM,or network card RAM.
+
+      The Device Driver Model :
+        The device driver should typically take care of :
+          1> Power management
+               handling of different voltage levels on the device's power line
+               # power management is performed globally by the kernel on every hardware device
+                 in the system.the order of change power-level should follow a well defined order.
+                 for example,when put the hard disk device into "standby"(low-power) state,must put
+                 the disk at first,then is disk controller.
+          2> Plug and play
+               transparent allocation of resources when configuring the device
+          3> Hot-pluging
+               support for insertion and removal of the device while the system is running
+
+          Linux provides some data structures and helper functions that offer a unifying view of
+          all buses,devices,and device drivers in the system,the framework is called the
+          "device driver model".
+
+        The sysfs Filesystem :
+          sysfs filesystem is similar to proc filesystem.the proc filesystem allows User Mode applications
+          is able to access kernel internal data structures.and the sysfs filesystem,provides additional
+          information on kernel data structures.
+          
+          goal of the sysfs filesystem :
+            expose the hierarchy relationships among the components of the device driver model.
+
+          top directories of sysfs :
+            block
+              the block devices,independently from the bus to which they are connected
+            devices
+              all hardware devices recognized by the kernel,organized according to the bus
+              in which they are connected
+            bus
+              the buses in the system,which host the devices
+            drivers
+              the device drivers registered in the kernel
+            class
+              the types of devices in the system,the same class may include devices hosted by
+              different buses and driven by different drivers
+            power
+              files to handle the power states of some hardware devices
+            firmware
+              files to handle the firmware of some hardware devices
+
+            /**
+             * sysfs in newer kernel version :
+             *   block bus class dev devices firmware fs kernel module power
+             *                    |                   |  |      |
+             *                    |                   |  |      +-> registered kernel module
+             *                    |                   |  +-> kernel related infos,such boot_params,irq,slab,etc
+             *                    |                   +-> supported filesystem
+             *                    +-> (block, char)
+             */
+            ! the relationships between components of the device driver models are expressed in the sysfs
+              as symbolic links between directories and files.
+              the main role of regular files in sysfs is to represent attributes of drivers and devices.
+
+        Kobjects :
+          the core data structure of device driver model is a generic data structure named kobject,each
+          kobject corresponds to a directory in sysfs "/sys".
+          ! kobject is embedded inside larger object(container),and it describe the components of the 
+            device driver model.
+
+          embedding a kobject inside a container allows the kernel to :
+            1> keep a reference counter for the container
+            2> maintain hierarchical lists or sets of containers
+            3> provide a User Mode view for the attributes of the container
+
+          Kobjects,ksets,and subsystems :
+            <linux/sysfs.h>
+              /**
+               * attribute - attribute for the element in sysfs filesystem
+               * @name:      the name
+               * @owner:     who constructed this elemtn,and also used 
+               *             as the eject protector
+               * @mode:      file mode
+               */
+              struct attribute {
+                      const char *name;
+                      struct module *owner;
+                      mode_t mode;
+              #ifdef CONFIG_DEBUG_LOCK_ALLOCK
+                      struct lock_class_key *key;
+                      struct lock_class_key skey;
+              #endif
+              };
+            <fs/sysfs/file.c>
+              /**
+               * sysfs_open_dirent - represent opened regular file in sysfs
+               * @refcnt: reference counter
+               * @event:  event counter
+               * @poll:   poll supporting
+               * @buffers:    by use this list_head object,goes through sysfs_buffer.list
+               */
+              struct sysfs_open_dirent {
+                      atomic_t refcnt;
+                      atomic_t event;
+                      wait_queue_head_t poll;
+                      struct list_head buffers;
+              };
+
+              /**
+               * sysfs_buffer - hold the contents of an opened regular file in sysfs
+               * @count:        counter
+               * @pos:          current po
+               * @page:         pointer to the memory area storing the contents
+               * @ops:          sysfs operation
+               * @mutex:        protector
+               * @needs_read_fill:    indicator for whether should fill the buffer by reading
+               *                      file
+               * @event:        event indicator
+               * @list:         to another buffers of the opened file
+               */
+              struct sysfs_buffer {
+                      size_t count;
+                      loff_t pos;
+                      char *page;
+                      const struct sysfs_ops *ops;
+                      struct mutex mutex;
+                      int needs_read_fill;
+                      int event;
+                      struct list_head list;
+              };
+
+            <fs/sysfs/sysfs.h>
+              /* sysfs_elem_dir - sysfs element for directory type */
+              struct sysfs_elem_dir {
+                      struct kobject *kobj;
+                      struct sysfs_dirent *children;
+              };
+
+              /* sysfs_elem_dir - sysfs element for symlink type */
+              struct sysfs_elem_symlink {
+                      struct sysfs_dirent *target_sd;
+              };
+
+              /* sysfs_elem_attr - sysfs element for regular file type */
+              struct sysfs_elem_attr {
+                      struct attribute *attr;
+                      struct sysfs_open_dirent *open;
+              };
+
+              /* sysfs_elem_bin_attr - sysfs element for binary file type */
+              struct sysfs_elem_bin_attr {
+                      struct bin_attribute *bin_attr;
+                      struct hlist_head buffers; /* similar to the buffers of regualr file in sysfs */
+              };
+
+              /* sysfs_inode_attrs - sysfs inode attributes */
+              struct sysfs_inode_attrs {
+                      struct iattr ia_iattr;
+                      void *ia_secdata;
+                      u32 ia_secdata_len;
+              };
+
+              /**
+               * sysfs_dirent - dentry in sysfs filesystem,it different from VFS dentry that
+               *                is because of sysfs is in-memory filesystem
+               * @s_count:      counter,recyle the dentry when this member becomes _zero_
+               * @s_active:     usage counter
+               * @s_parent:     parent sysfs dentry
+               * @s_sibling:    sibling dentry in the tree
+               * @s_name:       name of the dentry
+               * @s_dir:        directory implementation
+               * @s_symlink:    symlink implementation
+               * @s_attr:       regular file implementation
+               * @s_bin_attr:   binary implementation
+               * @s_flags:      flags
+               * @s_mode:       file mode
+               * @s_ino:        inode number
+               * @s_iattr:      inode attribute
+               */
+              struct sysfs_dirent {
+                      atomic_t s_count;
+                      atomic_t s_active;
+              #ifdef CONFIG_DEBUG_LOCK_ALLOC
+                      struct lockdep_map dep_map;
+              #endif
+                      struct sysfs_dirent *s_parent;
+                      struct sysfs_dirent *s_sibling;
+                      const char *s_name;
+
+                      union {
+                              struct sysfs_elem_dir s_dir;
+                              struct sysfs_elem_symlink s_symlink;
+                              struct sysfs_elem_attr s_attr;
+                              struct sysfs_elem_bin_attr s_bin_attr;
+                      };
+
+                      unsigned int s_flags;
+                      unsigned short s_mode;
+                      ino_t s_ino;
+                      struct sysfs_inode_attrs *s_iattr;
+              };
+
+            <linux/kref.h>
+              /* kret - Kernel Mode reference counter */
+              struct kref {
+                      atomic_t refcount;
+              };
+              
+              /**
+               * kset - a set of kobjects of a specific type,belonging to a specific subsystem
+               * @list:         the list of all kobjects for this kset
+               * @list_lock:    concurrently access protector
+               * @kobj:         the embedded kobject for this set(recursion)
+               * @uevent_ops:   the set of uevent operations for this set
+               *                these are called whenever a kobject has something happen to it,
+               *                so that the kset can add new environment variables,or filter
+               *                out the uevents if so desired
+               * # a kset difines a group of kobjects,they can be individually different "types",
+               *   but overall these kobjects all want to be grouped together and operated on in
+               *   the same manner
+               * # ksets are used to define the attribute callbacks and other common events that happen
+               *   to a kobjecj
+               */
+            <linux/kobject.h>
+              struct kset {
+                      struct list_head list;
+                      spinlock_t list_lock;
+                      struct kobject kobj;
+                      const struct kset_uevent_ops *uevent_ops;
+              };
+
+              /**
+               * kobj_type - kobject type,essentially,the type of the container that includes the kobject,
+               *             some special methods and attributes are held by this structure 
+               */
+              struct kobj_type {
+                      void (*release)(struct kobject *kobj);
+                      const struct sysfs_ops *sysfs_ops;
+                      struct attribute **default_attrs;
+              };
+
+              /**
+               * kobject - structure used to describe the kernel device driver model components
+               * @name:    a string holding the name of the container,the large object this
+               *           kobjec embedded
+               * @entry:   pointers for the list in which the kobject is inserted
+               * @parent:  parent kobjec,if any
+               * @kset:    kobject group information,that is the group this kobjec belonging to
+               * @@ktype:  kobjec type descriptor
+               * @sd:      sysfs dentry info
+               * @kref:    reference counter
+               * @state_initialized:    state initialization indicator
+               * @state_in_sysfs:       sysfs export indicator
+               * @state_add_uevent_sent:    state indicator for add uevent_sent
+               * @state_remove_uevent_sent: state indicator for remove uevent_sent
+               * @uevent_suppress:      uevent suppress indicator
+               */
+              struct kobject {
+                      const char *name;
+                      struct list_head entry;
+                      struct kobject *parent;
+                      struct kset *kset;
+                      struct kobj_type *ktype;
+                      struct sysfs_dirent *sd;
+                      struct kref kref;
+                      unsigned int state_initialized:1;
+                      unsigned int state_in_sysfs:1;
+                      unsigned int state_add_uevent_sent:1;
+                      unsigned int state_remove_uevent_sent:1;
+                      unsigned int uevent_suppress:1;
+              };
