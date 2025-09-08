@@ -24760,6 +24760,13 @@ Chapter 13 : I/O Architecture and Device Drivers
                       struct lock_class_key skey;
               #endif
               };
+              
+              /* sysfs_ops - sysfs filesystem operations */
+              struct sysfs_ops {
+                      ssize_t (*show)(struct kobject *, struct attribute *, char *);
+                      ssize_t (*store)(struct kobject *, struct attribute *, const char *, size_t);
+              };
+
             <fs/sysfs/file.c>
               /**
                * sysfs_open_dirent - represent opened regular file in sysfs
@@ -24835,7 +24842,7 @@ Chapter 13 : I/O Architecture and Device Drivers
                * @s_count:      counter,recyle the dentry when this member becomes _zero_
                * @s_active:     usage counter
                * @s_parent:     parent sysfs dentry
-               * @s_sibling:    sibling dentry in the tree
+               * @s_sibling:    sibling dentry in the hierarchy tree
                * @s_name:       name of the dentry
                * @s_dir:        directory implementation
                * @s_symlink:    symlink implementation
@@ -24870,7 +24877,17 @@ Chapter 13 : I/O Architecture and Device Drivers
               };
 
             <linux/kref.h>
-              /* kret - Kernel Mode reference counter */
+              /**
+               * kret - kobject reference counter,also could be the reference counter of
+               *        the container in which the kobject is embedded
+               * # method kobject_get() increase the counter,and method kobject_put() decrease
+               *   the counter
+               * # extern struct kobject *kobject_get(struct kobject *kobj); returns @kobj
+               *   extern void kobject_put(struct kobject *kobj);
+               * # these two methods are declared in <linux/kobject.h> and implemented in
+               *   <lib/kobject.c>
+               * # kobject will be recyled when kref becomes _zero_
+               */
               struct kref {
                       atomic_t refcount;
               };
@@ -24889,6 +24906,9 @@ Chapter 13 : I/O Architecture and Device Drivers
                *   the same manner
                * # ksets are used to define the attribute callbacks and other common events that happen
                *   to a kobjecj
+               * # kset reference counter is represented by @kobj->kref,the methods kset_get() and kset_put()
+               *   just call to kobject_get() and kobject_put() on @kobj as well
+               * # kset could be a member of another kset by insert the kobject structure @kobj
                */
             <linux/kobject.h>
               struct kset {
@@ -24901,6 +24921,11 @@ Chapter 13 : I/O Architecture and Device Drivers
               /**
                * kobj_type - kobject type,essentially,the type of the container that includes the kobject,
                *             some special methods and attributes are held by this structure 
+               * @release:   method executed when the kobject is being freed
+               * @sysfs_ops: sysfs operations
+               * @default_attrs:    a list of default attributes for the sysfs filesystem
+               * # about @release,the method usually defined only if the container of the kobject
+               *   was allocated dynamically,frees the container itself
                */
               struct kobj_type {
                       void (*release)(struct kobject *kobj);
@@ -24923,6 +24948,8 @@ Chapter 13 : I/O Architecture and Device Drivers
                * @state_add_uevent_sent:    state indicator for add uevent_sent
                * @state_remove_uevent_sent: state indicator for remove uevent_sent
                * @uevent_suppress:      uevent suppress indicator
+               * # the kobjects have the same type in the kset,the @parent field of these
+               *   kobjects is points to kset->@kobj
                */
               struct kobject {
                       const char *name;
@@ -24938,3 +24965,12 @@ Chapter 13 : I/O Architecture and Device Drivers
                       unsigned int state_remove_uevent_sent:1;
                       unsigned int uevent_suppress:1;
               };
+
+            /**
+             * subsystems,collections of ksets called subsystems.a subsystem may include ksets of
+             * different types,and it is represented by a subsystem data structure having just two
+             * fields.
+             *   - From "Understan Linux Kernel"
+             * ! BUT LINUX 2.6.34.1 NO SUCH STRUCTURE IS EXISTED,BECAUSE THIS DATA STRUCTURE BEEN
+             *   REMOVED SINCE LINUX 2.6.22,AND ALL APIs NEED SUCH ARGUMENT BEEN CHANGED.
+             */
