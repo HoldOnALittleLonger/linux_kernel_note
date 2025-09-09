@@ -24949,7 +24949,7 @@ Chapter 13 : I/O Architecture and Device Drivers
                * @state_remove_uevent_sent: state indicator for remove uevent_sent
                * @uevent_suppress:      uevent suppress indicator
                * # the kobjects have the same type in the kset,the @parent field of these
-               *   kobjects is points to kset->@kobj
+               *   kobjects is points to kset->@kobj if it has not a parent already
                */
               struct kobject {
                       const char *name;
