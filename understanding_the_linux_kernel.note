@@ -24974,3 +24974,172 @@ Chapter 13 : I/O Architecture and Device Drivers
              * ! BUT LINUX 2.6.34.1 NO SUCH STRUCTURE IS EXISTED,BECAUSE THIS DATA STRUCTURE BEEN
              *   REMOVED SINCE LINUX 2.6.22,AND ALL APIs NEED SUCH ARGUMENT BEEN CHANGED.
              */
+            Example for Device Driver Model Hierarchy in "/sys" :
+              /sys/bus/pci/drivers/serial/new_id
+               |   |   |   |       |      |
+               |   |   |   |       |      |
+               |   |   |   |       |      +-> attribute
+               |   |   |   |       +-> kobject
+               |   |   |   +-> kset
+               |   |   +-> subsystem
+               |   +-> subsystem
+               +-> root
+
+          Registering Kobjects,Ksets,and subsystems(been removed) :
+            a general rule,if you want a kobject,kset to appear in the sysfs subtree,must first
+            register it.for the directories of kobjects included in the same kset,appear in the
+            directory of the kset itself.
+
+            !! LINUX 2.6.34.1 HAVE REMOVED ROUTINES kobject_register() AND kobject_unregister(),
+               BUT THE ROUTINE kset_register() AND kset_unregister() STILL AVAILABLE.
+
+            The related routines :
+              <linux/kobject.h>
+                /**
+                 * kobject_set_name - set the name of a kobject
+                 * @kobj:             kobject
+                 * @name:             format string used to build the name
+                 * return:            0 OR -ENOMEM
+                 * # EXPORT_SYMBOL
+                 * # this routine actually call to kobject_set_name_vargs() with a packed
+                 *   va_list variable
+                 */
+                extern int kobject_set_name(struct kobject *kobj, const char *fmt, ...)
+                __attribute__((format(printf, 2, 3)));
+
+                /**
+                 * kobject_set_name_vargs - set the name of a kobject
+                 * @kobj:                   kobject
+                 * @fmt:                    format string used to build the name
+                 * @vargs:                  vargs to format the string
+                 * return:                  0 OR -ENOMEM
+                 * # this routine call to kvasprintf() to build the name,which kmalloc()
+                 *   memory with GFP_KERNEL to get an area to store the name,and then
+                 *   call to vsnprintf() to build the name,fanally,returns the new pointer
+                 *   to caller,and the function vsnprintf() is similar to the vsnprintf()
+                 *   in C library
+                 * # this routine will enter a while-cycle to covert all '/' to '!'
+                 */
+                extern int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
+                                                  va_list vargs);
+
+                !! IF THE kobject BEEN HAS A NAME,FOR CHANGE NAME,MUST CALL TO kobject_rename().
+                
+                /* kobject_name - returns @kobj->name */
+                static inline const char *kobject_name(const struct kobject *kobj);
+
+                /**
+                 * kobject_init - initializes a kobject with a given kobject type
+                 * @kobj:         kobject
+                 * @ktype:        kobject type for @kobj
+                 * # EXPORT_SYMBOL
+                 * # this routine dump_stack() when NULL @kobj,or NULL @ktype,or @kobj been
+                 *   initialized(@kobj->state_initialized)
+                 * # this routine call to kobject_init_internal() to initializes @kobj,and then
+                 *   use @ktype to set @kobj->ktype
+                 * # kobject_init_internal() is defined in the same file <lib/kobject.c>,and
+                 *   which initializes the reference counter @kref,the list @entry,and state indicators,
+                 *   at the end,set @state_initialized to 1
+                 */
+                extern void kobject_init(struct kobject *kobj, struct kobj_type *ktype);
+
+                /**
+                 * kobject_add - add a kobject,the kobject name is set and added to the kobject hierarchy
+                 *               in this function
+                 * @kobj:        kobject
+                 * @parent:      its parent
+                 * @fmt:         format to name the kobject with
+                 * return:       0 OR error code
+                 * # EXPORT_SYMBOL
+                 * # this function actually call to kobject_add_varg() with a packed va_list variable
+                 * # kobject_add_varg() :
+                 *     call to kobject_set_name_vargs() to setup @kobj->name with the va_list argument
+                 *     set @kobj->parent to @parent
+                 *     call to kobject_add_internal() on @kobj
+                 *   kobject_add_internal() :
+                 *     get parent of @kobj via kobject_get()
+                 *     if @kobj->kset is not NULL {
+                 *       increase ref counter of @kobj->kset->kobj
+                 *       call to kobj_kset_join(),and this routine will increase ref counter of @kobj->kset,next,
+                 *       list_add_tail() @kobj->entry to @kobj->kset->list
+                 *       set @kobj->parent to local variable parent
+                 *     }
+                 *     create_dir() for @kobj,dump_stack() if any error encoutnered,set @kobj->state_in_sysfs to 1
+                 *     if succeed to create directory in sysfs
+                 */
+                extern int __must_check kobject_add(struct kobject *kobj, struct kobject *parent,
+                                                    const char *fmt, ...);
+
+                /* kobject_init_and_add - initialize a given kobject and add it into hierarchy */
+                extern int __must_check kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
+                                                             struct kobject *parent, const char *fmt, ...);
+
+                /**
+                 * kobject_del - delete a kobject from hierarchy
+                 * @kobj:        kobject
+                 * # this function will does :
+                 *     call to sysfs_remove_dir() on @kobj to remove the corresponding directory in sysfs
+                 *     @kobj->state_in_sysfs = 0
+                 *     kobj_kset_leave() to let @kobj leave the kset @kobj->kset
+                 *     decrease ref counter of @kobj->parent
+                 *     @kobj->parent = NULL
+                 */
+                extern void kobject_del(struct kobject *kobj);
+
+                /**
+                 * kobject_create - kzalloc() a new kobject object with gfp flag GFP_KERNEL,and then init it,
+                 *                  returns the pointer to the new kobject or NULL
+                 */
+                extern struct kobject *__must_check kobject_create(void);
+
+                /* kobject_create_and_add - create a new kobject and add it into hierarchy &/
+                extern struct kobject *__must_check kobject_create_and_add(const char *name, struct kobject *parent);
+
+                /* kobject_get() and kobject_put() been described above */
+
+                /**
+                 * kobject_get_path - generate and return the path associated with a given kobj and kset pair
+                 * @kobj:             kobject
+                 * @flag:             gfp flag used to allocate memory for the path
+                 * return:            pointer to the memory area where stored the path OR NULL
+                 *                                                                        (failed allocate)
+                 *                                                                        (_zero_ length)
+                 * # EXPORT_SYMBOL
+                 * # this routine will call to get_kobj_path_length() to know how many bytes of memory should
+                 *   to be allocated,returns NULL if the length is _zero_;then kzalloc() memory,returns NULL
+                 *   if failed.finally,call to fill_kobj_path() to get the path
+                 * # fill_kobj_path() :
+                 *     traverse all parents in the hierarchy of @kobj,and copy the name into buffer at each
+                 *     iteration.the starting point is @kobj itself
+                 */
+                extern char *kobject_get_path(struct kobject *kobj, gfp_t flag);
+
+              <linux/sysfs.h>
+                /**
+                 * sysfs_create_file - create the attribute file of a given kobject in sysfs
+                 * @kobj:              kobject
+                 * @attr:              attribute
+                 * return:             0 OR error code
+                 * # this routine actually call to sysfs_add_file() with arguments @kobj->sd, @attr,
+                 *   SYSFS_KOBJ_ATTR
+                 * # sysfs_add_file() call to sysfs_add_file_mode() with the file mode @attr->mode
+                 * # sysfs_add_file_mode() will call to sysfs_new_dirent() for create a new directory
+                 *   with @attr->name, (@attr->mode & S_IALLUGO) | S_IFREG, SYSFS_KOBJ_ATTR
+                 *   then call to sysfs_add_one() to add the attribute file
+                int __must_check sysfs_create_file(struct kobject *kobj, const struct attribute *attr);
+
+                /* sysfs_create_files - create several files,NULL as the end of attributes array */
+                int __must_check sysfs_create_files(struct kobject *kobj, const struct attribute **attr);
+
+                /**
+                 * sysfs_create_link - create a symlink
+                 * @kobj:              kobject used to represents the symlink
+                 * @target:            the target link points to
+                 * @name:              name of the symlink
+                 * return:             0 OR error code
+                 * # this routine actually call to sysfs_do_create_link(),which sysfs_new_dirent() for @name,
+                 *   set the s_symlink.target_sd of @sd returned from sysfs_new_dirent() to the sysfs dirent
+                 *   @target->sd,call to sysfs_add_one() to create the symlink
+                 */
+                int __must_check sysfs_create_link(struct kobject *kobj, struct kobject *target, const char *name);
+
