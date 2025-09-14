@@ -25219,6 +25219,29 @@ Chapter 13 : I/O Architecture and Device Drivers
                     void (*release)(struct device *dev);
             };
 
+            ! Memory architecture :
+                Terminology :
+                  Master >
+                    the memory request entity,may be CPU PE or GPU,DMA
+
+                  Consistent >
+                    read/write order between several Master
+
+                    hardware provides mechanism to prevent such problem,the
+                    real protection is hand over to software
+                    (load-acquire / store-release, lock, memory barrier)
+
+                  Coherent >
+                    data consistent between several Master each has its own
+                    cache,if Master A updated data in its cache but have not
+                    write-back it into memory,then Master B read data from memory
+                    unit has the corresponding position will get an expired data
+
+                    hardware provides mechanism to protect such problem,it do not
+                    care about memory,just focus on consistent of caches,and write-back
+                    caches if and only if it is necessary
+                    ! should not disable cache directly,this will downgrade performance
+
             related routines -
 
             /* get_device - atomically increase the reference count for the device */
