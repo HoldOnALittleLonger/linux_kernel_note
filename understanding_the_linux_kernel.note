@@ -24645,7 +24645,7 @@ Chapter 13 : I/O Architecture and Device Drivers
                  SCSI interface(Small Computer System Interface)
                    - a circuit that connects the main PC bus to a secondary bus called the SCSI bus.
                      SCSI-2 bus allows up to eight PCs and external devices.
-                     Wide SCSI-2 and SCSI-3 interfaces allow connec to 16 devices or more if additional
+                     Wide SCSI-2 and SCSI-3 interfaces allow connect to 16 devices or more if additional
                      interfaces are present.
                  Universal serial bus(USB)
                    - a general purpose I/O interface that operates as a high speed and may be used for
@@ -24734,8 +24734,9 @@ Chapter 13 : I/O Architecture and Device Drivers
         Kobjects :
           the core data structure of device driver model is a generic data structure named kobject,each
           kobject corresponds to a directory in sysfs "/sys".
-          ! kobject is embedded inside larger object(container),and it describe the components of the 
-            device driver model.
+          ! kobject is embedded inside larger object(container),and it(the container) describes the components
+            of the device driver model.
+            /* e.g containers: device, bus, driver, ... */
 
           embedding a kobject inside a container allows the kernel to :
             1> keep a reference counter for the container
@@ -24940,7 +24941,7 @@ Chapter 13 : I/O Architecture and Device Drivers
                * @entry:   pointers for the list in which the kobject is inserted
                * @parent:  parent kobjec,if any
                * @kset:    kobject group information,that is the group this kobjec belonging to
-               * @@ktype:  kobjec type descriptor
+               * @ktype:  kobjec type descriptor
                * @sd:      sysfs dentry info
                * @kref:    reference counter
                * @state_initialized:    state initialization indicator
@@ -25142,4 +25143,166 @@ Chapter 13 : I/O Architecture and Device Drivers
                  *   @target->sd,call to sysfs_add_one() to create the symlink
                  */
                 int __must_check sysfs_create_link(struct kobject *kobj, struct kobject *target, const char *name);
+
+      Components of the Device Driver Model :
+        !! THE CORE DRIVER MODEL CODE CAN BE FOUND IN "drivers/base".
+
+        Devices :
+          each device in the device driver model is represented by a "device" object.
+
+          <linux/device.h>
+            /**
+             * device - the device in device driver model
+             * @parent:        parent device
+             * @p:             device private data
+             * @kobj:          kobject
+             * @init_name:     initial name of the device
+             * @type:          device type
+             * @sem:           semaphore to synchronize calls to its driver
+             * @bus:           type of bus that this device hosts on
+             * @driver:        which driver has allocated this device
+             *                 that is the controller of this device
+             * @platform_data: platform specific data,device core does not touch it
+             * @power:         device power management info
+             * @numa_node:     NUMA node number
+             * @dma_mask:      Direct Memory Access mask(if dma'able device)
+             * @coherent_dma_mask:    like dma_mask,but for alloc_coherent mapping
+             *                        as not all hardware supports 64 bit addresses
+             *                        for consistent allocations such descriptors
+             * @dma_parms:     DMA parameters
+             * @dma_pools:     list of aggregate DMA buffers
+             * @dma_mem:       coherent DMA memory used by the device,internal for
+             *                 coherent mem override
+             * @archdata:      architecture specified data
+             * @devt:          major number and minor number of this device.it will
+             *                 appears in "/sys/dev/block" or "/sys/dev/char" used to
+             *                 represents this device
+             * @devres_lock:   device resouce lock
+             * @devres_head:   device resouce list
+             * @knode_class:   class node that corresponds this device
+             * @class:         class of this device
+             * @groups:        attribute groups this device belongs to(optional)
+             * @release:       method to release this device
+             */
+            struct device {
+                    struct device *parent;
+                    struct device_private *p;
+                    struct kobject kobj;
+                    const char *init_name;
+                    struct device_type *type;
+                    struct sempahore sem;
+                    struct bus_type *bus;
+                    struct device_dirver *driver;
+                    void *platform_data;
+                    struct dev_pm_info power;
+
+            #ifdef CONFIG_NUMA
+                    int numa_node;
+            #endif
+
+                    u64 *dma_mask;
+                    u64 coherent_dma_mask;
+                    struct device_dma_parameters *dma_parms;
+                    struct list_head dma_pools;
+                    struct dma_coherent_mem *dma_mem;
+                    
+                    struct dev_archdata archdata;
+                    dev_t devt;
+                    spinlock_t devres_lock;
+                    struct list_head devres_head;
+
+                    struct klist_node knode_class;
+                    struct class *class;
+
+                    const struct attribute_group **groups;
+
+                    void (*release)(struct device *dev);
+            };
+
+            related routines -
+
+            /* get_device - atomically increase the reference count for the device */
+            extern struct device *get_device(struct device *dev);
+
+            /* put_device - atomically decrease the reference count for the device */
+            extern void put_device(struct device *dev);
+
+            /**
+             * device_register - register a device with the system
+             * @dev:             the device is going to be registered
+             * return:           0 OR error code
+             * # EXPORT_SYMBOL_GPL
+             * # this routine call to two separatible but ordered steps,it just a
+             *   wrapper for them.one is device_initialize(),another is device_add().
+             *   this routine returns the ret value of device_add()
+             * # device_initialize() initializes @dev,this routine also get device
+             *   reference count
+             *   device_add() add @dev to device hierarchy,the addings include
+             *     kobject add
+             *     class symlink add
+             *     attributes add
+             *     bus add
+             *     dmp sysfs add
+             *     device pm add
+             *     platform notify add
+             *     create some files
+             *   and creates some necessary files in sysfs filesystem
+             * # _Never_ directly free @dev after calling this function,even if it 
+             *   returned an error!always use put_device() to give up the reference
+             *   initialized in this function instead
+             */
+            extern int __must_check device_register(struct device *dev);
+
+            ! EXPORT_SYMBOL_GPL :
+                device_initialize
+                device_add
+                device_del
+                get_device
+                put_device
+
+            /**
+             * device_unregister - unregister device from system
+             * @dev:               device
+             * # EXPORT_SYMBOL_GPL
+             * # this routine do two steps.one is device_del(),another is put_device()
+             * # device_del() removes the device from the lists we control from here,has
+             *   it removed from the other driver model subsystems it was added to in
+             *   device_add(),and then removes it from kobject hierarchy
+             *   the removing :
+             *     pm remove
+             *     dpm sysfs remove
+             *     parent children remove
+             *     sys dev entry remove
+             *     class symlink remove
+             *     related files remove
+             *     attributes remove
+             *     bus remove
+             *     device resource remove(release)
+             *     platform notify remove
+             *     kobject uevent remove
+             *     kobject remove
+             *     parent ref put
+             *   !! IF CALLED device_add() MANUALLY,THEN SHOULD CALL TO THIS ROUTINE MANUALLY,TOO,
+             *      NOT CALL IT FROM device_unregister()
+             */
+            extern void device_unregister(struct device *dev);
+
+          The devices on the system can be found in "/sys/devices",of course,they are organized hierarchy.
+          some devices may cannot work properly without parent device.
+          /* e.g. PCI-based computer,a bridge computer between PCI bus and USB bus is the parent device of
+           * the devices hosted on USB bus
+           */
+          the parenthood relationship of the kobject embedded in device also reflect the device hierarchy,
+          the structure of the directories below "/sys/devices" matches the physical orgnization of the
+          hardware devices.
+          /* and of course,kref of kobject could be the reference counter of the device */
+
+          about put_device(),it calls to kobject_put(),and which call to kref_put() with kobject_release().
+          kref_put() call to kobject_release(),then it is kobject_cleanup().the destructor in kobject.ktype->release
+          will be called by this function.for the kobject is device_ktype,the destructor is device_release().
+          if @dev->release has defined,then use it to destructor @dev,otherwise,use @dev->type->release,and the
+          last select is @dev->class->dev_release.if no destructor can be called,then kernel printk warnning message.
+          at the end of device_release(),kfree() will be called on @dev->p the device private data.
+
+          
 
