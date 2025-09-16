@@ -25327,5 +25327,181 @@ Chapter 13 : I/O Architecture and Device Drivers
           last select is @dev->class->dev_release.if no destructor can be called,then kernel printk warnning message.
           at the end of device_release(),kfree() will be called on @dev->p the device private data.
 
+        Drivers :
+          drivers in device driver model is represented by a structure named @device_driver.
+          
+          <linux/device.h>
+            /**
+             * device_driver - driver of a device
+             * @name:          name of the driver
+             * @bus:           which bus this driver should attach to
+             * @owner:         module owner,also used as usage counter
+             * @mod_name:      for built-in modules
+             * @suppres_bind_attrs:    disables bind/unbind via sysfs
+             * @probe:         routine used to probe device,called by bus device driver
+             *                 to probe hardware for checks whether the device could
+             *                 possibly be handled by this driver
+             * @remove:        routine used to remove device,hot-pluging or unload
+             * @shutdown:      routine used to shutdown device,power state change
+             * @suspend:       suspend device,power state change
+             * @resume:        resume device,power state change
+             * @groups:        array of attribute groups this device drive belongs to
+             * @pm:            Power Management Operations
+             * @p:             driver private data <drivers/base/base.h>
+             *                   struct kobject kobj;
+             *                   struct klist klist_devices;
+             *                   struct klist_node knode_bus;
+             *                   struct module_kobject *mkobj;
+             *                   struct device_driver *driver;
+             * # reference counter is inclued in @p,it is a member named kobj type of
+             *   kobject
+             * # routine get_driver() and put_driver() used to increase and decrease the
+             *   reference counter,respectively
+             *   struct device_driver *get_driver(struct device_driver *drv); => NULL on error
+             *   void put_driver(struct device_driver *drv);
+             *   (EXPORT_SYMBOL_GPL)
+             */ 
+            struct device_driver {
+                    const char *name;
+                    struct bus_type *bus;
+                    struct module *owner;
+                    const char *mod_name;
+                    bool suppres_bind_attrs;
+                    
+                    int (*probe)(struct device *dev);
+                    int (*remove)(struct device *dev);
+                    void (*shutdown)(struct device *dev);
+                    int (*suspend)(struct device *dev, pm_message_t state);
+                    int (*resume)(struct device *dev);
+                    const struct attribute_group **groups;
+                    const struct dev_pm_ops *pm;
+                    struct driver_private *p;
+            };
+
+            ! usually,device_driver object is embedded in a large object(container).
+
+          <drivers/base/driver.c>
+            /**
+             * driver_register - register a device driver into device driver model
+             *                   hierarchy
+             * @drv:             the device driver
+             * return:           0 OR error code
+             * # EXPORT_SYMBOL_GPL
+             */
+            int driver_register(struct device_driver *drv);
+            
+            brief description for driver_register() :
+              at the beginning,do BUG checking,it is a BUG if @drv->bus->p is NULL.
+              checks methods @probe @remove @shutdown for @drv and @drv->bus,printk
+              KERN_WARNING if either method is implemented both in @drv and @drv->bus,
+              tell user that have to update driver to use methods implemented in @drv->bus_type
+              as instead.
+              next,attempt use @drv->name to find out another such device driver on the bus,
+              we can not register a device driver more than once.
+              if no found,then invoke bus_add_driver() to adds this device driver,return error
+              code if failed.
+              finally,call to driver_add_groups() on @drv and @drv->groups,to group this device
+              driver,bus_remove_driver() if failed.return the returned value to caller.
+
+            /**
+             * driver_unregister - unregister a device driver from device driver model hierarchy
+             * @drv:               the device driver
+             * # EXPORT_SYMBOL_GPL
+             * # driver_remove_groups() and then bus_remove_driver()
+             */
+            void driver_unregister(struct device_driver *drv);
+
+            ! these two routines realy do just a little works,the most is passof to bus-level call.
+
+        Buses :
+          kernel supports several different type of buses,the bus of a specified type is generic
+          represented by structure bus_type.
+
+          <linux/device.h>
+            /**
+             * bus_type - structure used to represent a bus
+             * @name:     name of the bus
+             * @bus_attrs:    attributes of this bus
+             * @dev_attrs:    attributes of devices host on this bus
+             * @drv_attrs:    attributes of drivers that attach to this bus
+             * @match:        checks whether a given driver supports a given driver
+             * @uevent:       userspace event support
+             * @probe:        device probe
+             * @remove:       remove a device from bus
+             * @shutdown:     shutdown a device hosted on this bus
+             * @suspend:      suspend device
+             * @resume:       resume device
+             * @pm:           Power Management Operations
+             * @p:            bus private data <drivers/base/base.h>
+             *                  struct kset subsys
+             *                    - kset that defines this bus
+             *                      corresponds to "/sys/bus/*"
+             *                  struct kset *drivers_kset
+             *                    - drivers attached to this bus
+             *                  struct kset *devices_kset
+             *                    - devices hosted on this bus
+             *                  struct klist klist_devices
+             *                    - iterate over @devices_kset
+             *                  struct klist klist_drivers
+             *                    - iterate @drivers_kset
+             *                  struct blocking_notifier_head bus_notifier
+             *                    - bus notifier list for anything that cares about
+             *                      things on this bus
+             *                  unsigned int drivers_autoprobe:1
+             *                    - automatically probe
+             *                  struct bus_type *bus
+             *                    - pinter back to the struct bus_type object
+             * # entries under devices and drivers directories of this bus in sysfs are symlinks to
+             *   the real device and driver
+             */
+            struct bus_type {
+                    const char *name;
+                    struct bus_attribute *bus_attrs;
+                    struct device_attribute *dev_attrs;
+                    struct driver_attribute *drv_attrs;
+            
+                    int (*match)(struct device *dev, struct device_driver *drv);
+                    int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
+                    int (*probe)(struct device *dev);
+                    int (*remove)(struct device *dev);
+                    void (*shutdown)(struct device *dev);
+
+                    int (*suspend)(struct device *dev, pm_message_t state);
+                    int (*resume)(struct device *dev);
+
+                    const struct dev_pm_ops *pm;
+            
+                    struct bus_type_private *p;
+            };
+
+          ! each device's identifier has a format specific to the bus that hosts the device,
+            @match can simple to checks whether the device's identifier is inclued in
+            driver's supported devices identifier table.
+
+          <drivers/base/bus.c>
+            /**
+             * bus_for_each_dev - iterate devices of a given bus and invoke callback
+             *                    function on them
+             * @bus:              the bus
+             * @start:            device to start iterating from
+             * @data:             data for callback
+             * @fn:               callback
+             * return:            0 OR error code
+             * # EXPORT_SYMBOL_GPL
+             * # checks return value of @fn at each time,break out if any error have
+             *   detected
+             * # device has non-zero return value is not retained in any way,nor is the
+             *   refcount incremated,if caller wants,then it can use callback to retain
+             *   it,and increase refcount in callback
+             */
+            int bus_for_each_dev(struct bus_type *bus, struct device *start,
+                                 void *data, int (*fn)(struct device *, void *));
+
+            /* bus_for_each_drv - similar to bus_for_each_dev(),but this for drivers */
+            int bus_for_each_drv(struct bust_type *bus, struct device_driver *start,
+                                 void *data, int (*fn)(struct device_driver *, void *));
+
+            
+
           
 
