@@ -2005,7 +2005,84 @@ Chapter 3 : Processes
                   struct hlist_node *first;
           };
 
-        methods are similar to list_head's all defined in <linux/list.h>
+          methods are similar to list_head's all defined in <linux/list.h>
+
+        <linux/klist.h>
+          /* some generic list helpers,extending struct list_head a bit */
+
+          /**
+           * klist_node - node of klist,usually embedded in a container
+           * @n_klist:    the klist where this node on
+           * @n_node:     doubly linked list for adjacent klist_node objects
+           * @n_ref:      refcounter of this node
+           */
+          struct klist_node {
+                  void *n_klist;
+                  struct list_head n_node;
+                  struct kref n_ref;
+          };
+
+          /**
+           * klist - klist object
+           * @k_lock:    protection
+           * @k_list:    list implementation
+           * @get:       routine used to get the container which includes
+           *             current klist_node(get refcount)
+           * @put:       routine used to put the container which includes
+           *             current klist_node(put refcount)
+           */
+          struct klist {
+                  spinlock_t k_lock;
+                  struct list_head k_list;
+                  void (*get)(struct klist_node *);
+                  void (*put)(struct klist_node *);
+          } __attribute__ ((aligned(4)));
+
+          /**
+           * klist_iter - klist iterator
+           * @i_klist:    the klist
+           * @i_cur:      current klist node
+           */
+          struct klist_iter {
+                  struct klist *i_klist;
+                  struct klist_node *i_cur;
+          };
+
+          some methods(not complete) :
+            #define KLIST_INIT(_name, _get, _put)
+            #define DEFINE_KLIST(_name, _get _put) \
+                    struct klist _name = KLIST_INIT(_name, _get, _put)
+
+            void klist_init(struct klist *k, void (*get)(struct klist_node *),
+                            void (*put)(struct klist_node *));
+
+            void klist_add_tail(struct klist_node *n, struct klist *k);
+            ...
+
+            /* just put reference counter @n_ref,do not the real unlink */
+            void klist_del(struct klist_node *n);
+            /**
+             * real unlink, may sleep - TASK_UNINTERRUPTIBLE
+             * the method @release of kref structure is set to klist_release().
+             * if the kref of the node @n becomes _zero_,then kref_put() should be
+             * called by kernel control path,then klist_release() will be called to
+             * delete @n and wake up the process called klist_remove() waiting for
+             * deleting
+             */
+            void klist_remove(struct klist_node *n);
+
+            /* is @n attached to a klist object? */
+            int klist_node_attached(struct klist_node *n);
+            
+            void klist_iter_init(struct klist *k, struct klist_iter *i);
+            /* position specified version */
+            void klist_iter_init_node(struct klist *k, struct klist_iter *i,
+                                      struct klist_node *n);
+            void klist_iter_exit(struct klist_iter *i);
+            struct klist_node *klist_next(struct klist_iter *i);
+
+          klist is widely used in Linux Device Driver Model.
+
 
     The process list :
       a list that links together all existing process descriptors.(task_struct.tasks)
@@ -25348,11 +25425,11 @@ Chapter 13 : I/O Architecture and Device Drivers
              * @groups:        array of attribute groups this device drive belongs to
              * @pm:            Power Management Operations
              * @p:             driver private data <drivers/base/base.h>
-             *                   struct kobject kobj;
-             *                   struct klist klist_devices;
-             *                   struct klist_node knode_bus;
-             *                   struct module_kobject *mkobj;
-             *                   struct device_driver *driver;
+             *                   struct kobject kobj
+             *                   struct klist klist_devices
+             *                   struct klist_node knode_bus
+             *                   struct module_kobject *mkobj
+             *                   struct device_driver *driver
              * # reference counter is inclued in @p,it is a member named kobj type of
              *   kobject
              * # routine get_driver() and put_driver() used to increase and decrease the
@@ -25501,7 +25578,82 @@ Chapter 13 : I/O Architecture and Device Drivers
             int bus_for_each_drv(struct bust_type *bus, struct device_driver *start,
                                  void *data, int (*fn)(struct device_driver *, void *));
 
+        Classes :
+          class is described by a structure named class,the corresponding directory for
+          each class in sysfs filesystem is "/sys/class/*".
+          the classes of the device driver model are essentially aimed to provide a
+          standard method for exporting to User Mode applications the interfaces of the
+          logical devices.
+          /* logical device - the device descriptor,which corresponds to a physical device */
+
+          <linux/device.h>
+            /**
+             * class - class of a device
+             * @name:  name of the class
+             * @owner: module owner,includes reference counter
+             * @class_attrs:    attributes of this class
+             * @dev_attrs:      attributes of the device belongs to this class
+             * @dev_kobj:       the kobject object of devices which belongs to this class,
+             *                  the default value is the kobject "char",its correspond
+             *                  directory is "/sys/dev/char",created and added by
+             *                  devices_init() a initialization function
+             * @dev_uevent:     device uevent routine
+             * @devnode:        makeup a string is the path of device node file
+             * @class_release:  release this class
+             * @dev_release:    disconnect the device and this class
+             * @suspend:        suspend method for the device belongs to this class
+             * @resume:         resume device
+             * @pm:             Power Management Operations
+             * @p:              class private data <drivers/base/base.h>
+             *                    struct kset class_subsys
+             *                      - the kset that defines this class
+             *                    struct klist class_devices
+             *                      - devices associated with this class
+             *                    struct list_head class_interfaces
+             *                      - class interfaces associated with this class
+             *                    struct kset class_dirs
+             *                      - "glue" directory for virtual devices
+             *                        associated with this class
+             *                    struct mutex class_mutex
+             *                      - mutex to protect children,devices,and interfaces lists
+             *                    struct class *class
+             *                      - pointer back to the class object
+             */
+            struct class {
+                    const char *name;
+                    struct module *owner;
+                    
+                    struct class_attribute *class_attrs;
+                    struct device_attribute *dev_attrs;
+                    struct kobject *dev_kobj;
+
+                    int (*dev_uevent)(struct device *dev, struct kobj_uevent_env *env);
+                    char *(*devnode)(struct device *dev, mode_t *mode);
+
+                    void (*class_release)(struct class *class);
+                    void (*dev_release)(struct device *dev);
+
+                    int (*suspend)(struct device *dev, pm_message_t state);
+                    int (*resume)(struct device *dev);
+
+                    const struct dev_pm_ops *pm;
             
+                    struct class_private *p;
+            };
 
-          
+          <drivers/base/class.c>
+            /**
+             * class_for_each_device - similar to bus_for_each_dev(),but it is the
+             *                         class specified routine
+             * # EXPORT_SYMBOL_GPL
+             * # do not stores the device descriptor which callback routine failed on,
+             *   if you want it,then you have to take it
+             */
+            int class_for_each_device(struct class *class, struct device *start,
+                                    void *data, int (*fn)(struct device *, void *);
 
+          about class.p->class_devices,the device descriptors in the list may represent
+          the same device,that is a hardware device might includes several different
+          sub-devices,and each of the sub-devices requires a different User Mode interface.
+          ! device drivers for the same class are expected to offer the same functionalities
+            to the User Mode applications.
