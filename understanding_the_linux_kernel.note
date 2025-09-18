@@ -25738,4 +25738,38 @@ Chapter 13 : I/O Architecture and Device Drivers
         /* actually,in Linux 2.6.34.1,the allocated maximum major number is 260 for OSD scsi device */
                 
           
-        
+        Dynamic Device Number Assignment :
+          each device driver specifies in the registration phase the range of device numbers that it is
+          going to handle.the driver can require the allocation of an interval of device numbers withou
+          specifying the exact values.in this case,kernel allocates a suitable range of numbers and
+          assigns them to the driver.
+          so new devices of new device drivers will no longer need an assignment in the official registry
+          of device numbers,simply use whatever numbers are currently available in the system.
+          ! in this way,the device file cannot be created once and forever,it must be created right after
+            the device driver initialization with the proper major and minor numbers.
+          ! Linux provide a way to export device numbers to User Mode,that is sysfs,the "dev" attribute
+            contains major number and minor number.
+
+        Dynamic Device File Creation :
+          Linux kernel can create the device files dynamically,there is no need to fill the /dev directory
+          with the device files of every conceivable hardware device,because the device files can be
+          created "on demand".
+          udev toolset is a set of User Mode programs.at the system startup,directory /dev is emptied,
+          udev program scans /sys/class attempts to find out "dev" files,the file is the "dev" attribute
+          of the device.for each such file,udev a create device file in /dev directory,with a proper file name,
+          and the major number,minor number.it also create symlink if necessary(depends on configure file).
+          the device file can be created after system been initialized,when
+            1> a new module is inserted into kernel,which contains a device driver for the still unsupported
+               device.
+            2> hot-plug event,such a USB peripheral is plugged in the system.
+               because device driver model supports device hotplugging,so udev can create a new device file
+               automatically.
+               /**
+                * Understanding the Linux Kernel,mentioned kernel spawns a new process to executes a User Mode
+                * shell script /sbin/hotplug,passing it any useful information on the discovered device as
+                * environment variable.
+                * the shell script take care of any operation required to complete the initialization of the
+                * new device.
+                * ! but im not find such shell script on my computer.
+                */
+               
