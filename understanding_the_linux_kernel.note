@@ -25657,3 +25657,85 @@ Chapter 13 : I/O Architecture and Device Drivers
           sub-devices,and each of the sub-devices requires a different User Mode interface.
           ! device drivers for the same class are expected to offer the same functionalities
             to the User Mode applications.
+
+      Device Files :
+        Unix-like operating systems are based on the notion of a file,which is just an information
+        container structured as a sequence of bytes.
+        according to this approach,I/O devices are treated as special files called "device files",
+        so the same system calls used to interact with regular files on disk can be used to directly
+        interact with I/O devices.
+
+        Two types of device files :
+          1> block
+               the data of a block device can be addressed randomly,and the time needed to transfer
+               a data block is small and roughly the same
+          2> character
+               the data of a character device either cannot be addressed randomly,or they can be
+               addressed randomly,but the time required to access a random datum largely depends
+               on its position inside the device
+
+          ! network cards are a notable exception,that is they are not directly associated with
+            device files.
+
+        inode of device file do not include a pointer to blocks of data on the disk,instead,it must
+        includes an identifier of a hardware device which associated with this device file.
+        the identifier consists of the type of device file and a pair of numbers(major number and minor number).
+        major :
+          device files have same major number and same type share the same set of file operations,that is these
+          device are managed by the same driver
+        minor :
+          the specific device in the group,all device in this group has the same major number
+
+        ! block device and character device have independent numbering,that is (3, 0) of a block device is 
+          different to (3, 0) of a character device.
+        ! block device,such hard disk
+          character device,such keyboard
+        ! system call mknod() is used to create device file,and in normally,the device files are placed in
+          "/dev"
+           e.g.
+             /dev/null => null device(black hole)
+        ! a device file can associated with a hardware device,or with a physical/logical portion of a
+          hardware device(hard disk partion)
+          in some cases,a device file is not associated with a hardware device,but represents a fictitious
+          logical device,such "/dev/tty0","/dev/null",etc.
+          the name of a device file is irrelevant.(/dev/disk or /tmp/disk,irrelevant,major number and minor
+          number are more important)
+
+      User Mode Handling of Device Files :
+        the official registry of allocated device numbers and "/dev" directory nodes is stored in the text
+        file "Documentation/devices.txt",and the macros are defined in <linux/major.h>.
+        traditionaly,the major number and minor number are represents by a 8-bit unsigned integer,it is not
+        suffice.and in Linux 2.6.34.1 dev_t is typedefed to __u32.
+        the methods to encode and decode device number are defined in <linux/kdev_t.h>.
+        major number is encoded to 12-bit,minor number is encoded to 20-bit.                    
+        Kernel also reserved the 8-bit major number and minor number for compatible to old device files.
+
+        <linux/kdev_t.h>
+          #define MINORBITS 20
+          #define MINORMASK ((1U << MINORBITS) - 1)
+
+          /* extract major number from dev_t value */
+          #define MAJOR(dev) ((unsigned int) ((dev) >> MINORBITS))
+
+          /* extract minor number from dev_t value */
+          #define MINOR(dev) ((unsigned int) ((dev) & MINORMASK))
+
+          /* combine major number and minor number to a single dev_t value */
+          #define MKDEV(ma, mi) ((ma) << MINORBITS | (mi))
+
+          /* old device file compatibility */
+          static inline u16 old_encode_dev(dev_t dev);
+          static inline dev_t old_decode_dev(u16 val);
+
+          /* encode dev_t value to a single u32 value */
+          static inline u32 new_encode_dev(dev_t dev);
+
+          /* decode u32 value to a dev_t value */
+          static inline dev_t new_decode_dev(u32 dev);
+
+        the additional available device numbers are not being statically allocated in the official
+        registry,they should be used only when dealing with unusual demands for device numbers.
+        /* actually,in Linux 2.6.34.1,the allocated maximum major number is 260 for OSD scsi device */
+                
+          
+        
