@@ -21368,7 +21368,8 @@ Chapter 12 : The Virtual Filesystem
           * @i_nlink:   number of hard links
           * @i_uid:     inode user ID
           * @i_gid:     inode group ID
-          * @i_rdev:    real device identifier
+          * @i_rdev:    real device identifier,used for device file,contains the
+          *             major number and minor number of the device
           * @i_blkbits: block size in number of bits
           * @i_version: version number,automatically increased after each use
           * @i_size:    inode size in bytes
@@ -25770,6 +25771,94 @@ Chapter 13 : I/O Architecture and Device Drivers
                 * environment variable.
                 * the shell script take care of any operation required to complete the initialization of the
                 * new device.
-                * ! but im not find such shell script on my computer.
+                * the User Mode program is called when hot-plug event comes can be set in /proc/kernel/hotplug.
+                * ! but im neither find such shell script on my computer nor the hotplug file.
                 */
+
+      VFS Handling of Device Files :
+        VFS can handles regular files and device files,the different between these two is hidden by it.
+        for regular file,it is the data blocks on the disk;for device file,it is the hardware device.
+        when access a regular file,the related file operations are registered by filesystem it hosting.
+        when access a device file,the related file operations are insteaded to device related operations,
+        this is handled by open principle.
+
+        e.g.
+          a device file named devf is hosting on the ext2 filesystem.
+          open the devf
+          read inode on disk through a suitable function of the filesystem (ext2_iget())
+          ext2_iget() find out that devf is a device file,then call to init_special_inode()
+          init_special_inode() set inode's @i_rdev member to the major number and minor number of
+          that device,set @i_fop to the device file operations,@def_blk_fops or @def_chr_fops
+          /* the checking is to test the inode's @i_mode member */
+
+          function do_sys_open() call to do_filp_open(),then it is do_last(),nameidata_to_filp() is
+          called by do_last() later.nameidata_to_filp() will checks if the dentry object corresponding
+          to the file path is whether exist,if it is not,then call to __dentry_open(),and __dentry_open()
+          will use inode's @i_fop to set this file object's @f_op member,so the new file operations
+          for the device file is translated to device related routines.
+
+        <fs/block_dev.c>
+          const struct file_operations def_blk_fops = {
+                  .open = blkdev_open,
+                  .release = blkdev_close,
+                  .llseek = block_llseek,
+                  .read = do_sync_read,
+                  .write = do_sync_write,
+                  .aio_read = generic_file_aio_read,
+                  .aio_write = blkdev_aio_write,
+                  .mmap = generic_file_mmap,
+                  .fsync = blkdev_fsync,
+                  .unlocked_ioctl = block_ioctl,
+          #ifdef CONFIG_COMPAT
+                  .compat_ioctl = compat_blkdev_ioctl,
+          #endif
+                  .splice_read = generic_file_splice_read
+                  .splice_write = generic_file_splice_write,
+          };
+
+        <fs/char_dev.c>
+          const struct file_operations def_chr_fops = {
+                  .open = chrdev_open,
+          };
+
+          ! character device also can be considered to a data stream similar to regular file.
+
+      Device Drivers :
+        a device driver is the set of kernel routines that makes a hardware device respond to the
+        programming interface defined by the canonical set of VFS functions that control a device.
+        the detail is delegated to the device driver,that is different device has different I/O
+        controller,different commands and different state information.
+        /* the mainly differ of device drivers is in the level of support that they offer to the
+         * User Mode applications.
+         */
+
+        a device driver does not consist only of the functions,before using a device driver,several
+        activities must have taken place.
+
+        Device Driver Registration :
+          before using a device driver,must register it at first.that is create an object is type
+          of device_driver structure,insert it into Device Driver Model,associate it with the
+          corresponding device file(s).access to device files whose corresponding drivers have not
+          been previously registered return the error -ENODEV.
+
+          for device driver statically compiled in kernel,its registration is performed during
+          kernel initialization phase.
+          for device driver is implemented in kernel module,its registration is performed when
+          the module is loaded,and unregistered when the module is unloaded.
+
+          function driver_register() is used to register a device driver,when a device driver is
+          being registered,the kernel checks whether the unsupported hardware device could be
+          possibly handled by the driver.this is relies on @match method of bus object and @prove
+          method of the device_driver object.if it is,kernel will bind the device with the driver
+          through driver_bound(),this is happened after succeed on probe.
+          /**
+           * bind driver to device.p->knode_driver
+           * the function is called by really_probe(),which is called by driver_probe_device(),
+           * and it is called by driver_attach().
+           * driver_attach() is called by bus_add_driver() if @drivers_autoprobe is true,this
+           * is default behavior set by bus_register().
+           */
+
+          
+
                
