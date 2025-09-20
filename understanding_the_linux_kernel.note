@@ -769,6 +769,7 @@ Chapter 2 : Memory Addressing
 
       PCD and PWT flags :
         controls the way the page or Page Table is handled by the hardware cache.
+        /* PWT -> writethrough PCD -> cache disable */
 
       Page Size flag :
         Page Directory entry only,if it = 1,then entry refers to a 2MB- or 4MB-long page frame.
@@ -1488,7 +1489,7 @@ Chapter 2 : Memory Addressing
 
         <arch/x86/include/asm/page.h>
         #define __pa(x)  __phys_addr((unsigned long)(x))
-        /*  convert a linear address starting from PAGE_OFFSET to the corresponding physical address  */
+        /*  convert an linear address starting from PAGE_OFFSET to the corresponding physical address  */
 
         #define __va(x)  ((void *)((unsigned long)(x) + PAGE_OFFSET))
         /*  convert a physical address to the corresponding linear address starting from PAGE_OFFSET  */
@@ -25859,6 +25860,172 @@ Chapter 13 : I/O Architecture and Device Drivers
            * is default behavior set by bus_register().
            */
 
-          
+        Device Driver Initialization :
+          device driver is registered as soon as possible,but the initialization at the last
+          possible moment.
+          /* initialization means allocate precious resources of the system */
+          /* IRQ line can be shared with others,the resources allocated at the last possible moment
+           * are page frames for DMA transfer buffers and the DMA channel itself
+           */
 
-               
+          allocate resources when needed,release if they are not requested :
+            > a usage counter keeps track of the number of processes that are currently
+              accessing the device file.increased by open method,decreased by release method.
+            > open method checks the value of the usage counter before the increment.if it is
+              _zero_,the device driver must allocate the resources and enable interrupts and DMA
+              on the hardware device.
+            > release method checks the value of the usage counter after the decrement.if it is
+              _zero_,no more processes are using the hardware device,it disables interrupts and
+              DMA on the I/O controller,then release the allocated resources.
+
+        Monitoring I/O Operations :
+          duration of a hardware device I/O operation is often unpredictable,device driver must 
+          rely on a monitoring technique that signals either the termination of the I/O operation
+          or a time-out.
+            termination :
+              driver reads the status register of the I/O interface to determine whether the I/O
+              operation was carried out successfully.
+              
+            time-out :
+              driver knows that something went wrong,because the maximum time interval allowed to
+              complete the operation elapsed and nothing happened.
+
+          polling mode :
+            similar to spinlock,but CPU polls the device's status register repeatedly until its
+            value signals that the I/O operation has been completed.but for device driver,it is
+            more elaborate,that is driver must also remember to check for possible time-outs.
+
+          interrupt mode :
+            interrupt mode can be used only if the I/O controller is capable of signaling via
+            an IRQ line the end of an I/O operation.
+            /* such press a key on keyboard,I/O controller puts the byte in input register,and
+             * raise a keyboard interrupt
+             */
+            for apply intterupt mode,device driver must provides two routines :
+              read - the read method of the file object
+              interrupt - handles the interrupt
+
+            e.g.
+                    exclusive to the device /* prevent concurrent accessing */
+                    issue read/write command
+                    wait_event_interruptible until interrupt flag becomes 1
+                    put result to User Mode program
+                    release lock
+
+                    /* for the interrupt handler,it read input register,setup the interrupt flag and
+                     * wake up the process
+                     */
+
+                    ! in generally,time-out is implemented through static or dynamic timers,it
+                      must be set to the right time before starting the I/O operation,and removed
+                      after the operation is completed.
+
+        Accessing the I/O Shared Memory :
+          mapping for I/O shared memory is depends on the device,and on the bus type.the physical
+          addresses range is different.
+
+          for most devices connected to the ISA bus :
+            it is usually mapped into the 16-bit physical addresses ranging from 0xa0000 to 0xfffff.
+
+          for devices connected to the PCI bus :
+            it is mapped into 32-bit physical addresses near the 4GB boundary.
+
+          Intel AGP(Accelerated Graphic Port) standard :
+            an enhancement of PCI for high-performance graphic cards.besides having its own I/O shared
+            memory,this kind of card is capable of directly addressing portions of the RAM by a special
+            hardware circuit named Graphic Address Remapping Table(GART).
+            from the kernel's point of view,it does not really matter where the phyrical memory is located,
+            and GART-mapped memory is handled like the other kinds of I/O shared memory.
+
+          kernel programs can only access the linear addresses starting from PAGE_OFFSET(0xc0000000),the
+          fourth gigabyte,thus if the device driver want to access an I/O shared memory location,must
+          translate the physical memory to the proper linear address.
+          macros __pa() and __va() have described in the section "Final Kernel Page Table",__pa() convert
+          an linear address starting from PAGE_OFFSET to the physical address,__va() do the reverse.
+          so before device driver access to I/O shared memory,must use __va() to translate it,of course,make
+          up a mapping for it(I/O shared mapping) at first.in the case linear address is greater than system
+          physical memory,then must make up a mapping for it through noncontiguous memory area,that is the
+          vm_struct descriptor.
+
+          <arch/x86/include/asm/io.h>
+            /**
+             * ioremap_nocache - map bus memory into CPU space without hardware cache,make bus memory CPU
+             *                   accessible via mmio helpers
+             * @offset:          bus address of the memory
+             * @size:            size of the resource to map
+             * return:           remapped linear memory address or NULL
+             * # EXPORT_SYMBOL
+             * # this routine is defined in <arch/x86/mm/ioremap.c>
+             * # this routine is actually call to __ioremap_caller() with _PAGE_CACHE_UC_MINUS
+             */
+            extern void __iomem *ioremap_nocache(resource_size_t offset, unsigned long size);
+
+            /* hardware cached version, _PAGE_CACHE_WB */
+            extern void __iomem *ioremap_cache(resource_size_t offset, unsigned long size);
+
+            /* customize version, @prot_val & _PAGE_CACHE_MASK */
+            extern void __iomem *ioremap_prot(resource_size_t offset, unsigned long size, unsigned long prot_val);
+
+            /* ioremap_nocache() */
+            static inline void __iomem *ioremap(resource_size_t offset, unsigned long size);
+
+            /* unmap io memory */
+            extern void iounmap(volatile void __iomem *addr);
+
+          <arch/x86/mm/ioremap.c>
+            /**
+             * __ioremap_caller - primary routine to remap an arbitrary physical address space into the
+             *                    kernel linear address space,needed when the kernel wants to access
+             *                    high addresses directly
+             * @phys_addr:        I/O shared memory address
+             * @size:             size of I/O shared memory
+             * @prot_val:         protection flags associated with the page table entry 
+             * @caller:           who called this routine,for tracing
+             * return:            mapped and aligned kernel space linear address OR NULL
+             * # this routine do not remap the low PCI/ISA area,it is always mapped
+             */
+            static void __iomem *__ioremap_caller(resource_size_t phys_addr, unsigned long size,
+                                                  unsigned long prot_val, void *caller);
+
+            brief description for __ioremap_caller() :
+              check @phys_addr at first,it can not greater than system physical memory.
+              test valid to @phys_addr,return NULL and print KERN_WARNING, if it is not valid addr.
+              /* if undefined CONFIG_PHYS_ADDR_T_64BIT,phys_addr_valid() will always returns 1. */
+              check if the request spans more than any BAR in the iomem resource tree,print warning
+              if it is.
+              travers pfns starting from @phys_addr to last addr of iomem,return NULL if current
+              address is registered as "System RAM" in iomem_resource list AND current pfn is using
+              AND current page is not for reserve.this checking forbid anybody to remap normal RAM that
+              we are using.
+              do page aligning for @phys_addr and @size,reserve memory type for the aligned @phys_addr
+              and @size with type @prot_val,return NULL if failed to reserve memory type.
+              a local variable named @new_prot_val is used in reserve_memtype(),the routine returns
+              available type without error in the variable.if @prot_val is not equal to @new_prot_val,
+              then attempts use the new type,if the mapping allowed,otherwise,print error message and
+              return error to caller.
+              set local variable @prot to flag PAGE_KERNEL_IO_xxx according to @prot_val,this variable
+              will be used later.
+              attempts to create a new vm_struct descriptor with VM_IOREMAP,retrun error if failed.
+              use @phys_addr to setup the descriptor.
+              call to kernel_map_sync_memtype() with arguments @phys_addr, @size, @prot_val,the routine
+              call to ioremap_change_attr() change the attritbue of the io memory re-mapping with flag
+              @prot_val,return error if failed.
+              call to ioremap_page_range() with arguments @vaddr, @vaddr + @size, @phys_addr, @prot.
+              this routine is defined in <lib/ioremap.c>,it modify Kernel Page Table entries to make
+              the mapping go into effect.
+              finally,returns the address of mapped linear address.
+
+          some architecture-dependent functions used when accessing I/O shared memory :
+            /* they are defined in <arch/x86/include/asm/io.h> */
+            /* these routine no return value */
+            readb(unsigned char *)  readw(unsigned short *)  readl(unsigned int *)
+            writeb(unsigned char)  writew(unsigned short)  writel(unsigned int)
+
+            memcpy_fromio(void *dst, const volatile void __iomem *src, size_t count)
+            memcpy_toio(volatile void __iomem *dst, const void *src, size_t count)
+            memset_io(volatile void __iomem *addr, unsigned char val, size_t count)
+
+            /* readq and writeq for CONFIG_X86_64 */
+
+            /* virt_to_phys - convert virtual address to physical address */
+            static inline phys_addr_t virt_to_phys(volatile void *address);
