@@ -15522,7 +15522,7 @@ Chapter 8 : Memory Management
           structure vmap_area is used to represent virtual area mapping.
           <mm/vmalloc.c>
             /**
-             * vmap_area - structure used to represent mapping of virtual area and linear address
+             * vmap_area - structure used to represent mapping betwenn virtual area and linear address
              * @va_start:  start linear address of the virtual area
              * @va_end:    end linear address of the virtual area
              * @flags:     flags =>
@@ -26017,15 +26017,292 @@ Chapter 13 : I/O Architecture and Device Drivers
 
           some architecture-dependent functions used when accessing I/O shared memory :
             /* they are defined in <arch/x86/include/asm/io.h> */
-            /* these routine no return value */
-            readb(unsigned char *)  readw(unsigned short *)  readl(unsigned int *)
-            writeb(unsigned char)  writew(unsigned short)  writel(unsigned int)
+            unsigned char readb(const volatile void __iomem *addr)
+            unsigned short readw(const volatile void __iomem *addr)
+            unsigned int readl(const volatile void __iomem *addr)
 
-            memcpy_fromio(void *dst, const volatile void __iomem *src, size_t count)
-            memcpy_toio(volatile void __iomem *dst, const void *src, size_t count)
-            memset_io(volatile void __iomem *addr, unsigned char val, size_t count)
+            void writeb(unsigned char val, volatile void __iomem *addr)
+            void writew(unsigned short val, volatile void __iomem *addr)
+            void writel(unsigned int val, volatile void __iomem *addr)
+
+            void memcpy_fromio(void *dst, const volatile void __iomem *src, size_t count)
+            void memcpy_toio(volatile void __iomem *dst, const void *src, size_t count)
+            void memset_io(volatile void __iomem *addr, unsigned char val, size_t count)
 
             /* readq and writeq for CONFIG_X86_64 */
 
             /* virt_to_phys - convert virtual address to physical address */
             static inline phys_addr_t virt_to_phys(volatile void *address);
+
+            #define virt_to_bus virt_to_phys
+            #define bus_to_virt phys_to_virt
+
+          e.g.
+                  unsigned char rdata = '\0';
+                  virt_addr = __va(phys_addr)
+                  data = readb(virt_addr);
+
+                  unsigned char wdata = 's';
+                  high_virt_addr = ioremap(high_phys_addr);
+                  writeb(wdata, high_virt_addr);
+
+        Direct Memory Access(DMA) :
+          on older PC architecture,the CPU is the only "bus master" of the system,that is,
+          it is the only hardware device that drives the address/data bus in order to fetch
+          and store value in the RAM's locations.
+          moder bus architectures such as PCI,each peripheral can act as "bus master",if it
+          provided with the proper circuitry.
+
+          DMA circuit : it can transfer data between the RAM and an I/O device.once activated
+          (auxiliary)   by CPU,it is able to continue the data transfer on its own;issue an
+                        interrupt if the transfer completed.
+          DMA conflicts with CPU :
+            "memory arbiter" detected that CPU and DMA attempt to access the same memory location
+            at the same time.
+
+          Situation that apply DMA :
+            transfer a large number of bytes at once,such disk drivers.
+            /* setup time for DMA is relatively high,use CPU to transfer small datum is better */
+
+          ! DMA for older ISA buses is complex and hard to program,physical memory is 16MB.
+            DMA for PCI and SCSI buses rely on dedicated hardware circuits in the buses,that is
+            less complex than older ISA buses,and easy to program.
+
+          Synchronous and Asynchronous DMA :
+            device driver can use DMA in two different ways,one is synchronous DMA,another is
+            ansynchronous DMA.
+
+            Synchronous DMA : data transfer triggered by processes
+            Asynchronous DMA : data transfer triggered by hardware device
+
+            example for synchronous DMA - process transfer sample data of sound track to sound card's
+                                          DSP(Digital Signal Processor).
+            example for asynchronous DMA - data received by network card,it stores the data in I/O
+                                           shared memory,then issue an interrupt,device driver
+                                           acknowledge it and instruct network card copy data
+                                           to kernel buffer.
+
+          /**
+           * Linux Kernel provides some helper functions for DMA transfers.there are two subset :
+           *   1> subset is architecture independent for PCI devices
+           *   2> subset is both architecture independent and bus independent
+           * the helpers hide the different in the DMA mechanisms of the various hardware architecture.
+           */
+
+          bus addresses :
+            distinguish from logical addresses,linear addresses and physical address,bus addresses used
+            by all hardware device except the CPU to drive the data bus.
+            /* logical,linear,are the same */
+            every DMA transfer involves at least one memory buffer,before activating the transfer,device driver
+            must ensure that the DMA circuit can directly access the RAM locations.
+
+            ! in a DMA operation,the data transfer takes place without CPU intervention,setup must be dealt with
+              by kernel previously.
+            ! in 80x86,but addresses coincide with physical addresses.but some other architecture includes a
+              I/O Memory Management Unit(IO-MMU),analog to paging unit and microprocessor,it maps physical
+              addresses into bus addresses.hardware devices use DMA must setup properly the IO-MMU previously.
+              different bus addresses have different address size,for ISA,it is 24-bit long.(ZONE_DMA,total 16MB)
+
+            <asm-generic/types.h>
+              #ifdef CONFIG_PHYS_ADDR_T_64BIT   /* PAE */
+                      typedef u64 dma_addr_t;   /* represents a generic bus address */
+              #else
+                      typedef u32 dma_addr_t;
+              #endif
+
+            <arch/x86/kernel/pci-dma.c>
+              /**
+               * dma_set_mask - set DMA memory mask for a given device
+               * @dev:          device
+               * @mask:         mask
+               * return:        0 OR -EIO
+               * # EXPORT_SYMBOL
+               * # if device do not support to DMA,then returns -EIO,otherwise
+               *   use @mask to set @dev->dma_mask
+               * # this routine may call to dma_supported() to checks whether current
+               *   device is support DMA
+               */
+              int dma_set_mask(struct device *dev, u64 mask);
+
+              ! function int pci_set_dma_mask(struct pci_dev *, u64) is wrapper to dma_set_mask(),
+                if PCI enabled,otherwise,the routine returns -EIO.
+
+          Cache coherency :
+            cache coherency is hand over to DMA helpers,system architecture does not necessarily offer a coherency
+            protocol between the hardware cache circuit and DMA circuit at hardware level.
+
+            apply two different ways to handle DMA buffers by making use of two different classes of helpers :
+              /* DMA mapping types */
+              1> Coherent DMA mapping(synchronous / consistent)
+                   kernel ensures that there will be no cache coherency problems between the memory and
+                   hardware device - every write operation performed by CPU on a RAM location is immediately
+                   visible to the hardware device,and vice versa(hardware write RAM visible to CPU)
+              2> Streaming DMA mapping(asynchronous / non-coherent)
+                   device driver must take care of cache coherency problems by using the proper
+                   synchronization helpers.
+
+            ! 80x86 architecture no cache coherency problem,hardware devices take care of "snooping"
+              the accesses to the hardware caches.so,the two ways described above essentially equivalent.
+            ! Coherent DMA mapping is mandatory in the case that the buffer is accessed in unpredictable
+              ways by the CPU and the DMA processor.
+              prefer to Streaming DMA mapping if the architecture handle the Coherent DMA mapping is
+              cumbersome and may lower performance.
+
+          Helper functions for Coherent DMA mappings :
+            device driver establish Coherent DMA mapping during initialization phase,and release the mapping
+            and buffer when it is unloaded(as kernel module).
+            
+            <asm-generic/pci-dma-compat.h>
+              /**
+               * pci_alloc_consistent - allocator for consistent memory buffer called by device driver for
+               *                        pci device
+               * @hwdev:                PCI device
+               * @size:                 buffer size
+               * dma_handle:            the corresponding bus address will be stroed in *dma_handle
+               * return:                mapped linear address OR NULL
+               * # this function actually a wrapper to dma_alloc_coherent with GFP_ATOMIC flag
+               * # architecture-independent
+               */
+              static inline void *
+              pci_alloc_consistent(struct pci_dev *hwdev, size_t size, dma_addr_t *dma_handle);
+
+              /* erase mapping and free memory */
+              static inline void
+              pci_free_consistent(struct pci_dev *hwdev, size_t size, void *vaddr, dma_addr_t dma_handle);
+
+            <arch/x86/include/asm/dma-mapping.h>
+              /* architecture-dependent and bus-dependent */
+
+              /**
+               * dma_alloc_coherent - architecture dependent helper used to alloc coherent memory buffer
+               * @dev:                the device who want memory buffer
+               * @size:               size of buffer in bytes
+               * @dma_handle:         bus address for DMA
+               * @gfp:                GFP flags
+               * return:              mapped linear address OR NULL
+               * # This routine may call to struct dma_map_ops.alloc_coherent() do the real allocating,
+               *   the method will be different for iommu and no-iommu artechitecture
+               */
+              static inline void *
+              dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t gfp);
+
+              brief description for dma_alloc_coherent() :
+                get dma_map_ops object of @dev.
+                disable __GFP_DMA and __GFP_HIGHMEM and __GFP_DMA32 in @gfp.
+                call to dma_alloc_from_coherent(),this function is defined in <drivers/base/dma-coherent.c>,
+                it attempt to allocate memory buffer from this device's coherent area;if @dev->dma_mem is NULL,
+                then we can not allocate memory from coherent area,so try alloc_coherent() later.
+                if @dev is NULL,set @dev to @x86_dma_fallback_dev,it is a dummy device for alloc_coherent().
+                call to alloc_coherent(),if it is exit;return NULL if such routine is not exist or the device
+                is not support to DMA.
+                finally,register DMA debug entry and returns the address returned by alloc_coherent().
+                /* if returned address is not NULL,then @dma_handle must stored bus address for the buffer */
+
+              /**
+               * alloc_coherent() of AMD architecture with IOMMU => <arch/x86/kernel/amd_iommu.c>
+               *   get protection_domain for @dev,if the pointer is invalid,then allocates free pages and
+               *   convert the linear address of these pages to physical address,return it in @dma_handle.
+               *   domain is valid,disable __GFP_DMA | __GFP_HIGHMEM | __GFP_DMA32 in @flag,enable __GFP_ZERO in it.
+               *   __get_free_pages(),use virt_to_phys() to get physical address,call to __map_single() to
+               *   enstablish Coherent DMA mapping,return the bus address in @dma_addr if succeed,and return
+               *   linear address to caller.
+               * ! __map_single() is defined in the same file :
+               *     invoke iommu helper iommu_num_pages() to get the number of pages that determined by IOMMU for
+               *     the physical address.
+               *     call to dma_ops_alloc_addresses() to allocate DMA memory area,it will invoke iommu_area_alloc().
+               *     if succeed to allocate memory,then call to dma_ops_domain_map() on each page to maps the memory
+               *     area got by dma_ops_alloc_addresses() to the physical address range.
+               *     finally returns the "@address(from dma_ops_alloc_addresses()) + @paddr & ~PAGE_MASK" to caller,
+               *     this is the bus address.
+               */
+
+              /* dma_free_coherent - erase the Coherent DMA mapping and release the corresponding memory */
+              static inline void dma_free_coherent(struct device *dev, size_t size, void *vaddr, dma_addr_t bus);
+              
+              ! unmap and free pages.
+
+          Helper functions for Streaming DMA mappings :
+            memory buffers for Streaming DMA mappings are usually mapped just before the transfer and unmapped
+            thereafter.but it is also possible to keep the same mapping among several DMA transfers,in this case,
+            developer must take care of hardware cache between the memory and the peripheral.
+
+            handle Streaming DMA mapping :
+              1> allocate pages(memory) from zoned page frame allocator or from the general purpose slab cache.
+              2> call to pci_map_single() or dma_map_single() to establish Streaming DMA mapping.
+              3> after transfer completed,call to pci_unmap_single() or dma_unmap_single() to erase the mapping.
+              ! to prevent cohereny problems,driver must call to pci_dma_sync_single_for_device() or
+                dma_sync_single_for_device() right before string a DMA transfer from the RAM to the device.
+                these two routine will flush hardware cache if necessary.
+                to prevent coherency problems,driver should not access to the memory buffer right after a DMA
+                transfer from the device to RAM completed.before reading,must call to pci_dma_sync_single_for_cpu()
+                or dma_sync_single_for_cpu(),these two routine will invalidate hardware cache if neccesary,so
+                CPU will retrieve data from RAM not the hardware cache.
+              ! for DMA memory buffer is high-mem,should call to pci_map_page() or dma_map_page() to make up
+                an linear address mapping at first,and erase the mapping by call to pci_unmap_page() or
+                dma_unmap_page() after task finished.
+
+            <asm-generic/pci-dma-compat.h>
+              /* wrappers to "dma_" routines */
+
+              /* establish Streaming DMA mapping */
+              static inline dma_addr_t
+              pci_map_single(struct pci_dev *hwdev, void *ptr, size_t size, int direction);
+              
+              /* erase Streaming DMA mapping */
+              static inline void
+              pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr);
+
+              /* prevent coherency from device to RAM */
+              static inline void
+              pci_dma_sync_single_for_cpu(struct pci_dev *hwdev, dma_addr_t dma_handle, size_t size, int direction);
+
+              /* prevent coherency from RAM to device */
+              static inline void
+              pci_dma_sync_single_for_device(struct pci_dev *hwdev, dma_addr_t dma_handle, size_t size, int direction);
+
+              /* map high-mem buffer */
+              static inline dma_addr_t
+              pci_map_page(struct pci_dev *hwdev, struct page *page, unsigned long offset, size_t size, int direction);
+
+              /* unmap high-mem bufffer */
+              static inline void
+              pci_unmap_page(struct pci_dev *hwdev, dma_addr_t dma_address, size_t size, int direction);
+
+            <asm-generic/dma-mapping-common.h>
+              /* architectur-independent and bus-independent */
+
+              #define dma_map_single(d, a, s, r) dma_map_single_attrs(d, a, s, r, NULL)
+              #define dma_unmap_single(d, a, s, r) dmap_unmap_single_attrs(d, a, s, r, NULL)
+
+              /* dma_map_single_attrs - call to dma_map_ops.map_page() for establish a Streaming DMA mapping */
+              static inline dma_addr_t dma_map_single_attrs(struct device *dev, void *ptr, size_t size,
+                                                            enum dma_data_direction dir, struct dma_attrs *attrs);
+
+              /* dma_unmap_single_attrs - call to dma_map_ops.unmap_page() for unmap a Streaming DMA mapping */
+              static inline void dma_unmap_single_attrs(struct device *dev, dma_addr_t addr, size_t size,
+                                                        enum dma_data_direction dir, struct dma_attrs *attrs);
+
+              /**
+               * dma_sync_single_for_cpu - call to dma_map_ops.sync_single_for_cpu() to invalid hardware cache
+               *                           for CPU
+               */
+              static inline void dma_sync_single_for_cpu(struct device *dev, dma_addr_t addr, size_t size,
+                                                         enum dma_data_direction dir);
+
+              /* dma_sync_single_for_device - call to dma_map_ops.sync_single_for_device() to flush hardware cache */
+              static inline void dma_sync_single_for_device(struct device *dev, dma_addr_t addr, size_t size,
+                                                            enum dma_data_direction dir);
+
+              /**
+               * dma_map_page - call to dma_map_ops.map_page() to makeup high-mem linear address mapping and
+               *                establish a Streaming DMA mapping
+               */
+              static inline dma_addr_t dma_map_page(struct device *dev, struct page *page, size_t offset,
+                                                    size_t size, enum dma_data_direction dir);
+            
+              /**
+               * dma_unmap_page - call to dma_map_ops.unmap_page() to erase a Streaming DMA mapping and
+               *                  unmap high-mem linear address mapping
+               */
+              static inline void dma_unmap_page(struct device *dev, dma_addr_t addr, size_t size,
+                                                enum dma_data_direction dir);
