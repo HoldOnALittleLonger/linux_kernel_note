@@ -2715,6 +2715,9 @@ Chapter 3 : Processes
                  cleared => instruction is executed,
                  setted  => raises a "General protection" exception.
 
+             # system call iopl() and ioperm() grant a process the privilege to access I/O ports,
+               but they can be invoked only by root user.
+
         the tss_struct structure describes the format of the TSS :
           <arch/x86/include/asm/processor.h>
             struct tss_struct {
@@ -26306,3 +26309,52 @@ Chapter 13 : I/O Architecture and Device Drivers
                */
               static inline void dma_unmap_page(struct device *dev, dma_addr_t addr, size_t size,
                                                 enum dma_data_direction dir);
+
+      Levels of Kernel Support :
+        Linux does not fully support all possible existing I/O devices,there are three kinds of hardware
+        device about Kernel supporting >
+          1> No support at all
+               the application program interacts directly with the device's I/O ports by issuing
+               suitable "in" and "out" assembly language instructions.
+               /* this approach does not rely on any kernel device driver,such X Window System.
+                * X server is constrained from using the hardware interrupts issued by the I/O device,
+                * and access the required I/O ports by itself.
+                * # no device driver is loaded,application must do-it-yourself.
+                *
+                * recent Linux version has a device file "/dev/fb" which is an abstraction of frame buffer,
+                * application software can access it without needing to know anyting about the I/O ports
+                * of the graphics interface.
+                */
+               /*
+                * DRI(Direct Rendering Infrastructure) :
+                *   if kernel support DRI,then application software can make use of the hardware of
+                *   accelerated 3D graphics card.
+                */
+        
+          2> Minimal support
+               the kernel does not recognize the hardware device,but does recognize its I/O interface.
+               /* this approach is used to handle external hardware devices connected to a general-purpose
+                * I/O interface.
+                * kernel take care of the I/O interface by offering a device file(and thus a device driver).
+                * only the serial port and the parallel port of general-purpose I/O interface can be handled
+                * with this approach.
+                * application should interact with the hardware device through the device file.
+                * this is improper when the external device must interact heavily with internal kernel data
+                * structures.and in some cases,have to come with extended support,such removable hard disk
+                * on general-purpose I/O interface.
+                */
+
+          3> Extended support
+               the kernel recognizes the hardware device and handles the I/O interface itself.
+               /* there might not even be a device file for the device */
+               /* for the hardware device with extended support,kernel have to provides a device driver for
+                * each such device.
+                * external devices attached to the USB,the PCMCIA,or the SCSI - every general-purpose I/O
+                * interface except the serial and the parallel ports also require extended support.
+                */
+
+        ! it is worth nothing that the standard file-related system calls do not always give the application
+          full control of the underlying hardware device.
+          the lowest-common-denominator approach of the VFS does not include some special commands that some
+          devices need or let an application check whether the devices is an a specific internal state.
+          if it is really need to do that,system call ioctl() satisfy the request.
