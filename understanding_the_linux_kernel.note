@@ -26358,3 +26358,188 @@ Chapter 13 : I/O Architecture and Device Drivers
           the lowest-common-denominator approach of the VFS does not include some special commands that some
           devices need or let an application check whether the devices is an a specific internal state.
           if it is really need to do that,system call ioctl() satisfy the request.
+
+      Character Device Drivers :
+        for character device,it is usually do not need buffering strategies and no disk cache involved,so
+        handle it is relatively easy than block device.
+        different character devices have different requirement :
+          > need communication protocl to drive the hardware device
+          > just read I/O ports
+
+        structure named "cdev" is used to represent a character device.
+        <linux/cdev.h>
+          /**
+           * cdev - character device
+           * @kobj: kobject
+           * @owner:    remove proector
+           * @ops:  operations related to character device
+           * @list: list of inodes relative to device files for this chr device
+           * @dev:  initial major and minor numbers assigned to the device driver
+           * @count:    number of consecutive device numbers that this character device
+           *            required,it represents a range [@dev, @dev + @count - 1]
+           * # a character device might has several device files,@list collects the
+           *   inodes of these device files
+           * # device files whose numbers fall in the range(@count) are handled by the same
+           *   character device driver
+           */
+          struct cdev {
+                  struct kobject kobj;
+                  struct module *owner;
+                  const struct file_operations *ops;
+                  struct list_head list;
+                  dev_t dev;
+                  unsigned int count;
+          };
+
+        <fs/char_dev.c>
+          /**
+           * cdev_alloc - allocate and initialize a new cdev descriptor
+           * return:      pointer to the newly allocated object OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine call to kzalloc() with GFP_KERNEL for allocating
+           */
+          struct cdev *cdev_alloc(void);
+
+          /**
+           * cdev_add - add a char device to the system
+           * @p:        char device
+           * @dev:      device number
+           * @count:    range of minor numbers
+           * return:    0 OR -ENOMEM
+           * # EXPORT_SYMBOL
+           * # this routine juse set @p->dev and @p->count then call to
+           *   function kobj_map() with arguments @cdev_map, @dev, @count, NULL,
+           *   @exact_match, @exact_lock, @p
+           * # @cdev_map the global character device kobject mapping domain
+           */
+          int cdev_add(struct cdev *p, dev_t dev, unsigned count);
+
+          /**
+           * cdev_del - remove a cdev from the system
+           * @p:        char device
+           * # EXPORT_SYMBOL
+           * # this routine just call cdev_unmap() and then kobject_put() @p->kobj.
+           */
+          void cdev_del(struct cdev *p);
+
+          /**
+           * cdev_unmap - kobj_unmap() remove a device number range from a predefined
+           *              kobject mapping domain @cdev_map
+           * @dev:        the device number
+           * @count:      device number range
+           */
+          static void cdev_unmap(dev_t dev, unsigned count);
+
+          !! Kobject Mapping Domain
+             - kobject mapping domain used to store the information about device numer range.
+               for the devices of different types,every device type has a corresponding kobject
+               mapping domain.(cdev => @cdev_map,character device kobject mapping domain)
+               ! the Kobject Mapping Domain just introduced for character devices.
+
+                +--> idx : major device number
+                |
+               +-------------------------+
+               | e0 | e1 | e2| ... | e254| /* total 255 elements */
+               +-------------------------+
+                 |
+                 |    @range1 <= @range2 <= @range3 ...    @range := ~0UL
+                 +--> probe1 -> probe2 -> probe3 -> ... -> probeN -> NULL
+                             |                             (dummy probe mark end of list)
+                             +--> @next
+
+             <drivers/base/map.c>
+               /**
+                * kobj_map - kobject mapping domain,defined by Device Driver Model
+                * @probes:    probe array,acts like a hash table,the index is
+                *            the major number of a specified device number range,
+                *            each element is a list of probe objects
+                * @lock:     domain concurrently accessing protection
+                */
+               struct kobj_map {
+                       /**
+                        * probe - kobject domain probe,represent a device number range
+                        * @next:  to next probe,follow @range ascending order
+                        *         ! depends on @range,not @dev
+                        * @dev:   device number
+                        * @range: device number range
+                        * @get:   function used to get the corresponding kobject object
+                        * @lock:  method used to increase the reference counter of 
+                        *         the owner of this probe
+                        *         # for cdev,@exact_lock actually call to cdev_get()
+                        * @data:  probe private data,it is usually the pointer to the
+                        *         probe owner(for cdev,it is the cdev descriptor)
+                        */
+                       struct probe {
+                               struct probe *next;
+                               dev_t dev;
+                               unsigned long range;
+                               struct module *owner;
+                               kobj_probe_t *get;
+                               int (*lock)(dev_t, void *);
+                               void *data;
+                       } *probes[255];
+                       struct mutex *lock;
+               };
+
+               /**
+                * kobj_lookup - routine used to lookup a kobject corresponding to the specified
+                *               device number
+                * @domain:      the domain
+                * @dev:         device number
+                * @index:       the distance between @dev and the starting device number
+                *               of the range that @dev falls in
+                *               # [p, ..., @dev, ...]
+                *                 @p->dev <= @dev AND @p->dev + @p->range - 1 >= @dev
+                *                 @p->dev has the same major number as @dev's,so they at
+                *                 the same position in @domain->probes
+                *                 if @dev falls in the device number range [@p->dev, @p->dev + @p->range - 1],
+                *                 that means,they are in the same array which is allocated by kobj_map()
+                * return:       pointer to the kobject of the device that @dev is belong to it
+                *               (device files whose numbers fall in a specified device number range are handled
+                *                by the same device driver)
+                *               OR
+                *               NULL
+                */
+               struct kobject *kobj_lookup(struct kobj_map *domain, dev_t dev, int *index);
+
+               /**
+                * kobj_map - map a device number range to a given domain
+                * @domain:   the kobject map domain
+                * @dev:      device number
+                * @range:    device number range
+                * @module:   module related to the range
+                * @probe:    routine used to get the actual kobject of the range
+                * @lock:     routine used to increase the refcount of the range owner
+                * @data:     probe private data
+                * return:    0 OR -ENOMEM
+                * # this function will kmalloc() an array of objects are type of struct probe with
+                *   GFP_KERNEL,the number of elements is calculated through @dev and @range(max 255),
+                *   initializes each element use these function parameters.next,use a for-cycle
+                *   to add the newly allocated probe array to the hash table,follow @range
+                *   ascending order
+                */
+               int kobj_map(struct kobj_map *domain, dev_t dev, unsigned long range,
+                            struct module *module, kobj_probe_t *probe,
+                            int (*lock)(dev_t, void *), void *data);
+
+               /**
+                * kobj_unmap - remove the range from the probe hash table of a given kobject domain
+                * @domain:     the domain
+                * @dev:        device number
+                * @range:      device number range
+                * # this routine call to kfree() to deallocate the memory of such array 
+                *   allocated by kobj_map() previously
+                * # this routine traverse whole hash table to unlink each element in the range
+                *   from the hash table,finally,free the array,it is the first found element in
+                *   the hash table
+                */
+               void kobj_unmap(struct kobj_map *domain, dev_t dev, unsigned long range);
+
+               !! NOTE,EACH ELEMENT IN THE RANGE IS LINKED TO DIFFERENT POSITION IN kobj_map.probes,
+                  THE POSITION IS CALCULATED THROUGH "@device number % 255",MEMBER NAMED @next
+                  IS USED TO LINK THEM TO THE PROPER POSITION IN THE HASH TABLE.
+
+               ! another routine is kobj_map_init(),it require two parameters @base_probe for probe.@get
+                 and @lock for kobj_map.lock,creates a new kobj_map object,and use base probe to
+                 initialize it,return the pointer to caller.(return NULL if error)
+                 /* base probe : @range is ~0UL,@next is NULL */
