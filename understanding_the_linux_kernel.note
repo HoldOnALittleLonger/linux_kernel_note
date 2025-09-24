@@ -26392,6 +26392,9 @@ Chapter 13 : I/O Architecture and Device Drivers
           };
 
         <fs/char_dev.c>
+          /* cdev operation lock,used by chrdev_open(),cd_forget(),cdev_purge(),and etc. */
+          static DEFINE_SPINLOCK(cdev_lock);
+
           /**
            * cdev_alloc - allocate and initialize a new cdev descriptor
            * return:      pointer to the newly allocated object OR NULL
@@ -26543,3 +26546,159 @@ Chapter 13 : I/O Architecture and Device Drivers
                  and @lock for kobj_map.lock,creates a new kobj_map object,and use base probe to
                  initialize it,return the pointer to caller.(return NULL if error)
                  /* base probe : @range is ~0UL,@next is NULL */
+
+        Assigning Device Numbers :
+          an array @chrdevs is type of struct char_device_struct * is defined in <fs/char_dev.c>.
+          kernel use it to keep track of device numbers currently assigned.the index of that array
+          is hashed by major number.
+          each element is a collision list _ordered_ by increasing major and minor numbers,the devices
+          have the same major numbers can share the same entry in the hash table,but minor numbers of
+          the devices cannot overlap.
+
+          <fs/char_dev.c>
+            /**
+             * chrdevs - array acts like a hashtable used by kernel to keep track of device numbers
+             *           been assigned to character devices
+             *           character devices have the same major number can share the same entry,but
+             *           minor numbers can not overlap
+             * char_device_struct - entry for character device in the hashtable @chrdevs
+             * @next:               to next entry
+             * @major:              major number
+             * @baseminor:          starting of minor number
+             * @minorct:            maximum range of minor number
+             * @name:               entry name
+             * @cdev:               the character device corresponding to this entry
+             */
+            static struct char_device_struct {
+                    struct char_device_struct *next;
+                    unsigned int major;
+                    unsigned int baseminor;
+                    int minorct;
+                    char name[64];
+                    struct cdev *cdev;
+            } *chrdevs[CHRDEV_MAJOR_HASH_SIZE]; /* <linux/fs.h> : #define CHRDEV_MAJOR_HASH_SIZE 255 */
+
+            static DEFINE_MUTEX(chrdevs_lock); /* lock for @chrdevs */
+
+            ! attention,cdev inserted into this hash table is not means the character device been added
+              into system,device driver must call to cdev_add() manually for add the character device.
+
+            static inline int major_to_index(int major)
+            {
+                    return major % CHRDEV_MAJOR_HASH_SIZE;
+            }
+
+            /**
+             * register_chrdev_region - register "a range of device numbers",that is add the range to
+             *                          the hash table @chrdevs
+             * @from:                   where to start
+             * @count:                  maximum range
+             * @name:                   entry name 
+             * return:                  0 OR error code
+             * # range of device number,not only of major number or of minor number
+             * # this routine iterate device number in the range [@from, @from + @count - 1],for each
+             *   device number,call to __register_chrdev_region() attempt to add the range to
+             *   hash table;undo the operation if failed
+             * # the calling to __register_chrdev_region() is like this
+             *           __register_chrdev_region(MAJOR(n), MINOR(n), next - n, name);
+             *   in this,@n is iterator,@next is the next device number,for @n to @from + @count,
+             *   @next can not greater than @from + @count (@next := MKDEV(MAJOR(n) + 1, 0))
+             *   the region : [(@from, 0) (@from + 1, 0) (@from + 2, 0) ... ]
+             *                 |          |            |              |
+             *                 |          +-------> interval <--------+
+             *                 |                       |
+             *                 +-----> interval <------+
+             *   thus,for each interval,__register_chrdev_region() is be called once to register it
+             */
+            int register_chrdev_region(dev_t from, unsigned count, const char *name);
+            
+            /**
+             * __register_chrdev_region - helper for register character device region of device numbers
+             * @major:                    major number
+             * @baseminor:                base minor number
+             * @minorct:                  minor number range
+             * @name:                     entry name
+             * return:                    pointer of newly allocated char_device_struct object OR error code
+             * # this routine handles two different cases :
+             *     1> @major == 0 => dynamically allocate a major and return its number
+             *        - traverse hash table from end to start,try to find out a NULL entry,
+             *          use the its index as the major number,
+             *          so the device number information is {0, @baseminor, @minorct, @name}
+             *          attempt to add the region to hash table 
+             *     2> @major > 0  => attempt to reserve the passed range of minors and return zero on success
+             *        - add a specified region to hash table
+             *   whatever the case is,this routine must travers the collision list of entries at the index
+             *   @major number of the hash table to find out a proper position for inserting
+             *   if conflict detected,return -EBUSY means the region have been using by someone
+             * # overlap 
+             *           old_min := old->baseminor
+             *           old_max := old->baseminor + old->minorct - 1
+             *           new_min := @baseminor
+             *           new_max := @bseminor + minorct - 1
+             *   it is OVERLAP if
+             *     (nex_max >= old_min && new_max <= old_max) || (new_min <= old_max && new_min >= old_min)
+             * # function use kzalloc() to allocate new entry,deallocate it if failed on inserting
+             */
+            static struct char_device_struct *
+            __register_chrdev_region(unsigned int major, unsigned int baseminor, int minorct, const char *name);
+
+            /**
+             * unregister_chrdev_region - remove entries of specified range of device number from hash table
+             * @from:                     where to start
+             * @count:                    maximum range
+             * # this routine iterate device numbers in [@from, @from + @count - 1],for each device number,
+             *   invoke __unregister_chrdev_region() to remove it,and kfree the allocated memory previously
+             *   in __register_chrdev_region()
+             * # helper __unregister_chrdev_region() do the reverse to __register_chrdev_region()
+             *   (remove and link remains,then returns the pointer to the object)
+             */
+            void unregister_chrdev_region(dev_t from, unsigned count);
+
+            /**
+             * alloc_chrdev_region - register a range of character device numbers,the major number will be
+             *                       chosen dynamically
+             * @dev:                 pointer used to return the start of dynamically allocated device number
+             *                       range
+             * @baseminor:           base minor number
+             * @count:               maximum range
+             * @name:                entry name
+             * # this routine actually call to __register_chrdev_region() with arguments
+             *     _zero_, @baseminor, @count, @name
+             *   no any kind of cycles involve,@dev will set to MKDEV(@cd->major, @cd->baseminor)
+             *                                                ! @cd is the return value of helper
+             */
+            int alloc_chrdev_region(dev_t *dev, unsigned baseminor, unsigned count, const char *name);
+
+            /**
+             * __register_chrdev - create and register a cdev occupying a range of minors
+             * @major:             major number or _zero_
+             * @baseminor:         base minor number
+             * @count:             maximum range
+             * @name:              name of this range of devices
+             * @fops:              file operations associated with this devices
+             * return:             0 OR error code
+             * # steps that this routine will process :
+             *     1> __register_chrdev_region
+             *     2> cdev_alloc
+             *     3> setup cdev
+             *          @cdev->onwer := @fops->owner
+             *          @cdev->ops := @fops
+             *          kobject_set_name(&@cdev->kobj , "%s", @name)
+             *     4> cdev_add
+             *     5> set @cd->cdev to @cdev
+             *        # @cd is returned in step 1>
+             *     6> return to caller
+             *        # if @major is _zero_,then returns the dynamically allocated
+             *          major number or error code
+             *          if @major is a postive numbers,then return 0 OR error code
+             */
+            int __register_chrdev(unsigned int major, unsigned int baseminor, unsigned int cout,
+                                  const char *name, const struct file_operations *fops);
+
+            /**
+             * __unregister_chrdev - unregister a character device which is registered by
+             *                       __register_chrdev(),of couse cdev_del() if necessary
+             * # kfree() the char_device_struct object allocated previously in __register_chrdev()
+             */
+            void __unregister_chrdev(unsigned int major, unsigned int baseminor, unsigned int count,
+                                     const char *name);
