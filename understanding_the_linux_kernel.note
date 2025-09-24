@@ -26702,3 +26702,6 @@ Chapter 13 : I/O Architecture and Device Drivers
              */
             void __unregister_chrdev(unsigned int major, unsigned int baseminor, unsigned int count,
                                      const char *name);
+
+            ! header <linux/fs.h> defined two static function,register_chrdev() and unregister_chrdev(),
+              they are wrappers for __register_chrdev() and __unregister_chrdev(),respectively.
