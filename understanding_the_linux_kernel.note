@@ -26406,6 +26406,21 @@ Chapter 13 : I/O Architecture and Device Drivers
           struct cdev *cdev_alloc(void);
 
           /**
+           * cdev_init - initializes character device descriptor with specified
+           *             file operations
+           * # EXPORT_SYMBOL
+           */
+          void cdev_init(struct cdev *cdev, const struct file_operations *fops);
+
+          /**
+           * cdev_index - get index of the cdev of a given inode in the
+           *              Kobject Mapping Domain
+           * return:      -1 if not registered
+           * # EXPORT_SYMBOL
+           */
+          int cdev_index(struct inode *inode);
+
+          /**
            * cdev_add - add a char device to the system
            * @p:        char device
            * @dev:      device number
@@ -26597,6 +26612,7 @@ Chapter 13 : I/O Architecture and Device Drivers
              * @count:                  maximum range
              * @name:                   entry name 
              * return:                  0 OR error code
+             * # EXPORT_SYMBOL
              * # range of device number,not only of major number or of minor number
              * # this routine iterate device number in the range [@from, @from + @count - 1],for each
              *   device number,call to __register_chrdev_region() attempt to add the range to
@@ -26648,6 +26664,7 @@ Chapter 13 : I/O Architecture and Device Drivers
              * unregister_chrdev_region - remove entries of specified range of device number from hash table
              * @from:                     where to start
              * @count:                    maximum range
+             * # EXPORT_SYMBOL
              * # this routine iterate device numbers in [@from, @from + @count - 1],for each device number,
              *   invoke __unregister_chrdev_region() to remove it,and kfree the allocated memory previously
              *   in __register_chrdev_region()
@@ -26664,6 +26681,7 @@ Chapter 13 : I/O Architecture and Device Drivers
              * @baseminor:           base minor number
              * @count:               maximum range
              * @name:                entry name
+             * # EXPORT_SYMBOL
              * # this routine actually call to __register_chrdev_region() with arguments
              *     _zero_, @baseminor, @count, @name
              *   no any kind of cycles involve,@dev will set to MKDEV(@cd->major, @cd->baseminor)
@@ -26679,7 +26697,8 @@ Chapter 13 : I/O Architecture and Device Drivers
              * @name:              name of this range of devices
              * @fops:              file operations associated with this devices
              * return:             0 OR error code
-             * # steps that this routine will process :
+             * # EXPORT_SYMBOL
+             * # steps this routine will process :
              *     1> __register_chrdev_region
              *     2> cdev_alloc
              *     3> setup cdev
@@ -26700,6 +26719,7 @@ Chapter 13 : I/O Architecture and Device Drivers
             /**
              * __unregister_chrdev - unregister a character device which is registered by
              *                       __register_chrdev(),of couse cdev_del() if necessary
+             * # EXPORT_SYMBOL
              * # kfree() the char_device_struct object allocated previously in __register_chrdev()
              */
             void __unregister_chrdev(unsigned int major, unsigned int baseminor, unsigned int count,
