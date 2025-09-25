@@ -21397,7 +21397,9 @@ Chapter 12 : The Virtual Filesystem
           *             where this file is mapped
           * @i_data:    saved inode mapping address space
           * @i_dquot:   quota system supporting
-          * @i_devices: list of inodes relative to a specific character or block device
+          * @i_devices: list of inodes relate to a device
+          *             # for example,the character device,this member is added into
+          *               the list cdev.list
           * @i_pipe:    pipe specific
           * @i_bdev:    block device driver
           * @i_cdev:    character device driver
@@ -25823,7 +25825,7 @@ Chapter 13 : I/O Architecture and Device Drivers
         <fs/char_dev.c>
           const struct file_operations def_chr_fops = {
                   .open = chrdev_open,
-          };
+          }; /* other methods should be implemented by device driver */
 
           ! character device also can be considered to a data stream similar to regular file.
 
@@ -26705,3 +26707,62 @@ Chapter 13 : I/O Architecture and Device Drivers
 
             ! header <linux/fs.h> defined two static function,register_chrdev() and unregister_chrdev(),
               they are wrappers for __register_chrdev() and __unregister_chrdev(),respectively.
+
+        Accessing a Character Device Driver :
+          the file operation @def_chr_fops have defined open method only,the chrdev_open().the remain
+          methods relate to a specified character device must be setup by the device driver.and
+          routine chrdev_open() will replace the implementation to the file operation of the file
+          object.
+
+          <fs/char_dev.c>
+            /**
+             * chrdev_open - the default open method for character device
+             * @inode:       inode
+             * @filp:        file object of the device file associated with @inode
+             * return:       0 OR error code
+             */
+            static int chrdev_open(struct inode *inode, struct file *filp);
+
+            brief description for chrdev_open() :
+              get @inode->cdev at first,and check if it is NULL.
+              if it is,that means nobody have opened the device.
+              then call to kobj_lookup() to see whether this character device been registered by
+              device driver(mapped it in Kobject Mapping Domain),return -ENXIO if it is not
+              registered.
+              get the cdev which contains the kobject,and check again @inode->i_cdev,maybe some
+              one opened the device when we in kobj_lookup() /* of course,require @cdev_lock for
+                                                              * access to @inode->cdev
+                                                              */
+              if someone been opened it,cdev_get() it,return -ENXIO if failed.
+              if nobody been opened it,assign the cdev got by kobj_lookup() to the @inode's cdev member,
+              and add @i_devices to this cdev's inodes list,the @cdev->list.
+              next,cdev_put() the new cdev,and replace @filp->f_ops with the cdev's @ops,return -ENXIO,if
+              device driver did not implement device methods(@cdev->ops == NULL).
+              if @open method is implemented,then open this device,return -ENXIO if failed on open.
+              finally,return _zero_ to caller.
+
+        Buffering Strategies for Character Devices :
+          for character device,there will are two behaviors about data transfer.
+          one is few bytes at once,do not use DMA.
+          another is a block of data at once,use DMA.
+          
+          in the first case,it do not need to buffer data,the time of CPU read data from I/O port
+          and send it to User Mode process address space is lower cost.interrupt handler can simply
+          read data and acknowledge to device,and interrupt service routine send it to the process
+          later.
+
+          in the second case,such sequential devices,device driver must be able to cope with this
+          avalanche of data in all possible situations,even when the CPU is temporarily busy
+          running some other process.
+            solution :
+              combine two different techniques >
+                1> DMA for block of data
+                2> circular buffer of two or more elements
+                   /* for example,the double buffering of a display card */
+                   /* after DMA completed,shift index for next I/O operation,
+                    * release buffer after the data transfered to User Mode process,and 
+                    * shift index again if necessary
+                    */
+
+            ! buffer handling for sequential devices is easy because the same buffer is
+              never reused.(no retransmit request)
