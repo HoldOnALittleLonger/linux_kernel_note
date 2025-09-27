@@ -26786,3 +26786,149 @@ Chapter 13 : I/O Architecture and Device Drivers
 
             ! buffer handling for sequential devices is easy because the same buffer is
               never reused.(no retransmit request)
+
+
+Chapter 14 : Block Device Drivers
+    Block Devices Handling :
+      Kernel Components Affected By a Block Device Operation >
+                                  I/O Request
+                                       |
+                                       V
+                                      VFS
+                                      | |
+                      +---------------+ |
+                      |                 |
+                      V                 |
+                      Disk Caches       |
+                          |             V                      
+                          +------>Disk Filesystem /* Mapping Layer */
+                                        |
+                                        V
+                                Generic Block Layer
+                                        |
+                                        V
+                                I/O Scheduler Layer /* sort AND group I/O operations to improve performance */
+                                        |
+                                        V
+                                Block Device Driver /* operate block device controller */
+                                        |
+                                        V
+                                    Hard Disk
+
+      Mapping Layer does :
+        1> determines the block size of the filesystem including the file cand
+           computes the extent of the requested data in terms of "file block numbers".
+        2> invokes a filesystem-specified function that accesses the file's disk inode
+           and determines the position of the requested data on disk in terms of 
+           "logical block numbers".
+
+        ! if I/O request was done on a raw block device,mapping layer does not invoke
+          a filesystem-specific method;rather,it translates the offset in the block
+          device file to a position inside the disk.
+
+      Generic Block Layer :
+        start the I/O operations.because the blocks of the file might not adjacent on disk,
+        thus it have to issues several block I/O operations,each of them is represented
+        by a structure "bio, BlockI/O".
+        /* almost all block devices are disks */
+
+      Chunks of Disk Data :
+        sector - block device controller transfer data in chunks of fixed length
+        block  - VFS,mapping layer,and filesystem group the disk data in logical
+                 units called "blocks",it corresponds to the minimal disk storage
+                 unit inside a filesystem
+        segment - each segment is a memory page - or a portion of a memory page,which
+                  including chunks of data that are physically adjacent on disk
+        page - disk data in disk cache fits in a page frame
+        
+        ! Generic Block Layer should to knows all kind of chunks.
+
+      Layout of Chunks :
+        even there are several kind of chunks,they usually share the same physical RAM cells.
+
+          +------------+
+          |block buffer|-> minimal disk storage unit
+          +------------+
+          |            |
+          V            V  {block buffer}  {block buffer}  {block buffer}
+        [ Sector, Sector, Sector, Sector, Sector, Sector, Sector, Sector ] => Page 4kB
+          |512B|          |                                            |
+                          V                                            V
+                          +--------------------------------------------+
+                          |                 Segment                    |
+                          +--------------------------------------------+
+                          |
+                          +--> adjacent disk data
+
+    Sectors :
+      hard disks and similar devices transfer several adjacent bytes at once to improve performance,
+      that is because disk seek will cost a lot of times to the position where the request data is
+      stored.
+      sector : each data transfer operation for a block device acts on a group of adjacent bytes.
+               such group is a sector,and in general,the size of a sector is 512 bytes.(depend on the device)
+               sector as the basic unit of data transfer,can not be splited.
+      /* the hard disk controller accepts commands that refer to the disk as a large array of sectors. */
+
+      ! Linux use 512B as the sector size,if the device uses larger sector size,then device driver should
+        handle conversion.
+      ! position of a group data stored on a disk is identified by the index of its first sector and
+        its length as number of 512B sectors.
+
+      /* <linux/types.h> : typedef u64 sector_t; // sector number */
+
+    Blocks :
+      block is the basic unit of data transfer for the VFS and,consequently,for the filesystems.in Linux,
+      size of a block must be a power of 2 and cannot greater than the size of a page frame,moreover,it
+      must be a multiple of the sector size.
+      block size is not specific to the hard disk device,because hard disk I/O controller use sector as the
+      basic unit.
+      several disk partitions maybe make use of different block sizes,it depends on the filesystem of
+      that disk parition.
+      /* "raw" access on a disk device will bypass disk based filesystem,kernel executes it by using blocks
+       * of largest size(4096bytes)
+       */
+
+      each block has its own block buffer in RAM,where stored the content of this block.read operation read
+      disk data and fill the buffer;write operation updates the content of block buffer,and hard disk I/O
+      controller read the buffer,update disk records.
+      /**
+       * buffer_head - structure contains all the information needed by the kernel to know how to
+       *               handle the buffer
+       * @b_page:      pointer to struct page,the page this buffer head mapped to
+       * @b_data:      pointer to char,data with in the page
+       *               # if @b_page in high-memory,this field stores the offset of the block buffer inside
+       *                 the page;otherwise,it is the starting linear address of the block buffer
+       * @b_blocknr:   sector_t,start block number,the logical block number
+       * @b_bdev:      pointer to struct block_device,the block device using this buffer head
+       */
+
+    Segments :
+      in almost all cases,the data transfer is directly performed by the disk controller with a DMA operation.
+      the data transferred by a single DMA operation must belong to sectors that are adjacent on disk.
+      /* physical constraint :
+       *   a disk controller that allows DMA transfers to non-adjacent sectors would have a poor transfer rate,
+       *   disk seek is quite a slow operation.
+       */
+
+      simple DMA operation :
+        data is transferred from or to memory cells that are physically contiguous in RAM.
+        /* older block device */
+      scatter-gather DMA transfers :
+        data can be transferred from or to several noncontiguous memory areas.
+        /* newer block device */
+        ! device driver must tell block device controller :
+            1> the initial disk sector number and the total number of sectors to be transferred
+            2> a list of descriptors of memory areas,each of which consists of an address and
+               a length
+
+      segment - data unit used in scatter-gather DMA transfer.
+                a scatter-gather DMA transfer may involve several segments at once.
+      ! block device driver does not need to know about blocks.
+
+      ! physical segment :
+          for several segments,if the corresponding page frames happen to be contiguous in RAM and
+          the corresponding chunks of disk data are adjacent on disk,Generic Block Layer can merged
+          them into a larger memory area,that is physical segment.                   
+        hardware segment :                                                  
+          on the architecture support IO-MMU,the memory area resulting from this kind of merge operation
+          is called hardware segment.                  (merge operation processed by Generic Block Layer)
