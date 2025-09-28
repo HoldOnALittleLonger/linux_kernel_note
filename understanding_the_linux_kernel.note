@@ -27094,6 +27094,16 @@ Chapter 14 : Block Device Drivers
           /* macro used to traverse segments in the bio from @bi_idx */
           #define bio_for_each_segment(bvl, bio, i) __bio_for_each_segment(bvl, bio, i, (bio)->bi_idx)
 
+          
+          /* slab caches for bio vector
+           * each slab cache will be initialized in init function biovec_init_slabs()
+           */
+          #define BIOVEC_NR_POOLS 6
+          #define BV(x) { .nr_vecs = x, .name = "biovec-"__stringify(x) }
+          struct biovec_slab bvec_slabs[BIOVEC_NR_POOLS] __read_mostly = {
+                  BV(1), BV(4), BV(16), BV(64), BV(128), BV(BIO_MAX_PAGES),
+          };
+
           /**
            * bio_alloc - allocate a bio structure object with specified bio vectors
            * @gfp_mask:  GFP flag mask used to by mempool_alloc()
@@ -27107,9 +27117,9 @@ Chapter 14 : Block Device Drivers
            *   through bioset_create(),memory pool size is BIO_POOL_SIZE 2 defined in <linux/bio.h>.
            *   if necessary,new slab for bioset will be created
            * # member @bvec_pool of structure bio_set is a mempool,and used for allocate bio vector,
-           *   the maximum number of slab cache for biovec is BIOVEC_NR_POOLS 6,initial number of mempools
-           *   of @bvec_pool is BIO_POOL_SIZE
-           * # this routine will set @bio_cnt to 1 if succeed to allocate new bio
+           *   the initial size of memory pool is also BIO_POOL_SIZE
+           * # this routine will set @bio_cnt to 1 if succeed to allocate new bio,and set @bi_destructor
+           *   to bio_fs_destructor()
            */
           extern struct bio *bio_alloc(gfp_t gfp_mask, int nr_iovecs);
 
