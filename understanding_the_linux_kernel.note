@@ -15281,7 +15281,7 @@ Chapter 8 : Memory Management
            * @free:      function to free dynamic memory back to mempool
            * @wait:      wait queue used when the memory pool is empty
            */
-          typedef struct mempool_s {
+          typedef struct mempool_t {
                   spinlock_t lock;
                   int min_nr;
                   int curr_nr;
@@ -26829,7 +26829,7 @@ Chapter 14 : Block Device Drivers
       Generic Block Layer :
         start the I/O operations.because the blocks of the file might not adjacent on disk,
         thus it have to issues several block I/O operations,each of them is represented
-        by a structure "bio, BlockI/O".
+        by a structure "bio, Block I/O".
         /* almost all block devices are disks */
 
       Chunks of Disk Data :
@@ -26932,3 +26932,191 @@ Chapter 14 : Block Device Drivers
         hardware segment :                                                  
           on the architecture support IO-MMU,the memory area resulting from this kind of merge operation
           is called hardware segment.                  (merge operation processed by Generic Block Layer)
+
+    The Generic Block Layer :
+      it handles the requests for all block devices in the system.
+      by make use of its interfaces,the kernel can :
+        1> put data buffers in high memory,address mapped when CPU need to to access buffer,unmapped right
+           after.
+        2> implement "zero-copy"
+           zero-copy : disk data is directly put in the User Mode address space without being copied to
+                       kernel memory first
+        3> manage logical volumes,such as those used by LVM and RAID
+           several disk partitions even on different block devices,can be seen as a single partition.
+        4> can handle the most recent disk controllers,such as large onboard disk caches,enchanced
+           DMA capabilities,onboard scheduling of the I/O transfer requests,...
+
+      The bio Structure :
+        bio,the ongoing I/O block device operation descriptor,it is the core data structure of this layer.
+
+        <linux/bio.h>
+          /**
+           * bio_vec - data vector of bio,that is the segment
+           * @bv_page: data page frame
+           * @bv_len:  data length
+           * @bv_offset:    starting offset from the head of page frame
+           */
+          struct bio_vec {
+                  struct page *bv_page;
+                  unsigned int bv_len;
+                  unsigned int bv_offset;
+          };
+
+          /**
+           * bio - ongoing block device I/O descriptor
+           * @bi_sector:    initial sector number of this bio
+           * @bi_next:      request queue link
+           * @bi_bdev:      block device descriptor
+           * @bi_flags:     status,command,etc
+           * @bi_rw:        bottom bits - READ/WRITE
+           *                top bits - priority
+           * @bi_vcnt:      number of bio vector entities in the array
+           * @bi_idx:       current index into bvl_vec
+           *                this field will be updated to keep track of
+           *                the first segment in the bio that is yet to be
+           *                transferred,if the block device driver cannot
+           *                perform the  whole data transfer with one
+           *                scatter-gather DMA operation
+           * @bi_phys_segments:    number of segments in this bio after
+           *                       physical address coalescing is performed
+           * @bi_size:      residual I/O count
+           * @bi_seg_front_size:    first mergeable segments in this bio
+           * @bi_seg_back_size:     last mergeable segments in this bio
+           * @bi_max_vecs:  max bvl_vecs this bio can hold
+           * @bi_comp_cpu:  completion CPU
+           * @bi_cnt:       pin count
+           *                @bi_cnt == 0,this bio will be destroyed,include
+           *                @bio_vec
+           * @bi_io_vec:    array of struct bio_vec instances,the actual vec list
+           * @bi_end_io:    method invoked at the end of bio's I/O operation
+           *                  typedef void (bio_end_io_t)(struct bio *, int)
+           * @bi_private:   pointer useed by the generic block layer and the I/O
+           *                completion method of the block device driver
+           * @bi_integrity: data integrity
+           * @bi_destructor:    destructor of this bio
+           *                      typedef void (bio_destructor_t)(struct bio *)
+           * @bi_inline_vecs:   one element array of struct bio_vec,used to avoid
+           *                    double allocations for a small number of bio_vecs
+           */
+          struct bio {
+                  sector_t bi_sector;
+                  
+                  struct bio *bi_next;
+                  struct block_device *bi_bdev;
+                  unsigned long bi_flags;
+                  unsigned long bi_rw;
+
+                  unsigned short bi_vcnt;
+                  unsigned short bi_idx;
+                  unsigned int bi_phys_segments;
+                  unsigned int bi_size;
+
+                  unsigned int bi_seg_front_size;
+                  unsigned int bi_seg_back_size;
+                  unsigned int bi_max_vecs;
+                  unsigned int bi_comp_cpu;
+                  atomic_t bi_cnt;
+
+                  struct bio_vec *bi_io_vec;
+                  bio_end_io_t *bi_end_io;
+                  void *bi_private;
+
+          #if defined(CONFIG_BLK_DEV_INTEGRITY)
+                  struct bio_integrity_payload *bi_integrity;
+          #endif
+                  
+                  bio_destructor_t *bi_destructor;
+                  struct bio_vec bi_inline_vecs[0];
+          };
+
+          /* bio flags */
+          BIO_UPTODATE     0   ok after I/O completion
+          BIO_RW_BLOCK     1   RW_HEAD set,and read/write would block
+          BIO_EOF          2   out-out-bounds error
+          BIO_SEG_VALID    3   @bi_phys_segments valid
+          BIO_CLONED       4   does not own data
+          BIO_BOUNCED      5   bio is a bounce bio
+          BIO_USER_MAPPED  6   contains user pages
+          BIO_EOPNOTSUPP   7   not supported OP
+          BIO_CPU_AFFINE   8   complete bio on same CPU as submitted
+          BIO_NULL_MAPPED  9   contains invalid user pages
+          BIO_FS_INTEGRITY 10  fs owns integrity data,not block layer
+          BIO_QUIET        11  make bio quiet
+
+          bio_flagged(bio, flag)  ((bio)->bi_flags & (1 << (flag))
+
+          /* top 4 bits of flags indicate the pool this bio came from */          
+          BIO_POOL_BITS    (4)
+          BIO_POOL_NONE    ((1UL << BIO_POOL_BITS) - 1)
+          BIO_POOL_OFFSET  (BITS_PER_LONG - BIO_POOL_BITS)
+          BIO_POOL_MASK    (1UL << BIO_POOL_OFFSET)
+          BIO_POOL_IDX(bio)  ((bio)->bi_flags >> BIO_POOL_OFFSET)
+
+          /* bio rw flags */
+          /**
+           * bit 0 data direction,TRUE - read from device,FALSE - write to device
+           * bit 1 fail fast device errors
+           * bit 2 fail fast transport errors
+           * bit 3 fail fast driver errors
+           * bit 4 rw-ahead when set
+           * bit 5 barrier
+           *       insert a serialization point in the IO queue,forcing previously
+           *       submitted IO to be completed before this one is issued
+           * bit 6 synchronous I/O hint
+           * bit 7 unplug the device imeediately after submitting this bio
+           * bit 8 metadata request
+           *       used for tracing to differentiate metadata and data IO,may also
+           *       used by I/O scheduler
+           * bit 9 discard sectors
+           *       informs the lower level device that this range of sectors is no longer
+           *       used by the file system,and may thus be freed by the device
+           *       used for flash based storage
+           * bit 10 tell I/O scheduler not to wait for more requests after this one has been
+           *        submitted even if it is a SYNC request
+           */
+          enum bio_rw_flags {
+                  /* must match REQ_* */
+                  BIO_RW,
+                  BIO_RW_FAILFAST_DEV,
+                  BIO_RW_FAILFAST_TRANSPORT,
+                  BIO_RW_FAILFAST_DRIVER,
+                  /* END,must match REQ_* */
+
+                  BIO_RW_AHEAD,
+                  BIO_RW_BARRIER,
+                  BIO_RW_SYNCIO,
+                  BIO_RW_UNPLUG,
+                  BIO_RW_META,
+                  BIO_RW_DISCARD,
+                  BIO_RW_NOIDLE,
+          };
+
+          /* macro used to traverse segments in the bio from @bi_idx */
+          #define bio_for_each_segment(bvl, bio, i) __bio_for_each_segment(bvl, bio, i, (bio)->bi_idx)
+
+          /**
+           * bio_alloc - allocate a bio structure object with specified bio vectors
+           * @gfp_mask:  GFP flag mask used to by mempool_alloc()
+           * @nr_iovecs: number of bio vectors should to be allocated for the bio
+           * return:     pointer to the bio object OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine actually call to bio_alloc_bioset(),and which allocate memory
+           *   through the method mempool_alloc() in @fs_bio_set->bio_pool,@fs_bio_set is
+           *   type of struct bio_set *,member @bio_pool is type of mempool_t *
+           * # @fs_bio_set is defined in <fs/bio.c>,it is allocated in init function init_bio()
+           *   through bioset_create(),memory pool size is BIO_POOL_SIZE 2 defined in <linux/bio.h>.
+           *   if necessary,new slab for bioset will be created
+           * # member @bvec_pool of structure bio_set is a mempool,and used for allocate bio vector,
+           *   the maximum number of slab cache for biovec is BIOVEC_NR_POOLS 6,initial number of mempools
+           *   of @bvec_pool is BIO_POOL_SIZE
+           * # this routine will set @bio_cnt to 1 if succeed to allocate new bio
+           */
+          extern struct bio *bio_alloc(gfp_t gfp_mask, int nr_iovecs);
+
+          /**
+           * bio_put - put bio,destroy it if necessary
+           * @bio:     bio instance
+           * # EXPORT_SYMBOL
+           * # decrease @bio->bi_cnt,call @bio->bi_destructor if refcount becomes _zero_
+           */
+          extern void bio_put(struct bio *bio);
