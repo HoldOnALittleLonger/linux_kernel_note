@@ -27130,3 +27130,286 @@ Chapter 14 : Block Device Drivers
            * # decrease @bio->bi_cnt,call @bio->bi_destructor if refcount becomes _zero_
            */
           extern void bio_put(struct bio *bio);
+
+      Representing Disks and Disk Partitions :
+        a disk is a logical block device that is handled by the generic block layer,usually,it
+        corresponds to a hardware block device.
+        a disk can be a virtual device built upon several physical disk partitions,or a storage
+        area living in some dedicated pages of RAM.
+
+        +--> sda
+        | +--> sda1
+        | |       +--> sda2
+        | |       |
+        | |       |
+        +---------------------------------------------+
+        | part0 | part1 | part2 | part3 | part4 | ... | => logical block device,disk
+        +---------------------------------------------+
+          |       |       |
+          |       |       |
+          |       |       +--> partition 2
+          |       |            (@major, @first_minor + 2)
+          |       |            hd_struct structure
+          |       |            gendisk.part_tbl->part[2]
+          |       |
+          |       +--> partition 1
+          |            (@major, @first_minor + 1)
+          |            hd_struct structure
+          |            gendisk.part_tbl->part[1]
+          |
+          |
+          +--> inavailable
+               used for setup gendisk
+               gendisk structure
+               gendisk.part_tbl->part[0]
+                       |         |
+                       |         +--> *hd_struct[]
+                       |
+                       +--> disk_part_tbl structure
+
+        The gendisk Structure :
+          <linux/genhd.h>
+            /**
+             * gendisk - structure used to represent a disk
+             * @major:   major number of driver
+             * @first_minor:
+             *           the first minor number,it is the MINOR(this disk's device number),
+             *           thus (@major, @first_minor) is the whole block device 
+             * @minors:  maximum number of minors, = 1 for disk that cant be paritioned
+             *           # @major,@first_minor and @minors are input parameters only,
+             *             dont use directly,use disk_devt() and disk_max_parts()
+             * @disk_name:
+             *           name of major driver (DISK_NAME_LEN - 32)
+             * @devnode: method used to returns a string describe device node
+             * @part_tbl:
+             *           disk partitions table
+             * @part0:   the first disk partition
+             * @fops:    device file operations
+             * @queue:   disk request queue
+             * @private_data:
+             *           driver private data
+             * @flags:   disk flags
+             * @driverfs_dev:
+             *           device object of this disk
+             * @slave_dir:
+             *           slave directory
+             * @random:  timing of the disk's interrupts,used by kenrel builti-in random
+             *           number generator
+             * @sync_io: counter of sectors written to disk,used only for RAID
+             * @async_notify:
+             *           async operation notify
+             * @integrity:
+             *           block device integrity
+             * @node_id: NUMA node id
+             */
+            struct gendisk {
+                    int major;
+                    int first_minor;
+                    int minors;
+                    char disk_name[DISK_NAME_LEN];
+                    char *(*devnode)(struct gendisk *gd, mode_t *mode);
+                    struct disk_part_tbl *part_tbl;
+                    struct hd_struct part0;
+                    const struct block_device_operations *fops;
+                    struct request_queue *queue;
+                    void *private_data;
+
+                    int flags;
+                    struct device *driverfs_dev;
+                    struct kobject *slave_dir;
+                    struct timer_rand_state *random;
+
+                    atomic_t sync_io;
+                    struct work_struct async_notify;
+            #ifdef CONFIG_BLK_DEV_INTEGRITY
+                    struct blk_integrity *integrity;
+            #endif
+                    int node_id;
+            };
+
+            /* gendisk flags */
+
+            #define GENHD_FL_REMOVABLE 1
+
+            /* 2 unused */
+
+            #define GENHD_FL_MEDIA_CHANGE_NOTIFY 4
+
+            #define GENHD_FL_CD 8
+
+            #define GENHD_FL_UP 16
+
+            #define GENHD_FL_SUPPRESS_PARTITION_INFO 32
+
+            /* allow extended devt */
+            #define GENHD_FL_EXT_DEVT 64
+
+            #define GENHD_FL_NATIVE_CAPACITY 128
+
+        The disk_part_tbl Structure :
+          a disk_part_tbl object represents the disk partitions table.
+          
+          <linux/genhd.h>
+            /**
+             * disk_part_tbl - disk partitions table
+             * @rcu_head:      table updating RCU
+             * @len:           number of records
+             * @last_lookup:   pointer to the partition which is the result of
+             *                 last lookup operation
+             * @part:          partition record array
+             */
+            struct disk_part_tbl {
+                    struct rcu_head rcu_head;
+                    int len;
+                    struct hd_struct *last_lookup;
+                    struct hd_struct *part[];
+            };
+
+        The block device related device file opeartions :
+          <linux/blkdev.h>
+            /**
+             * block_device_operations - block device operations
+             * @open:                    open the block device file
+             * @release:                 closing the last reference to a block device file
+             * ...
+             * @media_changed:           checking whether the removable media has been changed
+             * @set_capacity:            set disk capacity
+             * @revalidate_disk:         checking whether the block device holds valid data
+             */
+            struct block_device_operations {
+                    int (*open)(struct block_device *, fmode_t);
+                    int (*release)(struct gendisk *, fmode_t);
+                    int (*locked_ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
+                    int (*ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
+                    int (*compat_ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
+                    int (*direct_access)(struct block_device *, sector_t, void **, unsigned long *);
+                    int (*media_changed)(struct gendisk *);
+                    unsigned long long (*set_capacity)(struct gendisk *, unsigned long long);
+                    int (*revalidate_disk)(struct gendisk *);
+                    int (*getgeo)(struct block_device *, struct hd_geometry *);
+                    struct module *owner;
+            };
+
+        The hd_struct Structure :
+          in general,a disk can be splited to several partitions,and the partitions inside a disk
+          are characterized by consecutive minor numbers.this is why structure gendisk has members
+          @first_minor and @minors.
+          generally,the master disk's minor number should be zero,and partition has minor in the range
+          [1, 1 + @minors - 1].
+          the first partition has minor 1,and the second partition has minor 2,...
+
+          for master disk,there should be a device file without number suffixed is exist,such "sda".
+          and for the partitions,there should are several device files such "sda1", "sda2", and so on.
+
+          <linux/genhd.h>
+            /**
+             * hd_struct - structure used to represent a disk partition
+             * @start_sect:
+             *             starting sector number
+             * @nr_sects:  number of secots of this partition
+             * @alignment_offset:
+             *             sector alignment offset
+             * @discard_alignment:
+             *             discard alignment
+             * @__dev:     device object of this partition
+             * @holder_dir:
+             *             directory of holder of this partition in
+             *             device hierarchy
+             * @policy:    policy,1 means read-only,0 otherwise
+             * @partno:    partition number
+             * @make_it_fail:
+             *             make it fail request indicator
+             * @stamp:     time stamp
+             * @in_flight: partition in flight info
+             * @dkstats:   disk stats(__percpu for SMP)
+             * @rcu_head:  Read-Copy-Update mechanism used to update the informations
+             */
+            struct hd_struct {
+                    sector_t start_sect;
+                    sector_t nr_sects;
+                    sector_t alignment_offset;
+                    unsigned int discard_alignment;
+                    struct device __dev;
+                    struct kobject *holder_dir;
+                    int policy;
+                    int partno;
+
+            #ifdef CONFIG_FAIL_MAKE_REQUEST
+                    int make_it_fail;
+            #endif
+
+                    unsigned long stamp;
+                    int in_flight[2];
+
+            #ifdef CONFIG_SMP
+                    struct disk_stats __percpu *dkstats;
+            #else
+                    struct disk_stats dkstats;
+            #endif
+                    
+                    struct rcu_head rcu_head;
+            };
+
+        The alloc_disk() and add_disk() functions :
+          <block/gendisk.c>
+            /**
+             * alloc_disk - allocate a logical disk object
+             * @minors:     maximum number of minors
+             * return:      newly created gendisk object's address
+             *              OR
+             *              NULL
+             * # EXPORT_SYMBOL
+             * # this routine actually call to alloc_disk_node(@minors, -1)
+             */
+            struct gendisk *alloc_disk(int minors);
+
+            /**
+             * alloc_disk_node - allocate a logical disk object from a specified node
+             * @minors:          maximum number of minors
+             * @node_id:         NUMA node id
+             * return:           newly created gendisk object's address OR NULL
+             * # EXPORT_SYMBOL
+             * # this function does the following steps :
+             *     1> kmalloc_node() a gendisk object @disk
+             *     2> if succeed on allocating,then
+             *          init partition stats of @disk->part0,kfree and return NULL if failed
+             *          actually,it call to alloc_percpu() for allocate @disk->part0->dkstats
+             *          use @node_id to set @disk->node_id
+             *          disk_expand_part_tbl() to expand @disk->part_tbl for part0
+             *          set
+             *            @disk->part_tbl->part[0]
+             *            @disk->minors
+             *            @class of device object of @disk to &block_class
+             *            @type of device object of @disk to &disk_type
+             *          init
+             *            @disk's @random
+             *            device object of @disk
+             *            @disk->async_notify with notification handler entity @media_change_notify_thread
+             *     3> return @disk to caller(it is NULL if failed)
+             */
+            struct gendisk *alloc_disk_node(int minors, int node_id);
+
+            /**
+             * add_disk - add partitioning information to kernel list
+             * @disk:     logical disk object
+             * # EXPORT_SYMBOL
+             * # this function does the following steps :
+             *     1> WARN_ON if @minors is not _zero_ but @major and @first_minor are _zero_
+             *        WARN_ON if !@minors AND no GENHD_FL_EXT_DEVT is set
+             *        (@minors == 0 indicates to use ext devt from part0,
+             *         should be accompanied with EXT_DEVT flag)
+             *     2> enable GENHD_FL_UP
+             *     3> call to blk_alloc_devt() to get a device number,return to caller if failed
+             *     4> use the device number to set @devt of device object of @disk
+             *     5> set @major,@first_minor
+             *     6> call to blk_register_region() to register device number range in the
+             *        Kernel Mapping Domain @bdev_map
+             *     7> call to register_disk() to register this logical disk
+             *     8> call to blk_register_queue(),this routine actually register @disk->queue
+             *        to elevator algorithm request queue
+             *     9> bdi_register_dev() to register the backing device info of @queue of @disk
+             *    10> create sysfs link for @disk
+             */
+            void add_disk(struct gendisk *disk);
+
+
