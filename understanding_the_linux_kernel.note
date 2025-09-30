@@ -26989,6 +26989,8 @@ Chapter 14 : Block Device Drivers
            *                @bio_vec
            * @bi_io_vec:    array of struct bio_vec instances,the actual vec list
            * @bi_end_io:    method invoked at the end of bio's I/O operation
+           *                this method usually called by bio_endio(),whose parameter
+           *                @err represents status code,0 means succeed
            *                  typedef void (bio_end_io_t)(struct bio *, int)
            * @bi_private:   pointer useed by the generic block layer and the I/O
            *                completion method of the block device driver
@@ -27412,4 +27414,105 @@ Chapter 14 : Block Device Drivers
              */
             void add_disk(struct gendisk *disk);
 
+      Submitting a Request :
+        the common steps that kernel have to executes for submit a I/O operation to
+        Generic Block Layer :
+          1> allocate new bio object
+          2> set
+               @bi_sector - the initial sector number of the data
+               @bi_size   - number of sectors covering the data
+               @bi_bdev   - address of the block device descriptor
+               @bi_io_vec - initial address of an array of bio_vec data structures(segments)
+               @bi_vcnt   - total number of segments in the bio
+               @bi_rw     - requested operation flags(READ / WRITE)
+               @bi_end_io - address of a completion procedure
+          3> invoke generic_make_request(),the main entry point of Generic Block Layer
+          4> generic_make_request() does :
+               1> checks if @bi_sector is valid.
+                  set BIO_EOF in @bi_flags if invalid,and report error,call bio_endio(),
+                  which updates @bi_size and @bi_sector,then call to @bi_end_io
+               2> get @queue in @bd_disk of the block device descriptor(@bi_bdev)
+               3> call block_wait_queue_running() to check whether the I/O scheduler
+                  currently in use is being dynamically replaced,if it is,then put
+                  current process to sleep until new I/O scheduler started
 
+                  /* !! block_wait_queue_running() been removed in Linux 2.6.34.1,
+                   *    instead,routine __make_request() get request queue through
+                   *    get_request_wait(),which call to get_request(),this routine
+                   *    returned with @queue_lock held,returns NULL if failed to get
+                   *    a free request.
+                   *    if get_request() returned NULL,then get_request_wait() will
+                   *    put @current into TASK_UNINTERRUPTIBLE() and call to io_schedule(),
+                   *    then try again get_request() until we succeed to get a free
+                   *    request.
+                   * # __make_request() is the default value for @make_request_fn.
+                   */
+
+               4> invoke blk_partition_remap() to check whether the block device
+                  refers to a disk partition,if it is,get hd_struct object of the partition
+                  from @bi_bdev
+                  and executes :
+                    1> let @bi_sector += hd_struct.start_sect
+                       /* translate relative sector number of the partition to the
+                        * sector number of whole disk
+                        */
+                    2> set @bi_bdev to @bi_bdev->bd_contains
+                       /* make use of whole disk,not the partition */
+                    ! these two steps will only executed if number of sectors that covering
+                      I/O data is valid AND @bi_bdev is not equal to @bi_bdev->bd_contains
+               5> call to @queue->make_request_fn() to issue an I/O request
+               6> return to caller /* generic_make_request() ended normally */
+
+        And the @queue of gendisk structure is default set to elevator request queue as
+        preceding described,so this I/O request will be served at next elevator started.
+
+        elevator algorithm brief description :
+
+                                    (L -> R AND R -> L)
+                               +--> current position
+                               |
+          L                    |                                           R
+          <---------------------------------------------------------------->
+              |      |             |               |
+              |      |             |               +--> new req2
+              |      |             +--> new req1
+              |      +--> new req4
+              +--> new req3
+
+          if new req is fall into the current sector direction,then queue it in this time.
+          if new req is not fall into the current sector direction,then queue it in next time.
+          
+          the range is [@start sector, maximum sector of current partition]
+          for next time,disk have to seek to the start sector of the first request in the queue.
+          but of course,we can sort the queue to ensure that start sector of first request is the
+          minimum sector number than others in the queue of current disk partition,and the last
+          has the maximum start sector number
+
+          <block/blk-core.c>
+            /**
+             * generic_make_request - main entry point of Generic Block Layer,use to issue
+             *                        block I/O operation request
+             * @bio:                  the onging block I/O operation descriptor
+             * # EXPORT_SYMBOL
+             * # this routine does the following steps :
+             *     1> check @current->bio_list,if it is not NULL,then adds @bio to @bio_list and
+             *        return,that means make_request() is active,we do not need restart it,just
+             *        insert the new request as well
+             *        # adding set @bi_next member
+             *     2> initialize local bio_list object @bio_list_on_stack
+             *        and set @current->bio_list to the address of this local variable
+             *     3> do-while cycle until @bio becomes NULL(@bio as iterator)
+             *          call to __generic_make_request(@bio),it does the works described preceding
+             *          update @bio to next bio in @current->bio_list,if no more,it must be NULL
+             *          # might there is a kernel control path added new bio when we waiting for
+             *            I/O scheduler
+             *     4> reset @current->bio_list to NULL and return
+             */
+            void generic_make_request(struct bio *bio);
+          
+
+          
+
+
+               
+                
