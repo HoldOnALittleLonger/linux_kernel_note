@@ -26065,6 +26065,8 @@ Chapter 13 : I/O Architecture and Device Drivers
             "memory arbiter" detected that CPU and DMA attempt to access the same memory location
             at the same time.
 
+          DMA Drain : drain data from DMA buffers.
+
           Situation that apply DMA :
             transfer a large number of bytes at once,such disk drivers.
             /* setup time for DMA is relatively high,use CPU to transfer small datum is better */
@@ -27509,10 +27511,279 @@ Chapter 14 : Block Device Drivers
              *     4> reset @current->bio_list to NULL and return
              */
             void generic_make_request(struct bio *bio);
-          
 
-          
+    The I/O Scheduler :
+      kernel try to cluster several sectors and handle them as a whole whenever possible,for
+      reducing the average number of head movements.
+      block device request,it essentially describes the requested sectors and the kind of operation
+      to be performed on them.request is not satisfied immediately,but schedule it and will be
+      performed at a later time.
 
+      User Mode process -> open file -> VFS open file -> block device driver -> read inode from disk
+      -> queue request -> request satisfied -> store inode information -> return inode to VFS ->
+      -> VFS create file object -> VFS put the file object to process file table -> sys_open return
+      -> process get a file descriptor
+      /* after process issued the system call,it will be blocked until VFS use the inode to create
+       * a file object,and put it into process file table,and then,sys_open return to User Mode
+       * process
+       * "queue request" => notify I/O scheduler a new I/O operation
+       * "block device driver" => cannot be suspended during waiting for request to be satisfied,if it is,
+       *                          then other process try to access the same disk would be blocked as
+       *                          well,even if it wants to operate a different file
+       */
 
-               
+      for prevent Block Device Driver be suspended,each I/O operation is processed asynchronously,and
+      in particular,the block device driver is interrupt-driven -
+        generic block layer create a new block device request or to enlarge an already existing
+        one and then terminates.block device driver calls the "strategy routine" to select a
+        pending request and satisfy it by issuing suitable commands to disk controller,after
+        disk raised an interrupt,block device driver does some cleaning works,and select next
+        request to satisfy it if necessay.
+
+      request queue : contain the list of pending requests for the device,each block device driver
+                      maintains its own request queue.
+                      if the I/O controller is handling several disks,there is usually one
+                      request queue for each physical block device,and I/O scheduler separately
+                      performed on each request queue.
+
+      Request Queue Descriptors :
+        <linux/blkdev.h>
+          /**
+           * request_queue - queue of I/O operation requests
+           * @queue_head:    head of queue of pending requests,head is a dummy element
+           * @last_merge:    request in the queue to be considered
+           *                 first for possible merging
+           * @elevator:      elevator object
+           * @rq:            the queue request freelist,one for reads(SYNC) and one
+           *                 for writes(ASYNC)
+           *                 this structure has several two elements array and a
+           *                 elevator privilege indicator,and a memory pool pointer
+           *                 the arrays are accessed through index BLK_RW_SYNC - 1
+           *                 and BLK_RW_ASYNC - 0,memory pool @rq_pool is used to
+           *                 allocate request object
+           * @request_fn:    method that implement the entry point for "strategy routine"
+           *                 of device driver
+           * @make_request_fn:
+           *                 method to create a new request
+           * @prep_rq_fn:    method to build the commands to be sent to the hardware
+           *                 device to process this request
+           * @unplug_fn:     method to unplug the block device
+           * @merge_bvec_fn: method to return the number of bytes that can be inserted
+           *                 into an existing bio when adding a new segment
+           * @prepare_flush_fn:
+           *                 method to prepare flush rq
+           * @softirq_done_fn:
+           *                 method to be called after softirq for I/O scheduler is done
+           * @rq_timed_out_fn:
+           *                 method to be called when request timeout
+           * @dma_drain_needed:
+           *                 method to be called when DMA drain needed
+           * @lld_busy_fn:   method to export busy state,lower-level-driver busy function
+           * @end_sector:    sector number of the tail request
+           * @boundary_rq:   the request at queue tail
+           *                 # @end_sector and @boundary_rq are used for dispatch queue sorting
+           * @unplug_timer:  dynamic timer used to perform device plugging
+           * @unplug_thresh: unplug tresh,if the number of pending requests in the queue
+           *                 exceeds this value,the device is immediately unplugged
+           * @unplug_delay:  time delay before device unplugging
+           * @unplug_work:   struct work object used to unplug the device
+           * @backing_dev_info:
+           *                 information about the I/O data flow traffic for the
+           *                 underlying hardware block device
+           *                 e.g.
+           *                   information about read-ahead and about request queue
+           *                   congestion state
+           * @queuedata:     queue private data,owner of the queue can get to use this
+           *                 for whatever they like
+           * @bounce_gfp:    queue needs bounce pages for pages above this limit,
+           *                 gfp flag for allocate bounce pages
+           * @queue_flags:   queue flags
+           * @__queue_lock:  protector for reentrancy,queue private
+           * @queue_lcok:    protect reentrancy
+           *                 # @__queue_lock should _never_ be used directly,it is queue private,
+           *                   use @queue_lock instead
+           * @kobj:          request queue kobject
+           * @nr_requests:   maximum number of requests in the queue
+           * @nr_congestion_on:
+           *                 queue is considered congested if the number of pending requests
+           *                 rises above this threshold
+           * @nr_congestion_off:
+           *                 queue is considered not congested if the number of pending requests
+           *                 falls below this threshold
+           * @nr_batching:   maximum number of pending requests that can be submitted even when
+           *                 the queue is full by a special "batcher" process
+           *                 # usually is 32
+           * @dma_drain_buffer:
+           *                 DMA drain buffer
+           * @dma_drain_size:
+           *                 DMA drain size
+           * @dma_pad_mask:  DMA pad mask
+           * @dma_alignment: DMA alignment
+           * @queue_tags:    bitmap of free/busy tags,used for tagged requests
+           * @tag_busy_list: list of tage in busy
+           * @nr_sorted:     number of sorted requests
+           * @in_fligh:      queue in flight info
+           * @rq_timeout:    request time out threshold
+           * @timeout:       timed-out timers
+           * @timeout_list:  queue timeout list
+           * @limits:        queue limits
+           * @sg_timeout:    user-defined command time-out,used only by SCSI generic devices
+           * @sg_reserved_size:
+           *                 essentially unsed
+           * @node:          NUMA node
+           * @blk_trace:     block device operation tracing
+           *
+           * @ordered:       
+           * @next_ordered:
+           * @ordseq:
+           * @orderr:
+           * @ordcolor:
+           * @pre_flush_rq:
+           * @bar_rq:
+           * @post_flush_rq:
+           * @orig_bar_rq:   these are reserved for flush operations
+           *
+           * @sysfs_lock:    sysfs mutex lock
+           * @bsg_dev:       SCSI Generic block class 
+           */
+          struct request_queue {
+                  struct list_head queue_head;
+                  struct request *last_merge;
+                  struct elevator_queue *elevator;
+
+                  struct request_list rq;
+
+                  request_fn_proc *request_fn;
+                  make_request_fn *make_request_fn;
+                  prep_rq_fn *prep_rq_fn;
+                  unplug_nf *unplug_fn;
+                  merge_bvec_fn *merge_bvec_fn;
+                  prepare_flush_fn *prepare_flush_fn;
+                  softirq_done_fn *softirq_done_fn;
+                  rq_timed_out_fn *rq_timed_out_fn;
+                  dma_drain_needed_nf *dma_drain_needed;
+                  lld_busy_fn *lld_busy_fn;
+
+                  sector_t end_sector;
+                  struct request *boundary_rq;
+
+                  struct timer_list unplug_timer;
+                  int unplug_thresh;
+                  unsigned long unplug_delay;
+                  struct work_struct unplug_work;
+
+                  struct backing_dev_info backing_dev_info;
+
+                  void *queuedata;
+
+                  gfp_t bounce_gfp;
+                  unsigned long queue_flags;
+
+                  spinlock_t __queue_lock;
+                  spinlock_t *queue_lock;
+
+                  struct kobject kobj;
+
+                  unsigned long nr_requests;
+                  unsigned int nr_congestion_on;
+                  unsigned int nr_congestion_off;
+                  unsigned int nr_batching;
+
+                  void *dma_drain_buffer;
+                  unsigned int dma_drain_size;
+                  unsigned int dma_pad_mask;
+                  unsigned int dma_alignment;
+
+                  struct blk_queue_tag *queue_tags;
+                  struct list_head tag_busy_list;
+
+                  unsigned int nr_sorted;
+                  unsigned int in_flight[2];
+
+                  unsigned int rq_timeout;
+                  struct timer_list timeout;
+                  struct list_head timeout_list;
                 
+                  struct queue_limits limits;
+
+                  unsigned int sg_timeout;
+                  unsigned sg_reserved_size;
+                  int node;
+          #ifdef CONFIG_BLK_DEV_IO_TRACE
+                  struct blk_trace *blk_trace;
+          #endif
+
+                  unsigned int ordered, next_ordered, ordseq;
+                  int orderr, ordcolor;
+                  struct request pre_flush_rq, bar_rq, post_flush_rq;
+                  struct request *orig_bar_rq;
+                  struct mutext sysfs_lock;
+          #if defined(CONFIG_BLK_DEV_BSG)
+                  struct bsg_class_device bsg_dev;
+          #endif
+          };
+
+          /* request queue flags */
+
+          /* cluster several segments into 1 */
+          #define QUEUE_FLAG_CLUSTER 0
+
+          /* uses generic tag queueing */
+          #define QUEUE_FLAG_QUEUED 1
+
+          /* queue is stopped */
+          #define QUEUE_FLAG_STOPPED 2
+
+          /* read queue has been filled */
+          #define QUEUE_FLAG_SYNCFULL 3
+
+          /* write queue has been filled */
+          #define QUEUE_FLAG_ASYNCFULL 4
+
+          /* queue beging torn down */
+          #define QUEUE_FLAG_DEAD 5
+
+          /* re-entrancy avoidance */
+          #define QUEUE_FLAG_REENTER 6
+
+          /* queue is plugged */
+          #define QUEUE_FLAG_PLUGGED 7
+
+          /* do not usee elevator,just do FIFO */
+          #define QUEUE_FLAG_ELVSWITCH 8
+
+          /* queue supports bidi requests */
+          #define QUEUE_FLAG_BIDI 9
+
+          /* disable merge attempts */
+          #define QUEUE_FLAG_NOMERGES 10
+    
+          /* force complete on same CPU */
+          #define QUEUE_FLAG_SAME_COMP 11
+
+          /* fake timeout */
+          #define QUEUE_FLAG_FAIL_IO 12
+
+          /* supports request stacking */
+          #define QUEUE_FLAG_STACKABLE 13
+
+          /* non-rotational device (SSD) */
+          #define QUEUE_FLAG_NONROT 14
+
+          /* paravirt device */
+          #define QUEUE_FLAG_VIRT QUEUE_FLAG_NONROT
+
+          /* do IO stats */
+          #define QUEUE_FLAG_IO_STAT 15
+
+          /* supports DISCARD */
+          #define QUEUE_FLAG_DISCARD 16
+
+          /* no extended merges */
+          #define QUEUE_FLAG_NOXMERGES 17
+
+        +-------------------------------------------+
+        | ... | rqN | @queue_head | rq0 | rq1 | ... | => request queue
+        +-------------------------------------------+
+                                    |
+                                    +--> struct request.queuelist
