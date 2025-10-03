@@ -27556,11 +27556,23 @@ Chapter 14 : Block Device Drivers
            * @elevator:      elevator object
            * @rq:            the queue request freelist,one for reads(SYNC) and one
            *                 for writes(ASYNC)
-           *                 this structure has several two elements array and a
-           *                 elevator privilege indicator,and a memory pool pointer
-           *                 the arrays are accessed through index BLK_RW_SYNC - 1
-           *                 and BLK_RW_ASYNC - 0,memory pool @rq_pool is used to
-           *                 allocate request object
+           *                 # requeust_list - free request list
+           *                 # @count:         read rq(s) counter and write rq(s) counter
+           *                 # @starved:       rq starved indicator 0 / 1
+           *                 # @elvpriv:       number of requests that using elevator,not
+           *                 #                 the FIFO
+           *                 # @rq_pool:       memory pool used to allocate rq
+           *                 # wait:           two wait queues for processes sleeping
+           *                 #                 for available READ and WRITE
+           *                 # * @count,@starved,@wait are indexed by BLK_RW_SYNC - 1
+           *                 #   and BLK_RW_ASYNC - 0
+           *                 struct request_list {
+           *                         int count[2];
+           *                         int starved[2];
+           *                         int elvpriv;
+           *                         mempool_t *rq_pool;
+           *                         wait_queue_head_t wait[2];
+           *                 };
            * @request_fn:    method that implement the entry point for "strategy routine"
            *                 of device driver
            * @make_request_fn:
@@ -27749,7 +27761,7 @@ Chapter 14 : Block Device Drivers
           /* queue is plugged */
           #define QUEUE_FLAG_PLUGGED 7
 
-          /* do not usee elevator,just do FIFO */
+          /* do not use elevator,just do FIFO */
           #define QUEUE_FLAG_ELVSWITCH 8
 
           /* queue supports bidi requests */
@@ -27787,3 +27799,305 @@ Chapter 14 : Block Device Drivers
         +-------------------------------------------+
                                     |
                                     +--> struct request.queuelist
+
+      Request Descriptors :
+        each pending request for a block devices is represented by a request descriptor.
+
+        <linux/blkdev.h>
+          /**
+           * request - structure represent an I/O request
+           * @queuelist:
+           *           linked into request_queue.@queue_head
+           * @csd:     IPI data for SMP
+           * @q:       the request queue contains this request
+           * @cmd_flags:
+           *           flags of cmd of this request
+           * @cmd_type:
+           *           request command types
+           * @atomic_flags:
+           *           internal atomic flags for request handling
+           *           # in header <block/blk.h>,only one enumerate
+           *             value is defined REQ_ATOM_COMPLETE = 0
+           * @cpu:     cpu number who handles this request
+           * @__data_len:
+           *           internal field,_never_ access directly
+           *           total data len
+           * @__sector:
+           *           internal field,_never_ access directly
+           *           sector cursor
+           * @bio:     first bio in the request that has not been
+           *           completely transferred
+           * @biotail: last bio in the request list
+           * @hash:    merge hash
+           * @rb_node: this member is only used inside the I/O scheduler,
+           *           requests are pruned when moved to the dispatch queue,
+           *           so let the @completion_data share space with the @rb_node
+           * @completion_data:
+           *           completion data
+           * @elevator_private:
+           *           specific to I/O schedulers
+           * @elevator_private2:
+           *           specific to I/O schedulers
+           * @rq_disk: the target disk this request operate on
+           * @start_time:
+           *           request's starting time in jiffies
+           * @nr_phys_segments:
+           *           number of scatter-gather DMA "addr + len" pairs
+           *           after physical address coalescing is performed
+           *           that is the number of physical segments of this
+           *           request
+           * @ioprio:  I/O priority
+           * @ref_count:
+           *           request reference counter
+           * @special: opaque pointer available for LLD use,used when the
+           *           request includes a "special" command to the hardware device
+           * @buffer:  kaddr of the current segment if available
+           * @tag:     request tag
+           * @errors:  request error status
+           * @__cmd:   packet command carrier,maximum length is BLK_MAX_CDB = 16
+           *           bytes
+           * @cmd:     pointer to @__cmd
+           * @cmd_len: length of @__cmd
+           * @extra_len:
+           *           length of alignment and padding
+           * @sense_len:
+           *           length of buffer pointed by @sense
+           * @resid_len:
+           *           residual count
+           * @sense:   pointer to buffer used for ouput of sense commands
+           * @deadline:
+           *           deadline of this request,it is usually current
+           *           jiffies + @timeout
+           * @timeout_list:
+           *           linked into the timer list of the request queue of
+           *           this request
+           * @timeout: time out value in jiffies
+           * @retries: used by SCSI Generic disk ioctl
+           * @end_io:  request completion callback
+           * @end_io_data:
+           *           callback routine data
+           * @next_rq: the next request
+           * # each request consists of one or more bio structures,initial is
+           *   one created by Generic Block Layer,and I/O scheduler may 
+           *   extend request later by adding a new segment to the original bio,
+           *   or by linking another bio structure into the request(new data is
+           *   physically adjacent to the data already in the request)
+           * # during the request is handling,several members may dynamically
+           *   change,so this structure can be used to record current status
+           */
+          struct request {
+                  struct list_head queuelist;
+                  struct call_single_data csd;
+
+                  struct request_queue *q;
+
+                  unsigned int cmd_flags;
+                  enum rq_cmd_type_bits cmd_type;
+                  unsigned long atomic_flags;
+
+                  int cpu;
+                  unsigned int __data_len;
+                  sector_t __sector;
+                  struct bio *bio;
+                  struct bio *biotail;
+                  struct hlist_node hash;
+                  
+                  union {
+                          struct rb_node rb_node;
+                          void *completion_data;
+                  };
+
+                  void *elevator_private;
+                  void *elevator_private2;
+
+                  struct gendisk *rq_disk;
+                  unsigned long start_time;
+                  unsigned short nr_phys_segments;
+                  unsigned short ioprio;
+                  int ref_count;
+
+                  void *special;
+                  char *buffer;
+                  int tag;
+                  int errors;
+
+                  unsigned char __cmd[BLK_MAX_CDB];
+                  unsigned char *cmd;
+                  unsigned short cmd_len;
+                  unsigned int extra_len;
+                  unsigned int sense_len;
+                  unsigned int resid_len;
+                  void *sense;
+
+                  unsigned long deadline;
+                  struct list_head timeout_list;
+                  unsigned int timeout;
+                  int retries;
+                
+                  rq_end_io_fn *end_io;
+                  void *end_io_data;
+
+                  struct request *next_rq;
+          };
+
+          /* request cmd flags */
+          REQ_RW                        not set,read;set,write
+          REQ_FAILFAST_DEV              no driver retries of device errors
+          REQ_FAILFAST_TRANSPORT        no driver retries of transport errors
+          REQ_FAILFAST_DRIVER           no driver retries of driver errors
+          /* first fours match BIO_RW*,important */
+
+          REQ_DISCARD                   request to discard sectors
+          REQ_SORTED                    elevator knows about this request
+          REQ_SOFTBARRIER               may not be passed by io scheduler
+                                        request acts a barrier for the I/O scheduler
+          REQ_HARDBARRIER               may not be passed by driver either
+                                        request acts a barier for the I/O scheduler
+                                        and the device dirver
+          REQ_FUA                       forced unit access
+          REQ_NOMERGE                   do not touch this for merging
+          REQ_STARTED                   drive already may have started this one
+          REQ_DONTPREP                  dont call prep_rq_fn() for this one
+          REQ_QUEUED                    uses queueing
+          REQ_ELVPRIV                   elevator private data attached
+          REQ_FAILED                    set if the request failed
+          REQ_QUIET                     do not worry about errors
+          REQ_PREEMPT                   set for "ide_preempt" requests
+          REQ_ORDERED_COLOR             is before or after barrier
+          REQ_RW_SYNC                   request is sync w/r
+          REQ_ALLOCED                   request came from alloc pool
+          REQ_RW_META                   metadata io request
+          REQ_COPY_USER                 contains copies of user pages
+          REQ_INTEGRITY                 integrity metadata has been remapped
+          REQ_NOIDLE                    dont anticipate more IO after this one
+          REQ_IO_STAT                   account I/O stat
+          REQ_MIXED_MERGE               merge of differen types,fail separately
+
+          /**
+           * the name prefixed "__" enumerates to these cmd flags are defined in the
+           * same header,they represents the bits of the flags.
+           * for a given cmd flag,it is come from "1UL << __REQ_XXX"
+           */
+
+          /* cmd type bits */
+          enum rq_cmd_type_bits {
+                  /* fs request */
+                  REQ_TYPE_FS = 1,
+
+                  /* scsi command */
+                  REQ_TYPE_BLOCK_PC,
+
+                  /* sense request */
+                  REQ_TYPE_SENSE,
+
+                  /* suspend request */
+                  REQ_TYPE_PM_SUSPEND,
+
+                  /* resume request */
+                  REQ_TYPE_PM_RESUME
+
+                  /* shutdown request */
+                  REQ_TYPE_PM_SHUTDOWN,
+
+                  /* driver defined type */
+                  REQ_TYPE_SPECIAL
+
+                  /* generic block layer message */
+                  REQ_TYPE_LINUX_BLOCK,
+
+                  /* 
+                   * for ATA/ATAPI devices
+                   * this really doesn't belong here,ide should use REQ_TYPE_SPECIAL
+                   * and use rq->cmd[0] with the range of driver private REQ_LB
+                   * opcodes to differentiate what type of request this is
+                   */
+                  REQ_TYPE_ATA_TASKFILE,
+                  REQ_TYPE_ATA_PC,
+          };
+
+          /* should not use this directly,use rq_for_each_segment() instead */
+          #define __rq_for_each_bio(_bio, rq)  \
+                  if ((rq->bio))               \
+                          for (_bio = (rq)->bio; _bio; _bio = _bio->bi_next)
+
+          #define rq_for_each_segment(bvl, _rq, _iter)  \
+                  __rq_for_each_bio(_iter.bio, _rq)     \
+                          bio_for_each_segment(bvl, _iter.bio, _iter.i)
+
+        Managing the allocation of request descriptors :
+          a bottleneck for processes that want to add a new request into a request queue may
+          come when very heave loads and high disk activity,only limited amount of free dynamic
+          memory can available.
+          structure request_queue is introduced for cope this kind of situation.
+
+          <block/blk-core.c>
+            /**
+             * blk_get_request - routine to allocate a new rq on a specified request queue
+             * @q:               request queue
+             * @rw:              READ or WRITE
+             * @gfp_mask:        GFP mask
+             * return:           NULL or new rq descriptor pointer
+             * # EXPORT_SYMBOL
+             * # if __GFP_WAIT is enabled in @gfp_mask,then this routine call to
+             *   get_request_wait();otherwise call to get_request()
+             */
+            struct request *blk_get_request(struct request_queue *q, int rw, gfp_t gfp_mask);
+
+            /**
+             * blk_put_request - put a request got through blk_get_request()
+             * @req:             the request
+             * # EXPORT_SYMBOL
+             * # this routine actually call to __blk_put_request() with request queue lock
+             *   holding,and release the lock before return
+             */
+            void blk_put_request(struct request *req);
+
+            /**
+             * blk_alloc_request - alloc a new request from memory pool of a request queue
+             * @q:                 request queue
+             * @flags:             request flags
+             * @priv:              indicator for elevator private data attaching
+             * @gfp_mask:          gfp mask for mempool_alloc()
+             * return:             NULL or new request pointer
+             * # this routine allocate rq from @q->rq.rq_pool through mempool_alloc()
+             *   function blk_rq_init() is called for initialize @rq
+             *   the @rq->cmd_flags will be @flags | REQ_ALLOCED
+             *   if @priv is TRUE,then @rq->cmd_flags |= REQ_ELVPRIV
+             *   retur NULL and mempool_free() @rq if elv_set_request() returned TRUE
+             *   AND @priv is TRUE
+             * # elv_set_request :
+             *     get elevator of request queue
+             *     if elevator_set_req_fn() is defined,then call to it and return the
+             *     result to caller
+             *     else set request's @elevator_private to NULL and return 0
+             */
+            static struct request *
+            blk_alloc_request(struct request_queue *q, int flags, int priv, gfp_t gfp_mask);
+
+            # blk_alloc_request() is called by get_request() to get a new request.
+              the function get_request() do some checks for elevator and request queue
+              request limit.
+              if elevator can not queue this rq,then set starved[r/w] to 1 and return NULL.
+              if it will exceed limits of the request queue by adding a new request,then 
+              return NULL,can not get a new request,set request queue full status if necessary.
+              /**
+               * request queue has a maximum number of allowed pending requests for each data
+               * transfer direction.
+               * if @count[r/w] >= @nr_congestion_on,allows creating,but set queue congestion statue.
+               * if @count[r/w] >= @nr_requests,forbid creating
+               * if elevator can not queue the coming requests,set @starved[r/w] to 1
+               */
+
+              if passed checking,call to blk_alloc_request(),and return the result to caller.
+              @count[r/w] and @elvpriv will increase if we succeed to allocate a new one,
+              of course,@starved will be set to _zero_.
+            # get_request_wait() will call to io_schedule() is get_request() returned NULL,
+              and try again get_request() until succeed to get a new one.
+              the process may sleep with TASK_UNINTERRUPTIBLE,and it will be puting into
+              @wait[r/w] of the request_list object of the request queue.
+
+            /* blk_free_request - elv_put_request() if REQ_ELVPRIV,mempool_free() @rq */
+            static inline void blk_free_request(struct request_queue *q, struct request *rq);
+
+
+            
