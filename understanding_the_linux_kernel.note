@@ -5878,6 +5878,12 @@ Chapter 4 : Interrupts and Exceptions
             #endif
             };
 
+            /* INIT_WORK - initialize @_work and set @_work->func to @_func */
+            #define INIT_WORK(_work, _func)                   \
+                    do {                                      \
+                            __INIT_WORK((_work), (_func), 0); \
+                    } while (0)
+
             /*  delayed_work - represents a delayed work.
              *  @work:         the work.
              *  @timer:        timer.
@@ -6579,7 +6585,8 @@ Chapter 5 : Kernel Synchronization
               atomic_set_mask(mask, addr)   ->       set all bits of *addr specified by @mask
 
             <arch/x86/include/asm/bitops.h>
-              test_bit(nr, addr)            ->       return the value of the @nr_th bit of *addr
+              test_bit(nr, addr)            ->       return the value of the @nr-th bit of *addr
+                                                     result : @nr-th bit of *@addr != 0
               set_bit(nr, addr)             ->       set the @nr_th bit of *addr
               clear_bit(nr, addr)           ->       clear the @nr_th bit of *addr
               change_bit(nr, addr)          ->       invert the @nr_th bit of *addr
@@ -27869,8 +27876,11 @@ Chapter 14 : Block Device Drivers
            *           deadline of this request,it is usually current
            *           jiffies + @timeout
            * @timeout_list:
-           *           linked into the timer list of the request queue of
-           *           this request
+           *           request timeout timer
+           *           routine blk_add_timer() is used to start a timeout timer of
+           *           single request,thus list_add_tail() is called by which to
+           *           add this request's @timeout_list into the tail of the
+           *           request queue's @timeout_list of this request
            * @timeout: time out value in jiffies
            * @retries: used by SCSI Generic disk ioctl
            * @end_io:  request completion callback
@@ -28089,8 +28099,11 @@ Chapter 14 : Block Device Drivers
                */
 
               if passed checking,call to blk_alloc_request(),and return the result to caller.
-              @count[r/w] and @elvpriv will increase if we succeed to allocate a new one,
-              of course,@starved will be set to _zero_.
+
+              @count[r/w] increase 1 if succeed to allocate a new one.
+              @elvpriv increase 1 if succeed to allocate a new one AND QUEUE_FLAG_ELVSWITCH is not set.
+              @starved will be set to _zero_ if succeed to allocate a new one.
+
             # get_request_wait() will call to io_schedule() is get_request() returned NULL,
               and try again get_request() until succeed to get a new one.
               the process may sleep with TASK_UNINTERRUPTIBLE,and it will be puting into
@@ -28098,6 +28111,106 @@ Chapter 14 : Block Device Drivers
 
             /* blk_free_request - elv_put_request() if REQ_ELVPRIV,mempool_free() @rq */
             static inline void blk_free_request(struct request_queue *q, struct request *rq);
+
+    Activating the Block Device Driver :
+      delay activation of the block device driver for to wait clustering requests can improve
+      performance.the technique to achieve this is known as "device plugging" and "unplugging".
+      even if the request queue of the block device driver has some pending requests,the
+      block device driver still not activated as long as a block device driver is plugged.
+
+      function blk_plug_device() plugs a block device - a request queue serviced by some block
+      device driver.(set QUEUE_FLAG_PLUGGED,and start @unplug_timer)
+      function blk_remove_plug() unplugs a request queue.(clear QUEUE_FLAG_PLUGGED,and cancel timer)
+      this routine can be explicitly called by kernel when all mergeable requests "in sight" have
+      been added to the queue.
+
+      I/O scheduler will unplug the queue if number of requests of the queue exceeded @unplug_thres.
+
+      if the timer @unplug_timer timeout(the time interval length is @unplug_delay),then routine
+      blk_unplug_timeout() is executed,as a consequence,"kblockd" kernel thread is awakened,the
+      thread servicing the @kblockd_workqueue,and blk_unplug_timeout() call to kblockd_schedule_work()
+      to queue the work @unplug_work to @kblockd_workqueue.the function of the work is initialized
+      to blk_unplug_work(),this function call to @unplug_fn() of the request queue.
+
+      pointer @unplug_fn usually is set to generic_unplug_device(),which checks if request queue is plugged
+      at first.if it is,then acquires @queue_lock,and call to __generic_unplug_device(),release the lock
+      after __generic_unplug_device() returned.
+
+      function __generic_unplug_device() just call to @request_fn() of the request queue if
+        the request is not stopped
+        AND
+        (succeed to remove plug
+        OR
+        QUEUE_FLAG_NONROT is set)
+      otherwise,return to caller.
+
+      @request_fn start processing the next request in the queue.
+      implementation of @request_fn is hand over to block device driver,function blk_init_queue() is used
+      to initialize a request queue with a specified @rfn(request_fn_proc) and a spinlock.for example,
+      the driver of block device hd,@rfn is do_hd_request(),and the lock is @hd_lock.
+
+      <block/blk-core.c>
+        /* kblockd_workqueue - workqueue of kernel thread "kblockd" */
+        static struct workqueue_struct *kblockd_workqueue;
+
+        /**
+         * blk_plug_device - plug a request queue,and start @unplug_timer with timer interval
+         *                   @jiffies + @q->unplug_delay
+         * @q:               request queue
+         * # EXPORT_SYMBOL
+         * # this is called with interrupts off and no requests on the queue and with the queue lock held
+         */
+        void blk_plug_device(struct request_queue *q);
+
+        /**
+         * blk_remove_plug - unplug a request queue and cancel the timer
+         * @q:               request queue
+         * return:           1 => succeed to unplug and deleted timer
+         *                   0 => failed to unplug and timer still activing
+         */
+        int blk_remove_plug(struct request_queue *q);
+
+        /**
+         * blk_unplug_timeout - timeout routine for block request queue
+         * @data:               address of the request queue
+         * # EXPORT_SYMBOL
+         * # this routine just call to kblockd_schedule_work()
+         */
+        void blk_unplug_timeout(unsigned long data);
+
+        /**
+         * kblockd_schedule_work - queue_work() @work into @kblockd_workqueue
+         * @q:                     request queue
+         * @work:                  @q->unplug_work
+         * # EXPORT_SYMBOL
+         */
+        int kblockd_schedule_work(struct request_queue *q, struct work_struct *work);
+
+        /**
+         * blk_unplug_work - call to container_of(@work, struct request_queue, unplug_work)->unplug_fn()
+         * @work:            @unplug_work
+         */
+        void blk_unplug_work(struct work_struct *work);
+
+        /**
+         * generic_unplug_device - unplug the request queue @q if it is plugged now
+         * @q:                     request queue
+         * # EXPORT_SYMBOL
+         */
+        void generic_unplug_device(struct request_queue *q);
+
+        /**
+         * __generic_unplug_device - unplug the request queue and call to @q->request_fn()
+         * @q:                       request queue
+         * # this routine will return withou @request_fn invoking :
+         *     1> @q is stopped
+         *     2> failed to remove plug AND no QUEUE_FLAG_NONROT is set
+         */
+        void __generic_unplug_device(struct request_queue *q);
+
+        
+
+
 
 
             
