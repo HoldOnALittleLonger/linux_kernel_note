@@ -28208,9 +28208,183 @@ Chapter 14 : Block Device Drivers
          */
         void __generic_unplug_device(struct request_queue *q);
 
+    I/O Scheduling Algorithms :
+      the purpose of I/O scheduling algorithms is to reduce disk seeking time and improve system
+      performance,besides,prevent I/O strave.
+      indeed,the completion time of a data transfer strongly depends on the physical position of
+      the data on the disk.
+
+      Linux 2.6 offers four different types of I/O schedulers - or elevators - called
+        Anticipatory
+        Deadline
+        CFQ(Complete Fairness Queueing)
+        Noop(No Operation)
+
+      kernel parameter "elevator=<name>" can be used to specify the default I/O scheduling algorithm
+      during kernel boot time.
+        <name> => as / deadline / cfq / noop
+      if no specified elevator,then kernel will use "Anticipatory" I/O scheduler.
+
+      Device Driver can replace the using I/O scheduler,and of course,it can provides a custom
+      I/O scheduling algorithm,but this is very seldom done.
+
+      kernel exported the selected scheduler in sysfs file "/sys/block/sdX"/queue/scheduler",by write
+      the name of I/O scheduler into the file can let kernel start to make use the new I/O scheduler.
+
+      each request queue has elevator queue associated with it,the elevator object includes several
+      methods covering all possible operations of the elevator,such linking and unlinking the elevator
+      to a request queue,adding and merging requests to the queue,removing requests from the queue,
+      getting the next request to be processed from the queue,and so on.
+      member named @elevator_private of struct request points to an additional data used by the
+      I/O scheduler to handle the request.
+
+      <linux/elevator.h>
+        /**
+         * elevator_queue - the elevator object,used to represent an I/O scheduler
+         * @ops:            elevator operations
+         *                  this pointer will points to @elevator_type->ops by default
+         * @elevator_data:  information required to handle the associated request queue
+         * @kobj:           kobject
+         * @elevator_type:  type of this elevator
+         * @sysfs_lock:     mutex used to protect the changing of terms in sysfs
+         * @hash:           elevator hash list array,the maximum number of elements
+         *                  is ELV_HASH_ENTRIES - 1 << 6(@elv_hash_shift)
+         *                  the hash list will stores the requests from the associated
+         *                  request queue,and the hash expression produce array index is
+         *                          hash_long((blk_rq_pos(rq) + blk_rq_sectors(rq)) >> 3, @elv_hash_shift)
+         */
+        struct elevator_queue {
+                struct elevator_ops *ops;
+                void *elevator_data;
+                struct kobject kobj;
+                struct elevator_type *elevator_type;
+                struct mutex sysfs_lock;
+                struct hlist_head *hash;
+        };
+
+        /**
+         * elevator_type - identifies an elevator type
+         * @list:          linker used for add an elevator type to the list
+         *                 @elv_list
+         * @ops:           operations supported by this kind of elevator
+         * @elevator_attrs:
+         *                 elevator attributes
+         *                 this structure contains one data member named @attr
+         *                 is type of struct attribute;and two member methods
+         *                 named @show and @store,they are used to export
+         *                 elevator attributes to sysfs
+         * @elevator_name: name of this elevator
+         * @elevator_owner:
+         *                 unload protection
+         */
+        struct elevator_type {
+                struct list_head list;
+                struct elevator_ops ops;
+                struct elv_fs_entry *elevator_attrs;
+                char elevator_name[ELV_NAME_MAX];
+                struct module *elevator_owner;
+        };
+
+      I/O scheduler descriptions :
+        designing an I/O scheduler is much like designing a CPU scheduler :
+          the heuristics and the values of the adopted constants are the result of
+          an extensive amount of testing and benchmarking.
+
+        all algorithms make use of a "dispatch queue",which includes all requests
+        sorted according to the order in which the requests should be processed by
+        the device driver - the next request to be serviced by the device driver
+        is always the first element in the dispatch queue.
+        the dispatch queue,exactly,the list_head object named @queue_head of the
+        request queue.
+
+        ! almost all algorithms also make use of additional queues to classify and sort
+          requests,and allow device driver to add bios to existing requests,merge two
+          "adjacent" requests if necessary.
+
+        Noop elevator :
+          no ordered queue -
+            new requests are always added either at the front or at the tail of the dispatch
+            queue,and the next request to be processed is always the first request in the
+            queue
+            ! usually,adopted by SSD
         
+        CFQ elevator :
+          ensuring a fair allocation of the disk I/O bandwidth among all the processes that
+          trigger the I/O requests.
+          algorithm make use of a large number of sorted queues(default is 64),store the
+          requests coming from the different processes.
+          whenever a process triggered an I/O request,kernel hash its tgid into array index
+          of the array of sorted queues,and insert new request to the tail of queue.
 
+          elevator refill dispatch queue by scans the I/O input queues in a round-robin
+          fashion,selects the first nonempty queue,and moves a batch of requests from that
+          queue into the tail of the dispatch queue.
 
+        Deadline elevator :
+          besides the dispatch queue,elevator also make use of four additional queues.
+          the first two queues :
+            1> sorted read requests,order according initial sector number
+            2> sorted write requests,order according initial sector number
 
+          the second two queues :
+            1> same read requests,but sorted according their deadline
+            2> same write requests,but sorted according their deadline
 
-            
+          deadline elevator is essentially an expire timer that starts ticking when the
+          request is passed to the elevator.default read request expire time is 500ms,and
+          the default write request expire time is 5s.if the I/O request been waiting a long
+          time,then dispatch it even if it is low in the sort.
+
+          dispatch queue refill :
+            1> determines the data direction of the next request,if both read and write requests
+               are existing,then select read unless the write direction has been discarded too
+               many times.
+            2> checks deadline queue of selected data direction.
+               if the deadline of the first request is elapsed,elevator moves that request to
+               the tail of the dispatch queue;also moves a batch of requests taken from the
+               sorted queue,starting from the request following the expired one.length is
+               depends on adjacent sectors.
+            3> no request is expired,elevator dispatches a batch of requests starting with
+               the request following the last one taken from the sorted queue.
+               when cursor reached the tail,the search starts again from the top.
+
+            [ req1, req2, req3, req4, ... ] => read direction
+            [ req1, req2, req3, req4, ... ] => write direction
+            [ req3, req1, req4, req2, ... ] => read deadline
+            [ req1, req4, req2, req3, ... ] => write deadline
+
+            [ dispatch queue ]
+
+            select read
+            req3 in read deadline expired
+            move req3 to the tail of dispatch queue
+            read deadline => [ req1, req4, req2, ... ]
+            req1 in read deadline expired
+            move req1 to the tail of dispatch queue
+            read deadline => [ req4, req2, ... ]
+            no expired read request
+            move a batch request from sorted read queue folloing req1(last expired) to dispatch queue
+            dispatch queue => [ ... req3, req1, req2 ]
+
+        Anticipatory elevator :
+          the most sophisticated I/O scheduler algorithm offered by Linux.basically it is an evolution
+          of Deadline elevator.
+          four sorted request queues(r/w sec, r/w dl) and one dispatch queue.
+          I/O scheduler keeps scanning the sorted queues,alternating between read and write requests,
+          but prefer to read.
+          scanning is sequential unless a request expires.default read expire time is 125ms,default
+          write expire time is 250ms.
+          
+          additional heuristics :
+            1> in some cases,the elevator might choose a request behind the current position in the
+               sorted queue,thus forcing a backward seek of the disk head.
+               this happens when the distance of seek back is less than half the seek front for the
+               next request after the current position in the sorted queue.
+            2> elevator collects statistics about the patterns of I/O operations triggered by every
+               process in the system.
+               _right_ _after_ dispatching a read request that comes from process P,it checks whether
+               the next request is also come from P;if it is,then dispatch the request immediately,
+               otherwise,look at collected statistics about P - if it decides that P will likely issue
+               another read request soon,then elevator stalls for a short period of time(default,roughly 7ms).
+               thus,the elevator might anticipate a read request coming from P that is "close" on disk
+               to the request just dispatched.
