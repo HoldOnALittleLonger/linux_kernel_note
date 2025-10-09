@@ -6682,7 +6682,7 @@ Chapter 5 : Kernel Synchronization
 
       Spin Lock :
         spin locks are a special kind of lock designed to work in a multiprocessor environment.
-        if a spin lock had been holden by another kernel control path,then current kernel control path
+        if a spin lock had been held by another kernel control path,then current kernel control path
         who is waiting for the lock will repeatedly executing a tight instruction loop,until the lock
         is released.
 
@@ -6731,8 +6731,6 @@ Chapter 5 : Kernel Synchronization
                 on Symmetrical Multi-Processor environment,spin lock is based ticket concept.a FIFO
                 is constructed to queue the CPUs acquire the spin lock.@slock is encoded to represents
                 the FIFO.
-
-
 
         <linux/spinlock.h>
           /*  spin_lock_init - initializer.
@@ -6820,7 +6818,7 @@ Chapter 5 : Kernel Synchronization
          *    these functions are implemented via inline assembly.
          *    ticket concept is introduced,that is :
          *      ticket is a queue has two parts,one is head,one is tail
-         *      the @slock becomes a FIFO
+         *      the @slock follows FIFO
          *      when need to acquire the lock,just atomically noting the tail and increase it by one
          *      then,wait until head becomes the initial value of the tail
          *
@@ -27435,7 +27433,7 @@ Chapter 14 : Block Device Drivers
                @bi_vcnt   - total number of segments in the bio
                @bi_rw     - requested operation flags(READ / WRITE)
                @bi_end_io - address of a completion procedure
-          3> invoke generic_make_request(),the main entry point of Generic Block Layer
+          3> invoke generic_make_request(),the main enter point of Generic Block Layer
           4> generic_make_request() does :
                1> checks if @bi_sector is valid.
                   set BIO_EOF in @bi_flags if invalid,and report error,call bio_endio(),
@@ -28109,6 +28107,11 @@ Chapter 14 : Block Device Drivers
               the process may sleep with TASK_UNINTERRUPTIBLE,and it will be puting into
               @wait[r/w] of the request_list object of the request queue.
 
+            !! get_request() RETURNED WITH QUEUE UNLOCK IF IT SUCCEED TO GET A FREE REQUEST,
+               OTHERWISE,RETURNS NULL WITH QUEUE LOCKED.
+               get_request_wait() RETURNED WITH QUEUE UNLOCK BECAUSE IT WAIT UNTIL THE ROUTINE
+               get_request() SUCCEED TO GET A FREE REQUEST.
+
             /* blk_free_request - elv_put_request() if REQ_ELVPRIV,mempool_free() @rq */
             static inline void blk_free_request(struct request_queue *q, struct request *rq);
 
@@ -28252,6 +28255,9 @@ Chapter 14 : Block Device Drivers
          *                  the hash list will stores the requests from the associated
          *                  request queue,and the hash expression produce array index is
          *                          hash_long((blk_rq_pos(rq) + blk_rq_sectors(rq)) >> 3, @elv_hash_shift)
+         *                          |          |                                 |
+         *                          |          +------>  rq_hash_key(rq)  <------+
+         *                          +--> ELV_HASH_FN(sector number)
          */
         struct elevator_queue {
                 struct elevator_ops *ops;
@@ -28388,3 +28394,115 @@ Chapter 14 : Block Device Drivers
                another read request soon,then elevator stalls for a short period of time(default,roughly 7ms).
                thus,the elevator might anticipate a read request coming from P that is "close" on disk
                to the request just dispatched.
+
+    Issuing a Request to the I/O Scheduler :
+      the function generic_make_request() is enter point of generic block layer,which call to @make_request_fn
+      of the request queue with the onging bio object.
+      @make_request_fn has the default value __make_request(),as the preceding description,which call to
+      get_request_wait() to issue a new request in the request queue.
+
+      <block/blk-core.c>
+        /**
+         * __make_request - makeup a request in the specified request queue with the
+         *                  ongoing bio
+         * @q:              request queue
+         * @bio:            ongoing bio
+         * return:          0
+         * # status reported by bio_endio()
+         */
+        static int __make_request(struct request_queue *q, struct bio *bio);
+
+        description for __make_request() :
+          checks whether @bio flagged BIO_RW_BARRIER AND @q->next_ordered is equal to QUEUE_ORDERED_NONE,
+          then call to bio_endio() with error code -EOPNOTSUPP,the wishing operation is not supported.
+          /* QUEUE_ORDERED_NONE => hard barrier not supported */
+
+          call to blk_queue_bounce(),it setup a bounce buffer if required.if a bounce buffer is created,
+          blk_queue_bounce() will initialize the bounce buffer,and use it to instead *@bio,let the original
+          bio @bio become @bi_private member of the bounce buffer.
+          /* the bounce buffer is a new allocated struct bio object */
+
+          lock request queue,checks whether BIO_RW_BARRIER is flagged OR elv_queue_empty(@q) returned
+          TRUE,then goto get_rq label.
+
+          attempts to merge elv of @q through elv_merge(),the routine try to merge @bio with the @q->last_merge.
+          there are three possible situations will be reported :
+            nomerges      =>        no merges at all attempted
+            noxmerges     =>        only simple one-hit cache try
+            merges        =>        all merge tries attempted
+          and three possible return values will be returned :
+            ELEVATOR_NO_MERGE => nomerges || noxmerges
+            ELEVATOR_BACK_MERGE => merge to back
+            ELEVATOR_FRONT_MERGE => merge to front
+          if @q->last_merge is OK,then ELEVATOR_BACK_MERGE or ELEVATOR_FRONT_MERGE will be returned.
+          if @q->last_merge is not OK AND noxmerges is FALSE,then look at elevator hash table of requests
+          try to find out the suit request which is able to be merged with @bio through function elv_rqhash_find(),
+          which receives two parameters,one is request queue descriptor,another is the ongoing bio's @bi_sector.
+          /**
+           * elv_rqhash_find() :
+           *   get hash list @q->elevator->hash[ELV_HASH_FN(@bio->bi_sector)
+           *   traverse hash list -
+           *     for each request in the hash list
+           *       BUG_ON() current request is hlist_unhashed(&this_request->hash)
+           *       it is not rq_mergeable(),then __elv_rqhash_del() it and continue to next
+           *                                     # hlist_del_int(&this_rq->hash)
+           *                 # request @rq is mergeable if
+           *                     !(@rq->cmd_flags & RQ_NOMERGE_FLAGS) AND (blk_discard_rq(@rq) OR blk_fs_request(@rq))
+           *                                                              # @cmd_flags & REQ_DISCARD
+           *                                                                                     # cmd_type == REQ_TYPE_FS
+           *       rq_hash_key() of current request is equal to @bio->bi_secotr,returns this request
+           *   if no proper request is find,return NULL to caller.
+           */
+          if elv_rqhash_find() returned a request descriptor,then try to merge it with @bio,return ELEVATOR_BACK_MERGE
+          when succeed on merging.
+          last try is routine @elevator_merge_fn,if it is not defined,then elv_merge() returns ELEVATOR_NO_MERGE to caller,
+          otherwise,returns the value returned by @elevator_merge_fn().
+
+          __make_request() next checks the returned value from elv_merge() :
+            back merge - (req: elv_rqhash_find() return)
+              @req->biotail->bi_next = @bio
+              @req->biotail = @bio
+              @req->__data_len += @bio->bi_size
+              @req->ioprio = ioprio_best(@req->ioprio, bio_prio(@bio))
+
+              call to attempt_back_merge() to merge @req with latter request of the elevator
+              call to elv_merged_request() to update @q->last_merge to @req if attempt_back_merge() succeed
+
+              goto out label.
+
+            front merge - (req: elv_rqhash_find() return) 
+              @bio->bi_next = @req->bio
+              @req->bio = bio
+              @req->buffer = bio_data(@bio)
+              @req->__sector = @bio->bi_sector
+              @req->__data_len += @bio->bi_size
+              @req->ioprio = ioprio_best(@req->ioprio, bio_prio(@bio))
+
+              set @req->cpu to @bio->bi_comp_cpu if @req's cpu is valid
+
+              call to attempt_back_merge() to merge @req with latter request of the elevator
+              call to elv_merged_request() to update @q->last_merge to @req if attempt_back_merge() succeed
+
+              goto out label
+
+          proceed executing,try to get a free request,because we failed on merging request.
+
+          get_rq:
+          get data direction of @bio
+          if BIO_RW_SYNCIO is specified,then set REQ_RW_SYNC
+          invoke get_request_wait() to get a free request
+          initialize the request from @bio
+          lock request queue /* because get_request_wait() unlocked queue */
+          if necessary,set @cpu member of the request
+          if queue_should_plug(@q) AND elv_queue_empty(@q) is TRUE
+          then call to blk_plug_device(@q) to plug the request queue
+          invoke add_request() to add the new request to @q
+
+          out: (normal return path)
+          if BIO_RW_UNPLUG is enabled OR !queue_should_plug(@q)
+          then call to __generic_unplug_device(@q) to unplug the request queue
+          unlock request queue
+          return 0 to caller
+
+
+          
