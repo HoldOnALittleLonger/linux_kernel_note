@@ -15313,6 +15313,8 @@ Chapter 8 : Memory Management
            * mempool_create - create a memory pool
            * @min_nr:         initial number of memory elements would in this mempool
            * @alloc_fn:       allocate function
+           *                  the default gfp mask is GFP_KERNEL specified by
+           *                  mempool_create(),but @alloc_fn can modifies gfp mask
            * @free_fn:        free function
            * @pool_data:      kernel component specific data
            * return:          pointer to memory pool
@@ -15324,10 +15326,11 @@ Chapter 8 : Memory Management
           extern mempool_t *mempool_create(int min_nr, mempool_alloc_t *alloc_fn,
                                            mempool_free_t *free_fn, void *pool_data);
 
-          ! creating stage :
+          ! creating steps :
               first,use kmalloc_node() to allocate memory pool descriptor.
               second,use kmalloc_node() to allocate memory element pointer array.
               third,while until @curr_nr equal to @min_nr,pre-allocate memory elements.
+              /* through @pool->alloc(GFP_KERNEL, @pool->pool_data) */
 
           /**
            * mempool_resize - resize a mempool
@@ -27101,8 +27104,18 @@ Chapter 14 : Block Device Drivers
           };
 
           /* macro used to traverse segments in the bio from @bi_idx */
-          #define bio_for_each_segment(bvl, bio, i) __bio_for_each_segment(bvl, bio, i, (bio)->bi_idx)
-
+          #define bio_for_each_segment(bvl, bio, i) \
+                   __bio_for_each_segment(bvl, bio, i, (bio)->bi_idx)
+                   |                      |    |    |  |
+                   |                      |    |    |  +--> @start_idx
+                   |                      |    |    +--> @i
+                   |                      |    +--> @bio
+                   |                      +--> @bvl
+                   |               +--> &(bio->bi_iovec[@index])
+                   |               |
+                   +--> for (bvl = bio_iovec_idx((bio), (start_idx)), i = (start_idx);
+                             i < (bio)->bi_vcnt;
+                             bvl++, i++)
           
           /* slab caches for bio vector
            * each slab cache will be initialized in init function biovec_init_slabs()
@@ -28414,7 +28427,7 @@ Chapter 14 : Block Device Drivers
 
         description for __make_request() :
           checks whether @bio flagged BIO_RW_BARRIER AND @q->next_ordered is equal to QUEUE_ORDERED_NONE,
-          then call to bio_endio() with error code -EOPNOTSUPP,the wishing operation is not supported.
+          if it is,then call to bio_endio() with error code -EOPNOTSUPP,the wishing operation is not supported.
           /* QUEUE_ORDERED_NONE => hard barrier not supported */
 
           call to blk_queue_bounce(),it setup a bounce buffer if required.if a bounce buffer is created,
@@ -28423,20 +28436,20 @@ Chapter 14 : Block Device Drivers
           /* the bounce buffer is a new allocated struct bio object */
 
           lock request queue,checks whether BIO_RW_BARRIER is flagged OR elv_queue_empty(@q) returned
-          TRUE,then goto get_rq label.
+          TRUE,resulted TRUE,then goto "get_rq" label.
 
           attempts to merge elv of @q through elv_merge(),the routine try to merge @bio with the @q->last_merge.
           there are three possible situations will be reported :
             nomerges      =>        no merges at all attempted
             noxmerges     =>        only simple one-hit cache try
             merges        =>        all merge tries attempted
-          and three possible return values will be returned :
+          and three possible values will be returned :
             ELEVATOR_NO_MERGE => nomerges || noxmerges
             ELEVATOR_BACK_MERGE => merge to back
             ELEVATOR_FRONT_MERGE => merge to front
           if @q->last_merge is OK,then ELEVATOR_BACK_MERGE or ELEVATOR_FRONT_MERGE will be returned.
           if @q->last_merge is not OK AND noxmerges is FALSE,then look at elevator hash table of requests
-          try to find out the suit request which is able to be merged with @bio through function elv_rqhash_find(),
+          try to find out an appropriate request which can be merged with @bio through function elv_rqhash_find(),
           which receives two parameters,one is request queue descriptor,another is the ongoing bio's @bi_sector.
           /**
            * elv_rqhash_find() :
@@ -28505,4 +28518,80 @@ Chapter 14 : Block Device Drivers
           return 0 to caller
 
 
-          
+      Buffer Bouncing :
+        buffer bouncing is necessary when some of the buffers in the request are located in
+        high memory and the hardware device is not able to address them.
+        older DMA for ISA buses only handled 24-bit physical addresses,in this case,the buffer
+        bouncing threshold is set to 16MB,to page frame number 4096.
+        block device driver might directly allocate DMA memory via ZONE_DMA rather than
+        setup buffer bouncing.
+
+      <mm/bounce.c>
+        /**
+         * blk_queue_bounce - buffer bouncing for request whose buffer is in high-memory
+         * @q:                request queue
+         * @bio_orig:         the onging bio
+         * # EXPORT_SYMBOL
+         */
+        void blk_queue_bounce(struct request_queue *q, struct bio **bio_orig);
+
+        brief description for blk_queue_bounce() :
+          if @bio_orig have not data that @bi_io_vec is NULL,then return without buffer bouncing.
+
+          if no GFP_DMA is set in @q->bounce_gfp,then checks whether @q->limits.bounce_pfn is
+          greater than or equal to global variable @blk_max_pfn,if it is,then return to caller
+          without bouncing.
+          /* @blk_max_pfn is equal to @max_pfn - 1,if @bounce_pfn >= @blk_max_pfn,that means
+           * the device can address whole system memory,so do not need to bouncing buffer
+           */
+          if @bounce_pfn < @blk_max_pfn,then use the memory pool @page_bool for buffer bouncing.
+
+          GFP_DMA is set,that means we in the case that ISA buffer boucning,then use the memory
+          pool @isa_page_pool.
+
+          finally,call to __blk_queue_bounce() for buffer bouncing on the selected memory pool.
+
+          ! @page_pool and @isa_page_pool is setup by routines init_emergency_pool() and
+            init_emergency_isa_pool(),respectively.
+            @min_nr of @page_pool is 64 and of @isa_page_pool is 16.
+            for ISA buses,the pages is allocated with gfp mask GFP_KERNEL | GFP_DMA.
+            for non ISA buses,the pages is allocated with gfp mask GFP_KERNEL.
+            each page structure object in the mempool(element in @elements) is holding one page.
+
+          ! rounte
+            static __blk_queue_bounce(struct request_queue *q, struct bio **bio_orig, mempool_t *pool) :
+              it just bouncing the buffer whose page number is greater than @q->limits.bounce_pfn,
+              thus,it must iterates each segments in the bio.
+              if we detected some pages should to be bouncing,then allocate a new bio object with
+              gfp flag GFP_NOIO through bio_alloc(),make use the vec counter of @bio_orig,and zeros
+              the bio vectors.
+              bouncing :
+                select bio vector from new bio,index is @i,that the index of the vector in @orig_bio need
+                to be bounced.
+                allocate page through mempool_alloc() on previously selected memory pool with gfp mask
+                @q->bounce_gfp.
+                copy @bv_len and @bv_offset,set NR_BOUNCE for the bounce page.
+                if current bio data direction is WRITE,then copy contents from the original page to the
+                bounce page.
+                /* for do memcpy(),it must kmap() the orignal page at first,and kunmap() it after
+                 * copying is accomplished.
+                 * the reason that do not need to kmap() the new pages,that is these pages are
+                 * allocated with gfp mask GFP_KERNEL
+                 */
+
+              if at least one page was bounced,then traverse vectors in @bio_orig,start index is _zero_.
+              for all un-bounced pages in orignal vector,let new bio's vectors map them.that is,for
+              each NULL @bv_page in new bio,set @bv_page to the corresponding original vector's @bv_page,
+              and @bi_len,@bi_offset.
+
+              next,use orignal bio's properties to setup new bio,besides,enable BIO_BOUNCED flag.
+              if selected pool is @page_pool,then new bio's @bi_end_io is set to
+                bounce_end_io_write() / bounce_end_io_read()
+              else if selected pool is @isa_page_pool,then new bio's @bi_end_io is set to
+                bounce_end_io_write_isa() / bounce_end_io_read_isa()
+              ! these read functions will copy data from bounce page to orignal page when I/O
+                operation terminated.
+                all end io methods,will release the bounce bio when I/O operation terminated.
+
+              finally,set new bio's @bi_private to *@bio_orig,and use new bio to instead
+              *@bio_orig.
