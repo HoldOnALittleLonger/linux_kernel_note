@@ -28595,3 +28595,213 @@ Chapter 14 : Block Device Drivers
 
               finally,set new bio's @bi_private to *@bio_orig,and use new bio to instead
               *@bio_orig.
+
+    Block Device Drivers :
+      block device driver,the lower component of the Linux Block Subsystem.the role it plays is
+      to service I/O request get from I/O scheduler.
+
+      Block Devices :
+        a block device driver may handles several block device.
+
+        block_device structure - represent a block device
+          <linux/fs.h>
+            /**
+             * block_device - a block device in the system
+             * @bd_dev:       device number
+             * @bd_inode:     inode of the file associated with the block device in bdev fs
+             * @bd_super:     super block of this device
+             * @bd_openers:   counter of how many times the block device has been opened
+             * @bd_mutex:     mutex used when open/close device
+             * @bd_inodes:    list of inodes of opened block device files for this device
+             * @bd_holder:    current holder of block device descriptor
+             *                holder is not  block device driver,it is a kernel component
+             *                that make use of the device and has exclusive,special privileges,
+             *                generally,it is the fs mounted over it,or a file object which
+             *                opened for exclusive access
+             * @bd_holders:   counter of multiple settings of the @bd_holder
+             *                # kernel routine bd_claim() set @bd_holder,and increase this
+             *                  member.the same kernel component can invoke bd_claim() many times,
+             *                  each invocation will increase this member.kernel routine
+             *                  bd_release() clear @bd_holder to NULL,and decrease this member.
+             *                  ! times of release must corresponds to times of claim
+             * @bd_holder_list:
+             *                list of holders of this device
+             * @bd_contains:  if this device is a partition,then it points to the block device
+             *                descriptor of the whole disk;otherwise,it points to this block
+             *                device descriptor(this device is whole disk)
+             * @bd_block_size:
+             *                size in bytes of a block
+             * @bd_part:      if this device is a partition,then this member points to the
+             *                disk partition descriptor,otherwise,it is NULL
+             * @bd_part_count:
+             *                number of times partitions within this device have been opened
+             * @bd_invalidated:
+             *                flag set when the partition table on this block device needs to
+             *                be read
+             * @bd_disk:      gendisk of the disk underlying this block device
+             * @bd_list:      list(linked into @all_bdevs) of block device descriptors in this system
+             * @bd_private:   block device holder private data
+             * @bd_fsfreeze_count:
+             *                counter of freeze processes
+             *                used to sync fs state
+             * @bd_fsfreeze_mutex:
+             *                mutex for freeze
+             */
+            struct block_device {
+                    dev_t bd_dev;
+                    struct inode *bd_inode;
+                    struct super_block *bd_super;
+                    int bd_openers;
+                    struct mutex bd_mutex;
+                    struct list_head bd_inodes;
+                    void *bd_holder;
+                    int bd_holders;
+            #ifdef CONFIG_SYSFS
+                    struct list_head bd_holder_list;
+            #endif
+                    struct block_device *bd_contains;
+                    unsigned bd_block_size;
+                    struct hd_struct *bd_part;
+                    unsigned bd_part_count;
+                    int bd_invalidated;
+                    struct gendisk *bd_disk;
+                    struct list_head bd_list;
+                    unsigned long bd_private;
+                    int bd_fsfreeze_count;
+                    struct mutex bd_fsfreeze_mutex;
+            };
+
+        bd_holder structure : 
+          <fs/block_dev.c>
+            /**
+             * bd_holder - identifier for kernel component which is a holder of 
+             *             a block device
+             * @list:      list of holders of the bdev,linked into bdev->@bd_holder_list
+             *             require bdev->@bd_mutex is hold
+             * @count:     ref counter
+             * @sdir:      slave device directory in sysfs
+             * @hdev:      holder device in sysfs
+             * @hdir:      holder device directory in sysfs
+             * @sdev:      slave device in sysfs
+             * # these @*dir and @*dev members are kobject descriptors,and they are used to
+             *   create symlink in sysfs by add_bd_holder()
+             *   sysfs_create_link() @sdir -> @sdev, @hdir -> @sdev, name(@sdir / @hdir)
+             */
+            struct bd_holder {
+                    struct list_head list;
+                    int count;
+                    struct kobject *sdir;
+                    struct kobject *hdev;
+                    struct kobject *hdir;
+                    struct kobject *sdev;
+            };
+
+            /**
+             * bd_claim_by_kobject - claim a block device by kobject
+             * @bdev:                block device
+             * @holder:              holder added to the block device
+             * @kobj:                kobject
+             * return:               0 OR error code
+             * # process steps :
+             *     1> checks @kobj,NULL => -EINVAL
+             *     2> alloc_bd_holder() through @kobj
+             *     3> bd_claim() the @bdev with @holder
+             *        if the block device alread a holder or its container alread a holder,
+             *        then return -EBUSY
+             *        otherwise,increase @bdev->bd_contains->bd_holders,@bdev->bd_holders
+             *        use @holder to set @bdev->bd_contains->bd_holder and @bdev->bd_holder
+             *     4> find_bd_holder() to find new created holder through @kobj
+             *        if find out,that means there been a same holder,then destroye the newly
+             *        created and return to caller
+             *     5> add_bd_holder()
+             *          call to bd_holder_grab_dirs()
+             *            - @sdir = kobject_get() @sdir
+             *            - @hdev = kobject_get() @sdir->parent
+             *            - @sdev = kobject_get() kobject of @bdev->bd_part
+             *            - @hdir = kobject_get() kobject of @bdev->bd_part->holder_dir
+             *          # setup the newly created bd_holder object
+             *          create sysfs symlink
+             *            - @sdir -> @sdev
+             *            - @hdir -> @hdev
+             *          list add bd_holder.list to @bdev->bd_holder_list
+             */
+            static int bd_claim_by_kobject(struct block_device *bdev, void *holder,
+                                           struct kobject *kobj);
+
+            ! we have known that bdev->bd_holder is type of void *,but object of type struct bd_holder
+              is linked into bd_holder_list of bdev.
+              so it turns out current block device holder @bd_holder is type of void * corresponds to
+              an object is type of struct bd_holder in bd_holder_list.
+              the bd_holder object in bd_holdr_list of bdev can be deleted through routine
+              del_bd_holder(),which unlink the bd_holder object,clean sysfs symlink,and returns the
+              address of this object,routine free_bd_holder() is used to destroy it,which just call
+              kfree() on it.
+          
+            /**
+             * bd_claim - claim a block device
+             * @bdev:     block device
+             * @holder:   block device holder
+             * return:    0 OR -EBUSY
+             * # EXPORT_SYMBOL
+             * # require spin lock @bdev_lock
+             */
+            int bd_claim(struct block_device *bdev, void *holder);
+
+            /**
+             * bd_release - release block device holder
+             * @bdev:       block device
+             * # EXPORT_SYMBOL
+             * # require spin lock @bdev_lock
+             * # bd_contains->bd_holder = bd_holder = NULL
+             *   --bd_contains->bd_holders, --bd_holders
+             */
+            void bd_release(struct block_device *bdev);            
+
+        relationship image :
+
+                                     (queue_head)                 (elevator)                        
+                                     [ requests ] <--+       +--> [ dispatch queue ]
+            ...                                      |       |
+           +-----------------------------------------+-------+--------+
+           |                                         |       |        |
+          +--------------+ (bd_disk)                 |       |        |
+          | block_device |-------------+    (queue)  |       |        |
+          | (part)       |             |    +----> [ request queue ]  |
+          +--------------+             |    |                         |
+           |                          +--> +---------+                |
+           |                               | gendisk |                |(bd_part)
+           |(bd_contains)             +--> +---------+                |
+           |                          |     |                         |
+           |    +--------------+      |     |(part_tbl)               |
+           +--> | block_device |------+     |    (part_tbl->part[])   V
+                | (disk)       | (bd_disk)  +--> [ part0 | part1 | part2 | ... ]
+           +--> +--------------+                 (hd_struct)
+           |      |
+           +------+
+           (bd_contains)
+
+      Accessing a block device :
+        when kernel need to open a block file,it must first determine whether the device file is
+        already open.if it been opened,kernel should not create a new descriptor,rather to update
+        the already existing block device descriptor.
+        the block device files that have the same major number and the same minor number with
+        different pathnames are not the same device file viewed by VFS.
+        so we cannot determine whether the block device is in use by simply checking for the existence
+        in the inode cache of an object for a block device file.
+        bdev special filesystem :
+          maintain the relationship between major number and minor number and block device descriptor.
+          each block device descriptor is coupled with a bdev special file -
+            bdev->bd_inode => the inode of the corresponding bdev special file
+          the inode encodes major number and minor number of the block device,and the address of the
+          block device descriptor.
+
+        bdget() - routine used to lookup bdev the inode has the given major number and minor number.
+                  if such inode is not exist,then create a new inode and a new block device descriptor,
+                  and return the address of the newly created block device descriptor.
+                  when a new inode is created,the corresponding bdev special file also be created.
+
+        onece a block device descriptor is created,kernel can determines whether it is in use by
+        checking member @bd_openers.
+        all opened block device file,whose inode's @i_devices member is linked into the member
+        named @bd_inodes of the corresponding block device descriptor.
+
