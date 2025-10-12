@@ -27398,6 +27398,16 @@ Chapter 14 : Block Device Drivers
              *          actually,it call to alloc_percpu() for allocate @disk->part0->dkstats
              *          use @node_id to set @disk->node_id
              *          disk_expand_part_tbl() to expand @disk->part_tbl for part0
+             *          # actually,the second parameter of disk_expand_part_tbl() is the number
+             *            of disk parts.the routine expand part table by allocate a new
+             *            disk_part_tbl object,the number of elements in array part[]
+             *            is @2nd-parameter + 1(the part[0],represent whole disk).
+             *            assign pointers in part[] of old table to the pointers in part[] of
+             *            new table.
+             *            finally,use the new one to replace the old one
+             *          # alloc_disk_node() just expand part table with @partno 0,it only
+             *            need to setup part[0] - the whole disk
+             *
              *          set
              *            @disk->part_tbl->part[0]
              *            @disk->minors
@@ -28805,3 +28815,150 @@ Chapter 14 : Block Device Drivers
         all opened block device file,whose inode's @i_devices member is linked into the member
         named @bd_inodes of the corresponding block device descriptor.
 
+        <fs/block_dev.c>
+          /**
+           * bdget - get a block device's descriptor associated with the given device number,
+           *         create it if does not exist
+           * @dev:   the device number
+           * return: pointer to the block device descriptor OR NULL
+           * # EXPORT_SYMBOL
+           */
+          struct block_device *bdget(dev_t dev);
+
+          what bdget() does :
+            1> call to iget5_locked() with the arguments
+                 @blockdev_superblock, @hash(@dev), @bdev_test, @bdev_set, &@dev
+                 /**
+                  * routine iget5_blocked() is defined in <fs/inode.c>,
+                  * this is  its prototype :
+                  *   struct inode *iget5_locked(struct super_block *sb, unsigned long hashval,
+                  *                              int (*test)(struct inode *, void *),
+                  *                              int (*set)(struct inode *, void *),
+                  *                              void *data);
+                  * works this routine does is to
+                  *   ifind() an inode corresponding to the device number @*data
+                  *   if find out,then return this inode;otherwise,call to get_new_inode()
+                  *   to create a new inode which is associated with the device number *@data,
+                  *   return the new inode to caller.
+                  * ifind() - searches for the inode specified by @data in the inode cache,
+                  *           it is a generalized version of ifind_fast() for file systems
+                  *           where the inode number is not sufficient for unique identification
+                  *           of an inode.
+                  *           if the inode is in the cache,the inode is returned with an
+                  *           incremented reference counter;otherwise,return NULL.
+                  * the head of hash list used by ifind() is get through -
+                  *   @inode_hashtable + hash(@sb, @hashval)
+                  * the case that corresponding inode is find -
+                  *   inode->i_sb == @sb    # must in the specified super block
+                  *   AND
+                  *   test(inode, @data)    # must pass test
+                  *   AND
+                  *   !(inode->i_state & (I_FREEING | I_CLEAR | I_WILL_FREE))
+                  *                         # cant be going to be freed
+                  * get_new_inode() - called without the inode lock held,otherwise,dead lock.
+                  *                   this routine first alloc_inode() to allocate a new inode
+                  *                   in super block @sb,then checks whether there been an inode
+                  *                   satisfied the request(through find_inode()).
+                  *                   if an old one is existing,then make use of the old;
+                  *                   otherwise,use @data to set the new one,and insert it
+                  *                   into inode cache of @sb,return it to caller.
+                  * if method alloc_inode() of super block is not defined,routine alloc_inode() will
+                  * allocate inode from slab cache @inode_cachep.
+                  */
+
+            2> if succeed to get an inode,then get the pointer of block device descriptor of this
+               inode through "&BDEV_I(inode)->bdev".
+               BDEV_I() is a wrapper of container_of(),which get the bdev_inode structure which
+               contains this inode.
+               such structure is allocated during alloc_inode(),it is the bdev filesystem super
+               block method for allocate a new iode.
+               /**
+                * # BDEV_I() can get this structure
+                * struct bdev_inode {
+                *         struct block_device bdev;     # block device associated with @vfs_inode
+                *         struct inode vfs_inode;       # alloc_inode() get this object
+                * };
+                * allocating to this type of structure is make use of slab cache @bdev_cachep.
+                */
+
+            3> if the inode is enabled I_NEW in @i_state,then setup this inode and the corresponding
+               block device descriptor.
+               /**
+                * if we exactly allocated a new inode and no old one is existing,
+                * flag I_NEW must been set by get_new_inode()
+                */
+               setting :
+                 bd_contains = NULL
+                 bd_inode = inode
+                 bd_block_size = (1 << inode->i_blkbits)
+                 bd_part_count = 0
+                 bd_invalidated = 0
+                 i_mode = S_IFBLK
+                 i_rdev = @dev
+                 i_bdev = the block device descriptor
+                 i_data.a_ops = &def_blk_aops
+                 mapping_set_gfp_mask(&inode->i_data, GFP_USER)
+                 inode->i_data.backing_dev_info = &default_backing_dev_info
+               list add bdev->bd_list into &@all_bdevs /* this list is defined in <fs/block_dev.c>
+                                                        * spin lock @bdev_lock used to protect it
+                                                        */
+               unlock_new_inode(inode)
+
+    Device Driver Registration and Initialization :
+      block device usually belongs to a standard bus architecture such as PCI or SCSI,when block
+      device driver have to registers itself to the bus,it can make use of bus helper functions.
+      different block device driver has customized driver descriptor,used to stores the data
+      required to drive the hardware device,in addition,some data needed by block I/O subsystem.
+
+      e.g.
+        typedef struct bdev_foo {
+                ...
+                spinlock_t lock;        /* SMP protecting */
+                struct gendisk *disk;   /* whole disk managed by this driver */
+                ...
+        } bdev_foo_t;
+
+      Reserving the major number -
+        routine "int register_blkdev(unsigned int major, const char *name)" is used to
+        register a new block device,and of course,it also can reserving the major number for
+        the block device that will managed by this driver.
+        routine "void unregister_blkdev(unsigned int major, const char *name)" is used to
+        unregister a block device.
+
+        block device registering make use of a static array of pointer of structure blk_major_name
+        named @major_names,the size is BLKDEV_MAJOR_HASH_SIZE - 255.
+        if @major is _zero_,then routine will attempts to find out a useable index in the array,
+        and use the index as the major number.
+        next,kmalloc() a struct blk_major_name object,use the major number and @name to initialize
+        it.
+        use a for-cycle to traverse elements in the hash list in the @major_names at index
+        major_to_index(major),if there been an object owns the major number in the hash list,then
+        we can not make use of this major number,so return -EBUSY;otherwise add the new blk_major_name
+        number into the tail of hash list.
+        /**
+         * struct blk_major_name {
+         *         struct blk_major_name *next;     # next in hash list
+         *         int major;                       # major number
+         *         char name[16];                   # name of the block device
+         * };
+         */
+
+        routine unregister_blkdev() does the reverse,it find the blk_major_name object from hash list,
+        and kfree() it,link the remains.
+
+        registered block device is visible in /proc/devices.
+
+      Initializing the custom descriptor - 
+        the most important thing to initialize the driver custom descriptor is initialize the data
+        structure that will used by block I/O subsystem.
+        after reserving the major number,we can initialize the lock,and call to alloc_disk() to
+        allocate a logical disk object,and register device number range in the corresponding
+        Kernel Mapping Domain.store the pointer of this new logical disk object in driver custom
+        descriptor.
+
+      Initializing the gendisk descriptor
+      Initializing the table of block device methods
+      Allocating and initializing a request queue 
+      Setting up the interrupt handler
+      Registering the disk
+      
