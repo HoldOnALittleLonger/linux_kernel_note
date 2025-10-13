@@ -27405,6 +27405,12 @@ Chapter 14 : Block Device Drivers
              *            assign pointers in part[] of old table to the pointers in part[] of
              *            new table.
              *            finally,use the new one to replace the old one
+             *
+             *          # the size in bytes of allocated memory area of @disk_part_tbl is
+             *              sizeof(struct disk_part_tbl) + (@partno + 1) * sizeof(struct hd_struct)
+             *            ! variable array part[] is the tail of structure disk_part_tbl,this is
+             *              important for expand disk partition table
+             *
              *          # alloc_disk_node() just expand part table with @partno 0,it only
              *            need to setup part[0] - the whole disk
              *
@@ -27437,8 +27443,12 @@ Chapter 14 : Block Device Drivers
              *     6> call to blk_register_region() to register device number range in the
              *        Kernel Mapping Domain @bdev_map
              *     7> call to register_disk() to register this logical disk
+             *        # this routine is defined in <fs/partitions/check.c>.
+             *          at the end,it traverse the partition table of the disk.
+             *          for each partition,trigger a kobject user event KOBJ_ADD on
+             *          the @__dev->kobj of partition object hd_struct in the partition table
              *     8> call to blk_register_queue(),this routine actually register @disk->queue
-             *        to elevator algorithm request queue
+             *        to elevator algorithm request queue(elv_register_queue())
              *     9> bdi_register_dev() to register the backing device info of @queue of @disk
              *    10> create sysfs link for @disk
              */
@@ -28956,9 +28966,140 @@ Chapter 14 : Block Device Drivers
         Kernel Mapping Domain.store the pointer of this new logical disk object in driver custom
         descriptor.
 
-      Initializing the gendisk descriptor
-      Initializing the table of block device methods
-      Allocating and initializing a request queue 
-      Setting up the interrupt handler
-      Registering the disk
-      
+      Initializing the gendisk descriptor -
+        routine alloc_disk() have been setup a part of members of gendisk structure.
+        the remains we have to setup manually to corresponds to the block device driver.
+        e.g.
+          bdev_foo.disk->private_data = &bdev_foo; /* reserved for low-level driver method */
+
+          bdev_foo.disk->major = BDEV_FOO_MAJOR;
+          bdev_foo.disk->minors = BDEV_FOO_MINORS;
+          bdev_foo.disk->first_minor = 0;
+          bdev_foo.disk->fops = &bdev_foo_disk_fops;
+          set_capacity(bdev_foo.disk, bdev_foo_disk_capacity_in_sectors);
+          /**
+           * <linux/genhd.h>
+           *   static inline void set_capacity(struct gendisk *disk, sector_t size);
+           *   # @disk->part0.nr_sects = @size;
+           *   # 1 sector is 512 bytes
+           */
+          strcpy(bdev_foo.disk->disk_name, "bdev_foo");
+
+      Initializing the table of block device methods -
+        member @fops of structure gendisk is type of struct block_device_operations *.
+        the block device driver must provides block device operations for the disk it drives.
+        the operatios are specific to the device driver,different drivers have different implementations.
+
+        @ioctl of block_device_operations is used when generic block layer does not know how to
+        handle some ioctl command on the specified disk,thus,this method also is specific to device
+        driver.
+
+      Allocating and initializing a request queue -
+        after setup block device operations table,we must allocate a request queue associated with 
+        the disk.
+    
+        <block/blk-core.c>
+          /**
+           * blk_init_queue - allocate and initialize a request queue
+           * @rfn:            request strategy routine
+           * @lock:           request queue spin lock,usually is the driver's spin lock
+           * return:          new request queue OR NULL
+           * # EXPORT_SYMBOL
+           * # actually,call to blk_init_queue_node(rfb, lock, -1)
+           */
+          struct request_queue *blk_init_queue(request_fn_proc *rfn, spinlock_t *lock);
+
+          /**
+           * blk_init_queue_node - allocate and initialize a request queue from a specified
+           *                       NUMA node
+           * @rfn:                 request strategy routine
+           * @lock:                request queue spin lock
+           * @node_id:             NUMA node
+           * return:               new request queue pointer OR NULL
+           * # EXPORT_SYMBOL
+           */
+          struct request_queue *
+          blk_init_queue_node(request_fn_proc *rfn, spinlock_t *lock, int node_id);
+
+          brief description for blk_init_queue_node() :
+            first,allocate a new request queue through blk_alloc_queue_node() with gfp mask
+            GFP_KERNEL on NUMA node @node_id,-1 means current NUMA node.
+
+            function blk_alloc_queue_node() allocate the new request queue by invoke
+            kmem_cache_alloc_node() to process allocating on slab cache @blk_requestq_cachep,
+            with passed gfp mask | __GFP_ZERO on NUMA node @node_id.
+              if succeed to allocating,it will :
+                setup backing_dev_info of the request queue
+                  unplug_io_nf = blk_backing_dev_unplug
+                  unplug_io_data = the request queue
+                  ra_pages = (VM_MAX_READAHEAD * 1024) / PAGE_CACHE_SIZE
+                  capabilities = BDI_CAP_MAP_COPY
+                  name = "block"
+                  call to bdi_init() to initialize the remain members
+  
+                init_timer(this request queue's @unplug_timer)
+                invoke setup_timer() to setup @timeout of this request queue,timer function
+                is @blk_rq_timed_out_timer,timer data is the address of the request queue
+  
+                initilize @timeout_list, @unplug_work with @blk_unplug_work(), @kobj with
+                kobject type @blk_queue_ktype, @sysfs_lock, @__queue_lock
+  
+              finally,return the request queue to caller,return NULL if detected any error.
+
+            after blk_alloc_queue_node() returned a valid request queue descriptor,this routine
+            proceeding does :
+              set @node to @node_id
+              call blk_init_free_list() to initialize @rq which is type of struct request_list
+              set @request_fn to @rfn
+              set @prep_rq_fn to NULL
+              set @unplug_fn to generic_unplug_device
+              set @queue_flags to QUEUE_FLAG_DEFAULT
+              set @queue_lock to @lock(the lock passed by device driver)
+              set @sg_reserved_size to INT_MAX /* for SCSI */
+
+              call to blk_queue_make_request() for set @make_request_fn to @__make_request,and
+              set the remain members to their default values
+                include {
+                        @nr_request => BLKDEV_MAX_RQ - 128
+                        dma alignment 511
+                        set congestion threshold by call to blk_queue_congestion_threshold
+                        @nr_batching => BLK_BATCH_REQ - 32
+                        @unplug_thresh => 4
+                        @unplug_delay => 1s OR 3ms
+                        @unplug_timer function => blk_unplug_timeout
+                        @unplug_timer data => this request queue
+                        default limits
+                        maximum hardware sectors => BLK_SAFE_MAX_SECTORS - 255
+                        {
+                                @max_hw_sectors of @limits
+                                @max_sectors of @limits
+                        }
+                        bounce limit => BLK_BOUNCE_HIGH - (u64)blk_max_low_pfn << PAGE_SHIFT - 32 bit
+                }                                         -1ULL - 64 bit
+
+              call to elevator_init() with @name == NULL,this will let the request queue make
+              use of the system default elevator
+              /* driver is able to change elevator later */
+                if succeed to initialize elevator,then call to blk_queue_congestion_threshold()
+                to setup @nr_congestion_on, @nr_congestion_off
+                /* this routine been called one in blk_queue_make_request(),
+                 * but in it only default value is setup,
+                 * this time reset congestion threshold according to elevator status
+                 */
+
+            finally,return the request queue descriptor to driver,return NULL if any error detected.
+        
+      Setting up the interrupt handler -
+        driver next should invoke request_irq() to register IRQ line and associated IRQ handler.
+        because driver must wait the result of command that send to disk I/O controller,so it
+        must listen on it specified IRQ line to wait for disk interrupt raise.
+
+      Registering the disk -
+        finally,driver should register the disk.for do that,call to add_disk() routine on its
+        gendisk object. /**
+                         * the parameter @minors of add_disk() is the maximum number of partitions
+                         * of this disk
+                         * size of new disk partition table is @minors + 1
+                         */
+        as we have described above,the routine will call to blk_register_region() to register
+        the device number range in Kernel Mapping Domain @bdev_map.
