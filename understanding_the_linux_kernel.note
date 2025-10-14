@@ -26997,7 +26997,7 @@ Chapter 14 : Block Device Drivers
            * @bi_cnt:       pin count
            *                @bi_cnt == 0,this bio will be destroyed,include
            *                @bio_vec
-           * @bi_io_vec:    array of struct bio_vec instances,the actual vec list
+           * @bi_io_vec:    array of struct bio_vec instances,the exact vec list
            * @bi_end_io:    method invoked at the end of bio's I/O operation
            *                this method usually called by bio_endio(),whose parameter
            *                @err represents status code,0 means succeed
@@ -27993,7 +27993,7 @@ Chapter 14 : Block Device Drivers
           REQ_SOFTBARRIER               may not be passed by io scheduler
                                         request acts a barrier for the I/O scheduler
           REQ_HARDBARRIER               may not be passed by driver either
-                                        request acts a barier for the I/O scheduler
+                                        request acts a barrier for the I/O scheduler
                                         and the device dirver
           REQ_FUA                       forced unit access
           REQ_NOMERGE                   do not touch this for merging
@@ -29005,7 +29005,7 @@ Chapter 14 : Block Device Drivers
            * @lock:           request queue spin lock,usually is the driver's spin lock
            * return:          new request queue OR NULL
            * # EXPORT_SYMBOL
-           * # actually,call to blk_init_queue_node(rfb, lock, -1)
+           * # actually,call to blk_init_queue_node(rfn, lock, -1)
            */
           struct request_queue *blk_init_queue(request_fn_proc *rfn, spinlock_t *lock);
 
@@ -29103,3 +29103,153 @@ Chapter 14 : Block Device Drivers
                          */
         as we have described above,the routine will call to blk_register_region() to register
         the device number range in Kernel Mapping Domain @bdev_map.
+
+    The Strategy Routine :
+      strategy routine - a group of functions of the block device driver that interacts with
+                         the hardware block device to satisfy the requests collected in the
+                         dispatch queue.
+      request queue member @request_fn is the entrance of strategy routine.
+      general implementation of strategy routine -
+        for each request in dispatch queue,remove it,and interact with the block device controller
+        to service the request,wait until data transfer accomplish,then proceed with the next.
+
+        ! but not very efficient,because the strategy routine must suspend itself,thus it
+          must executes on a dedicated kernel thread.
+          the modern disk controllers that can process multiple I/O data transfers at a time,
+          strategy routine support multiple I/O data transfer can improve performance and
+          without to wait I/O complete.
+
+      most block device drivers adopt these strategy :
+        > strategy routine starts a data transfer for the first request in the queue and
+          sets up the block device controller so that it raises an interrupt when the data
+          transfer completes.
+          then the strategy routine terminates.
+        > when disk controller raises the interrupt,the interrupt handler invokes the strategy
+          routine again(immediately or deferred work).
+          the strategy routine either starts another data transfer for the current request,
+          or if all the chunks of data of the request have been transferred,removes the
+          request from the dispatch data and starts processing the next request.
+
+      two ways that block device driver make use of DMA :
+        1> for each segment of each bio of the request,set up a different DMA transfer
+        2> use a single scatter-gather DMA transfer to service all segments in all bios
+           of the request
+
+        ! a request can composed by several bio,and a bio can be composed by several segments.
+
+      ! the design of strategy routine depends on block device controller.
+
+      some helper functions :
+        <block/blk.h>
+          /**
+           * __elv_next_request - get next request in elevator's dispatch queue
+           * @q:                  the request queue
+           * return:              next request descriptor OR NULL
+           * # the works this routine does :
+           *     1> enter a infinite while-cycle
+           *     2> first,use a while-cycle,stop condition is @q->queue_head become empty
+           *     3> get request entry @q->queue_head.next
+           *     4> call to blk_do_ordered(),if it results TRUE,then return this request
+           *     5> if @q->queue_head become empty,then invoke elevator routine
+           *        @elevator_dispatch_fn() in elevator @ops.the implementation is
+           *        different for different I/O Scheduler,the main work of this routine
+           *        is select the best request,move it from request queue into
+           *        dispatch queue
+           *     6> if @elevator_dispatch_fn() returned _zero_,then return NULL to
+           *        caller,that means an error is happened when dispatch request
+           */
+          static inline struct request *__elv_next_request(struct request_queue *q);
+
+        <block/blk-core.c>
+          /**
+           * blk_peek_request - peek the request at the top of request queue
+           * @q:                request queue
+           * return:            request descriptor OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine call __elv_next_request() in a while-cycle,the stop condition
+           *   is __elv_next_request() returned NULL
+           *   # so in general case,call to this routine instead call to __elv_next_request()
+           *     directly in device driver code
+           *
+           *   if this req no REQ_STARTED enabled in @cmd_flags,then call to 
+           *   @q->elevator->ops->elevator_activate_req_fn() to notify IO Scheduler if
+           *   @cmd_flags of this req enabled REQ_SORTED;next enable REQ_STARTED flag
+           *
+           * # routine proceeding exuecte some checkings and settings,then break the
+           *   while-cycle,return the request to caller
+           *   if the request does not passed the examining,then start next iterating
+           * # ! the returned request of this routine should be started using
+           *     "void blk_start_request(struct request *)"(EXPORT_SYMBOL) before
+           *     low-level-driver starts processing it
+           *
+           *     function blk_start_request() first dequeue this request from
+           *     request queue,next set @resid_len of it,moreover,set @resid_len of
+           *     @next_rq if necessary,finally,call to blk_add_timer() on this request
+           */
+          struct request *blk_peek_request(struct request_queue *q);
+
+        <block/blk-barrier.c>
+          /**
+           * blk_do_ordered - do request ordering
+           * @q:              request queue
+           * @rqp:            selected request
+           * return:          TRUE OR FALSE
+           */
+          bool blk_do_ordered(struct request_queue *q, struct request **rqp);
+
+          what blk_do_ordered() does :
+            1> initialize a local variable @is_barrier from 
+                 blk_fs_request(*@rqp) && blk_barrier_rq(*@rqp)
+                 /* cmd_type == REQ_TYPE_FS - fs request */
+                                          /* cmd_flags & REQ_HARDBARRIER - acts like a barrier */
+            2> if @q->ordseq is FALSE - request flushing is not started  - QUEUE_ORDERED_NONE
+               then we must start ordering.
+            3> checks @is_barrier is TRUE,if it is,then we can not sort this request,because
+               fs request can not be ordered,and the position of barrier can not be changed.
+            4> checks whether @q->next_ordered != QUEUE_ORDERED_NONE,if it is,then
+               call to start_ordered() for start flushing.
+            5> if @q->next_ordered == QUEUE_ORDERED_NONE - queue ordering not supported
+               then terminate with prejudice.
+                 blk_dequeue_request() on *@rqp
+                 __blk_end_request_all() on *@rqp with error code -EOPNOTSUPP - end bio will be called
+                 set *@rqp to NULL and return FALSE
+            6> if @q->ordseq is TRUE - ordered sequence in progress
+               checks if *@rqp is not fs request AND the request is not the pre-flush request AND
+                         the request also is not post-flush request
+                      then return TRUE to caller
+                      otherwise,checks whether the request is ordered by draining
+                                if it is,then set *@rqp to NULL
+            7> finnaly return TRUE to caller
+
+        <block/blk-merge.c>
+          /**
+           * blk_rq_map_sg - map a request to scatter-gather DMA list
+           * @q:             request queue
+           * @rq:            request
+           * @sglist:        scatter-gather DMA list
+           * return:         number of sg entries setup
+           * # caller must make sure sg can hold @rq->nr_phys_segments entries
+           * # EXPORT_SYMBOL
+           * # routine use macro @rq_for_each_segment to traverses all segments in this
+           *   request,for each of them,map them into @sglist,besides,if previous segment
+           *   is able to be merged with current segment,then merge them as one segment
+           * # if REQ_COPY_USER enabled AND @rq->__data_len  & @q->dma_pad_mask
+           *   then this routine must pad sg list
+           * # finally,setup DMA drain if necessary,mark sg list end,return number of entries setup
+           * # to caller
+           */
+          int blk_rq_map_sg(struct request_queue *q, struct request *rq, struct scatterlist *sglist);
+
+      general steps that strategy routine execute :
+      /* example from do_cciss_request() <drivers/block/cciss.c> */
+
+        1> invoke blk_peek_request() to peek the request at the top of request queue 
+        2> call to blk_start_request() on the returned request before LLD start process it
+        3> set driver specific settings
+        4> call to sg_init_table() to init scatter-gather DMA list
+        5> call to blk_rq_map_sg() to map segments
+        6> after some prepare works,start DMA transfer
+
+        ! if block device does not support scatter-gather DMA transfer,then block device
+          driver must adopts method 1 described above to process data transfer - for each
+          segment,start a DMA transaction for data transfer
