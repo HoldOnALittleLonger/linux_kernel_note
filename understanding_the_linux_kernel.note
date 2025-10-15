@@ -29253,3 +29253,89 @@ Chapter 14 : Block Device Drivers
         ! if block device does not support scatter-gather DMA transfer,then block device
           driver must adopts method 1 described above to process data transfer - for each
           segment,start a DMA transaction for data transfer
+
+    The Interrupt Handler :
+      when block device DMA data transfer terminated,it will raises an interrupt to CPU,block device
+      driver must register interrupt handler to response to the interrupt signal.
+      if all chunks of data been transfered,then interrupt handler should invoke strategy routine
+      for next request;otherwise,it should update fields of current request,invoke strategy routine
+      to process the data transfer yet to be performed.
+
+      example from <drivers/block/swim3.c> - Super Woz Integrated Machine 3 :
+        routine start_request() - strategy routine
+          this function first checks whether the floppy is in idle.
+          if it is in idle now,call to blk_fetch_request() to peek a request from dispatch queue,
+          and invoke blk_start_request() on it.
+          after some checkings and settings,call to routine act(),which will commands to block
+          device I/O controller to finish some works;in the case that have to transfer data,
+          function setup_transfer() will be called for to setup DMA.
+
+        routine swim3_interrupt - the interrupt handler
+          the ISR acknowledge device interrupt signal,and do different work corresponding to
+          the command that previous request have required.
+          for data transfer command -
+            if there remains some chunks of data of current request,then update fields of
+            the request,and invoke act() again.the checking is executed by routine
+            swim3_end_request() - FALSE: no more data have to be transferred
+                                  TRUE:  there is some remained data have to be transfered
+            if any error is detected,it will give up to current request,call to swim3_end_request_cur()
+            to process end bio with error code -EIO,set floppy state to idle,and call to
+            strategy routine start_request() for next request.
+            if current request have been finished without error,then it set floppy to idle
+            state,and call to strategy routine start_request() for next request.
+            finally,return IRQ_HANDLED.
+
+          swim3_end_request() - routine used to end request
+            this routine just call to __blk_end_request(),if which is resulted in TRUE,return TRUE to
+            caller.
+
+          /* <block/blk-core.c> */
+
+          bool __blk_end_request(rq, error, nr_bytes) - block I/O subsystem helper for drivers to complete the request
+            this routine just one statement :
+              return __blk_end_bidi_request(@rq, @error, @nr_bytes, 0)
+                                            |    |       |          |
+                                            |    |       |          +--> @bidi_bytes - number of bytes
+                                            |    |       |               to complete @rq->next_rq
+                                            |    |       +--> number of bytes to complete
+                                            |    +--> 0 success, < 0 error 
+                                            +--> the request being processed
+            # EXPORT_SYMBOL
+
+          static bool __blk_end_bidi_request(rq, error, nr_bytes, bidi_bytes)
+            - complete a bidi request with queue lock held
+
+            invoke blk_update_bidi_request() with received parameters to update request,return TRUE
+            if the function returned TRUE
+            otherwise,call to blk_finish_request(),and return FALSE - that error detected
+
+          static bool blk_update_bidi_request(rq, error, nr_bytes, bidi_bytes) - update bidi request
+            call to blk_update_request() with function's parameters to update the request,
+            if the routine returned TRUE,then return TRUE to calller
+            if the bidi request must be completed as a whole,then call blk_update_request() again
+            on @rq->next_rq if @next_rq is not NULL
+            otherwise,return FALSE to caller
+
+          bool blk_update_request(req, error, nr_bytes)
+            - special helper function for request stacking drivers
+
+            ends I/O on a number of bytes attached to the request,but does not complete
+            the request structure even if the request does not have leftover
+            if the request has leftover,sets it up for the next range of segments
+            the routine returns TRUE if the request has more data
+            the routine returns FALSE if the request does not have any more data
+
+            this routine might call to req_bio_endio() on @req,if @nr_bytes is greater than
+            current bio's @bi_size or the last bio have not completed.
+            /**
+             * if @nr_bytes spanned several BIOs,but the last BIO remained some data have not
+             * completed,then req_bio_endio() will be called on that BIO which the number of
+             * completed bytes of it to update its fields for the remained segments
+             * of course,@nr_bytes will be updated during while-cycle iterating,if it is
+             * greater than current BIO,then req_bio_endio() should be called on current BIO
+             * to mark it that been completed
+             */
+            if more data have to be transfered,blk_recalc_rq_segments() is called for update
+            this request @req,update some its fields for remained segments
+
+            # EXPORT_SYMBOL            
