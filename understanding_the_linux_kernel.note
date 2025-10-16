@@ -29339,3 +29339,150 @@ Chapter 14 : Block Device Drivers
             this request @req,update some its fields for remained segments
 
             # EXPORT_SYMBOL            
+
+    Opening a Block Device File :
+      kernel opens a block device file every time that a filesystem is mounted over a disk or
+      partition,every time that a swap partition is activated,and every time that a User Mode
+      process issues an open() system call on a block device file.
+      the common step is that -
+        kernel first lookup such block device descriptor,create a new one if it is not exist.
+        next,setup the file operation methods for the forthcoming data transfers.
+        invoke file operation open() on the device file.
+
+      we have known that @open method of @def_blk_fops is set to blkdev_open(),and in which,
+      kernel will call to bd_acquire() routine to get the block device descriptor,use it
+      to set filp object.
+      the sys_open() system call on a block device file,finally,call to blkdev_open().
+
+      <fs/block_dev.c>
+        /**
+         * blkdev_open - generic routine to open a block device file
+         * @inode:       block device file inode
+         * @filp:        block device file object
+         * return:       0 OR error code
+         * # the steps this routine does :
+         *     1> enable O_LARGEFILE
+         *     2> enable FMODE_NDELAY, FMODE_EXCL, FMODE_WRITE_IOCTL,depends on
+         *        @f_flags of @filp
+         *     3> get block device descriptor through bd_acquire()
+         *     4> set @f_mapping of @filp to bd_inode->i_mapping of the block device
+         *     5> get the block device through blkdev_get()
+         *     6> if FMODE_EXCL is enabled,then call to bd_claim() to set bd_holder
+         *     7> return to caller 0 OR any error code
+         */
+        static int blkdev_open(struct inode *inode, struct file *filp);
+
+        /**
+         * bd_acquire - acqurie a block device through block device file inode
+         * @inode:      device file inode
+         * return:      block device descriptor OR NULL
+         */
+        static struct block_device *bd_acquire(struct inode *inode);
+
+        brief description for bd_acquire() :
+          checks whether the block device of this inode been opened by some one.if 
+          it is,@i_bdev must not be NULL,then we can simply increase the ref counter
+          and return it to caller.
+          if this is the first time to open the block device,then call bdget()
+          with the device number @inode->i_rdev.
+          if bdget() returned a valid descriptor,then increase its ref counter,
+          set @i_bdev,@i_mapping to the block device descriptor and its @bd_inode->i_mapping
+          member,respectively.
+          list add @i_devices to @bd_inodes of the block device descriptor.
+          return the descriptor to caller,return NULL if bdget() failed.
+
+        /**
+         * blkdev_get - attempt to get the block device with wanted file mode
+         * @bdev:       block device descriptor
+         * @mode:       file mode
+         * return:      0 OR error code
+         * # EXPORT_SYMBOL
+         * # actually call to __blkdev_get() with @for_part == 0
+         */
+        int blkdev_get(struct block_device *bdev, fmode_t mode);
+
+        /**
+         * __blkdev_get - main routine to get a block device
+         * @bdev:         block device descriptor
+         * @mode:         file mode
+         * @for_part:     whether getting for partition
+         * return:        0 OR error code
+         */
+        static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part);
+
+        what __blkdev_get() does :
+          1> initialize local variable @perm with given file mode @mode
+             enable MAY_READ if FMODE_READ
+             enable MAY_WRITE if FMODE_WRITE
+          2> call to cgroup helper devcgroup_inode_permission() to process permission checking,
+             bdput() the block device and return error to caller if failed on checking
+          3> lock kernel through lock_kernel() /* unlock_kernel() does the reseve */
+          4> invoke get_gendisk() on @bdev->bd_dev.
+             routine get_gendisk() get partitioning information for a given device.
+             if the device number is not equal to BLOCK_EXT_MAJOR
+             then get the disk through kobj_lookup() on Kernel Mapping Domain @bdev_map.
+             otherwise,get the part through idr_find() on the IDR @ext_dev_idr,then use the
+             part to get the disk which contains it.
+             goto label "out_unlock_kernel" if we failed to get the disk.
+             /* get_gendisk() returns struct gendisk *(local variable @disk) */
+          5> mutex_lock_nested() @bd_mutex with @for_part.
+             checks @bd_openers of @bdev.
+             if it is _zero_,that means we are the first kernel control path that opened the block device,
+             thus we must setup it.
+               set -
+                 @bd_disk to @disk
+                 @bd_contains to @bdev
+
+             if @partno returned by get_gendisk() is _zero_,that means the @disk is not a
+             partition,it is whole disk.
+               then
+                 set - 
+                   @bd_part to disk_get_part(@disk, @partno) /* the routine returns struct hd_struct * */
+                 goto label "out_clear" if disk_get_part() returned NULL
+  
+                 if @disk->fops->open() is defined,then call it.
+                 if the method open() is interrupted,then do some cleaning works,and jump to step 4>
+                 for restart again.
+                 if the method open() returned another postive value,that means an error detected,
+                 goto label "out_clear".
+  
+               if @bd_openers stay _zero_ after @open() method returned,then we call to
+               bd_set_size() to set @i_size, @bd_block_size and @i_blkbits.
+               next,set @bd_inode->i_data.backing_dev_info,the value either is get from request queue
+               on the disk through blk_get_backing_dev_info(),or the @default_backing_dev_info.
+               finally,checks whether @bd_invalidated is TRUE,if it is,call to rescan_partitions()
+               to rescan disk parition table and use the partition info to set @part_tbl.
+
+             if @partno returned by get_gendisk() is not _zero_,that means @disk is a partition.
+               in this case,we have to get the whole disk at first.for do that,call to bdget_disk(@disk, 0).
+               next,recursive calling to __blkdev_get() on the whole disk with @for_part == 1.
+               if the recursion returned FALSE,goto label "out_clear",
+               otherwise,set @bd_contains to the whole disk,and set @bd_inode->i_data.backing_dev_info to
+               the whole disk's backing device info,set @bd_part to this partition.
+               if @disk is not in fly(no GENHD_FL_UP) OR @bd_part is NULL OR @bd_part->nr_sects is _zero_,
+               then set error code to -ENXIO,and goto label "out_clear"
+               finally,call to bd_set_size() to set @i_size,@bd_block_size and @i_blkbits.
+          6> if @bd_openers is not _zero_,that means someone have opened this disk,then we should undo
+             get_gendisk().
+             module_put() @disk->fops->owner,put_disk() on @disk.
+             proceeding checks whether @bd_contains is equal to @bdev,if it is,that means this block
+             device descriptor represents the whole disk,then call to @bd_disk->fops->open() if the method
+             is exist,goto "out_unlock_bdev" if @open() failed. 
+             call to rescan_partitions() to sescan partition table if @bd_invalidated is TRUE.
+          7> normal end path -
+               increase @bd_openers
+               increase @bd_part_count if @for_part is TRUE
+               unlock mutex and kernel
+               return _zero_ to caller
+              
+          label "out_clear" :
+            disk_put_part() the @bd_part
+            @bd_disk = @bd_part = NULL
+            set @backing_dev_info to @default_backing_dev_info
+            __blkdev_put() @bd_contains if we had recursive calling to __blkdev_put
+            set @bd_contains to NULL
+            unlock mutex("out_unlock_bdev") and kernel("out_unlock_kernel")
+            module_put() @disk->fops->owner if we did get_gendisk()
+            put_disk() on @disk
+            bd_put() the block device descriptor @bdev
+            return error code to caller
