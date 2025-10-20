@@ -11925,7 +11925,7 @@ Chapter 8 : Memory Management
              * @ptl:          split pt lock
              * @slab:         SLUB: pointer to slab
              * @first_page:   compound tail pages
-             * index:         offset within mapping
+             * @index:         offset within mapping
              * @freelist:     SLUB: freelist req. slab lock
              * @lru:          pageout list
              * @virtual:      kernel virtual address,NULL if not kmapped
@@ -29486,3 +29486,180 @@ Chapter 14 : Block Device Drivers
             put_disk() on @disk
             bd_put() the block device descriptor @bdev
             return error code to caller
+
+
+Chapter 15 : The Page Cache
+    The Page Cache :
+      page cache is the main disk cache used by the Linux Kernel.
+      an entry in the page cache contains the data read from disk or write to disk.
+      for read access,if the disk data contents does not contained in the page cache,
+      a new entry would be created and filled with the disk data;other process can access
+      to this page in the page cache instead to issues an I/O request to the disk.
+      for write access,if the page cache entry corresponding to the request disk block
+      is not contained,a new entry would be created,then the data is written into the entry;
+      flush operation is not happen immediately,it will be delayed a few seconds,if there
+      is another process need to read access the disk data or write access the disk data,
+      it can simply operates on the page cache entry;the dirty page cache will be flushed by
+      a special kernel thread,which flush the dirty pages in a well-defined period.
+
+      !! KERNEL CODE AND KERNEL STRUCTURES DO NOT NEED TO BE READ FROM OR WRITTEN TO DISK.
+
+      types of pages in the page cache :
+        1> pages containing data of regular file
+        2> pages containing directories
+        3> pages containing data directly read from block device files
+        4> pages containing data of User Mode processes that have been swapped out on disk
+        5> pages belonging to files of special filesystems(Shared memory, Interprocess Communication, etc)
+
+      ! the file(the file's inode) is called the page's owner.
+      ! open flag O_DIRECT will by-pass page cache for the I/O operations on the opened file.
+        through O_DIRECT flag,some programs can make use of their owns disk cache algorithm.
+
+      page cache implementation requirements -
+        > quickly locate a specific page containing data relative to a given owner.
+          to take the maximum advantage from the page cache,searching it should be a very
+          fast operation.
+        > keep track of how every page in the page cache should be handled when reading or
+          writing its content.
+
+    The address_space Object :
+      member @i_mapping usually points to the member @i_data of the same inode,@i_data is
+      the page cache of this inode.
+      member @mapping and @index of a page descriptor,establish a link between the page
+      and the page cache.
+
+      because pages in page cache have not to to physically adjacent in the disk,thus can
+      not identify it by a device number and a block number,instead,identified by an owner
+      and by an index within the owner's data - usually,an inode and an offset.
+
+      ! the page cache may contain multiple copies of the same disk data.
+        - in the regular file's inode's page cache
+        - in the device file's master inode's page cache
+        same disk data appears in two different pages referenced by two different address_space
+        objects.
+
+      <linux/fs.h>
+        /**
+         * address_space_operations - methods that define how the owner's pages are
+         *                            handled
+         * @writepage:                called by the VM to write a dirty page to backing store
+         * @readpage:                 called by the VM to read a page from backing store
+         * @sync_page:                called by the VM to notify the backing store to perform
+         *                            all queued I/O operations for a page
+         *                            I/O operations for other pages associated with this
+         *                            address_space object may also performed
+         * @writepages:               called by the VM to write out pages associated with the
+         *                            address_space object
+         * @set_page_dirty:           called by the VM to set a page dirty
+         * @readpages:                called by the VM to read pages associated with the
+         *                            address_space object
+         * @write_begin:              called by the generic buffered write code to ask the
+         *                            filesystem to prepare to write @len bytes at the
+         *                            given offset in the file
+         * @write_end:                after a successful write_begin(),and data copy,write_end()
+         *                            must be called,@len is the original @len passed to write_begin()
+         *                            and copied is the amount that was able to be copied
+         * @bmap:                     called by the VFS to map a logical block offset,within object
+         *                            to physical block number
+         * @invalidatepage:           if a page has PagePrivate set,then invalidatepage will be called
+         *                            when part or all of the page is to be removed from the
+         *                            address space
+         * @releasepage:              called on PagePrivate pages to indicate that the page should be
+         *                            freed if possible
+         * @direct_IO:                called by the generic read/write routines to perform direct IO
+         * @get_xip_page:             called by the VM to translate a block number to a page
+         * @migrate_page:             used to compact the physical memory usage
+         * @launder_page:             called before freeing a page - it writes back the dirty page
+         * @error_remove_page:        normally set to generic_error_remove_page() if truncation is ok
+         *                            for this address space
+         */
+        struct address_space_operations {
+                int (*writepage)(struct page *page, struct writeback_control *wbc);
+                int (*readpage)(struct file *, struct page *);
+                void (*sync_page)(struct page *);
+
+                int (*writepages)(struct address_space *, struct writeback_control *);
+                int (*set_page_dirty)(struct page *page);
+                int (*readpages)(struct file *filp, struct address_space *mapping,
+                                 struct list_head *pages, unsigned nr_pages);
+                int (*write_begin)(struct file *, struct address_space *mapping,
+                                   loff_t pos, unsigned len, unsigned flags,
+                                   struct page **pagep, void **fsdata);
+                int (*write_end)(struct file *, struct address_space *mapping,
+                                 loff_t pos, unsigned len, unsigned copied,
+                                 struct page *page, void *fsdata);
+                secotr_t (*bmap)(struct address_space *, sector_t);
+                void (*invalidatepage)(struct page *, unsigned long);
+                int (*releasepage)(struct page *, gfp_t);
+                ssize_t (*direct_IO)(int, struct kiocb *, const struct iovec *iov,
+                                     loff_t offsetm unsigned long nr_segs);
+                int (*get_xip_mem)(struct address_space *, pgoff_t, int, void **,
+                                   unsigned long *);
+                int (*migratepage)(struct address_space *, struct page *, struct page *);
+                int (*launder_page)(struct page *);
+                int (*is_partially_uptodate)(struct page *, read_descriptor_t *,
+                                             unsigned long);
+                int (*error_remove_page)(struct address_space *, struct page *);
+        };          
+
+        /**
+         * address_space - object used to group and manage pages in the page cache
+         * @host:          owner of the page cache,inode or block_device
+         * @page_tree:     radix tree of all pages
+         * @tree_lock:     lock protecting @page_tree
+         * @i_mmap_writable:
+         *                 count VM_SHARED mappings
+         * @i_mmap:        tree of private and shared mappings
+         * @i_mmap_nolinear:
+         *                 list of VM_NONLINEAR mappings
+         * @i_mmap_lock:   lock used to protect i_mmap count,list,tree
+         * @truncate_count:
+         *                 cover race condition with truncate
+         * @nrpages:       number of total pages
+         * @wirteback_index:
+         *                 index that writeback starts
+         * @a_ops:         address space methods
+         * @flags:         error bits / gfp mask
+         * @backing_dev_info:
+         *                 device readahead,etc
+         * @private_lock:  lock,usually protect @private_list
+         * @private_list:  usually,a list of dirty buffers of indirect blocks
+         *                 associated with the inode
+         *                 # generic list can be freely used by the filesystem
+         *                   for its specific purposes
+         * @assoc_mapping: usually,pointer to the address_space object of the block
+         *                 device including the indirect blocks
+         */
+        struct address_space {
+                struct inode *host;
+                struct radix_tree_root page_tree;
+                spinlock_t tree_lock;
+                unsigned int i_mmap_writable;
+                struct prio_tree_root i_mmap;
+                struct list_head i_mmap_nonlinear;
+                spinlock_t i_mmap_lock;
+                unsigned int truncate_count;
+                unsigned long nrpages;
+                pgoff_t writeback_index;
+                const struct address_space_operations *a_ops;
+                unsigned long flags;
+                struct backing_dev_info *backing_dev_info;
+                spinlock_t private_lcok;
+                struct list_head private_list;
+                struct address_space *assoc_mapping;
+        } __attribute__((aligned(sizeof(long))));
+
+      if the owner of a page in the page cache is a file,the address_space object is embedded
+      in the @i_data field of a VFS inode object,@i_mapping field of the inode always points
+      to the address_space object(@i_data) of the owner of the pages containing the inode's
+      data.the @host of address_space object points to the inode object in which the descriptor
+      is embedded.
+
+      if a page contains data read from a block device file,that is it stores "raw" data of a block
+      device,the address_space object is embedded in the "master" inode of the file in the bdev
+      special filesystem associated with the block device.
+      /* the inode is referenced by @bd_inode */
+      @i_mapping points to the address_space object of the "master" inode,and @host points to
+      the master inode.thus,all pages containing data read from a block device have the same
+      address_space object even if they have been accessed by referring to different block device
+      files. /* page descriptor's @mapping member */
