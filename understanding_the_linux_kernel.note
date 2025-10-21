@@ -29663,3 +29663,154 @@ Chapter 15 : The Page Cache
       the master inode.thus,all pages containing data read from a block device have the same
       address_space object even if they have been accessed by referring to different block device
       files. /* page descriptor's @mapping member */
+
+    The Radix Tree : 
+      radix tree is introduced since Linux 2.6 for improve page cache lookup performance,each
+      address_space object has a member named @page_tree,it is the root of radix tree.
+
+      <linux/radix-tree.h>
+        #define RADIX_TREE_MAX_TAGS 2
+
+        /**
+         * radix_tree_root - root structure of radix tree
+         * @height:          current tree height
+         * @gfp_mask:        gfp mask for new node
+         * @rnode:           root node(top level 1)
+         * # the pages in page cache is stored in leaves
+         */
+        struct radix_tree_root {
+                unsigned int height;
+                gfp_t gfp_mask;
+                struct radix_tree_node *rnode;
+        };
+
+      <lib/radix-tree.c>
+        /* general is 2^6 => 64 */
+        #define RADIX_TREE_MAP_SIZE (1UL << RADIX_TREE_MAP_SHIFT)
+                                    /* RADIX_TREE_MAP_SHIFT
+                                     * #ifdef __KERNEL__ => CONFIG_BASE_SMALL ? 4 : 6
+                                     * #else  3
+                                     */
+
+        #define RADIX_TREE_TAG_LONGS \
+                ((RADIX_TREE_MAP_SIZE + BITS_PER_LONG - 1) / BITS_PER_LONG)
+
+        /**
+         * radix_tree_node - node structure of radix tree
+         * @height:          node height
+         * @count:           not NULL pointers counter
+         * @rcu_head:        RCU
+         * @slots:           pointer array
+         * @tags:            array of flags
+         * # each node of radix tree can have up to 64(generally) pointers
+         *   to other nodes or to page descriptors
+         */
+        struct radix_tree_node {
+                unsigned int height;
+                unsigned int count;
+                struct rcu_head rcu_head;
+                void *slots[RADIX_TREE_MAP_SIZE];
+                unsigned long tags[RADIX_TREE_MAX_TAGS][RADIX_TREE_TAG_LONGS];
+        };
+
+      radix_tree_node.slots[] is used to stores node pointers or page descriptors,if current
+      node is not leave,@slots stores pointers to other nodes;otherwise,it stores page descriptors.
+      and the size of @slots is 64,thus,for a leave node,it can stores 64 pages from index 0 - 63.
+      if a new page has the index greater than current highest index need to be inserted,
+      the tree's height must be increased.
+      e.g.
+        radix_tree_root.height == 1
+        => only one radix_tree_node entity
+
+        radix_tree_node.height == 1
+        radix_tree_node.slots[0] -- radix_tree_node.slots[63] => represents page0 - page63
+
+        insert page64
+
+        radix_tree_node.height == 1
+        radix_tree_node.slots[0] => radix_tree_node(leave,index 0 - 63)
+        radix_tree_node.slots[1] => radix_tree_node(leave,index 64 - 127)
+        radix_tree_node.slots[2] => radix_tree_node(leave,index 128 - 191)
+        ...
+        radix_tree_node.slots[63] => radix_tree_node(leave,index 4031 - 4095)
+
+        leave1.height == 2
+        leave2.height == 2
+        leave2.count == 1 => page64 <= leave2.slots[0]
+    
+        radix_tree_root.height == 2 /* current height of the tree is 2 */
+
+                +------+
+                | root | @height = 2
+                +------+
+                 |
+                 +--> +------+ @height = 1
+                      | node | @count = 2
+                      +------+ 
+                       |
+                       V
+                     | 0 | 1 | 2 | ... | 63 | => slots
+                       |   |
+                       |   +------+
+                       |          |
+                       V          V
+           @height = 2 +------+   +------+ @height = 2
+           @count = 1  | node |   | node | @count = 1
+                       +------+   +------+
+                        |          |
+                        |          V
+                        |        | 0 | 1 | 2 | ... | 63 | => slots
+                        |          |
+                        |          +--> page64
+                        V
+                      | 0 | 1 | 2 | ... | 63 | => slots
+
+      32 bit index - page size 4kB
+      | radix tree height | highest index | maximum file size |
+        0                   none            0bytes
+        1                   2^6 - 1         256kB
+        2                   2^12 - 1        16MB
+        3                   2^18 - 1        1GB
+        4                   2^24 - 1        64GB
+        5                   2^30 - 1        4TB
+        6                   2^32 - 1        16TB
+
+      page index and array index translate : (32 bit page index)
+        similar to paging system and Page Table.
+
+        for index @i
+
+        if tree height is 1
+        then
+          index of slots[] with height 1 =>
+            @i & 111111
+        else if tree height is 2
+        then
+          index of slots[] with height 1 =>
+            @i & 111111 000000
+          index of slots[] with height 2 =>
+            @i & 000000 111111
+        else if tree height is 3
+        then
+          index of slots[] with height 1 =>
+            @i & 111111 000000 000000
+          index of slots[] with height 2 =>
+            @i & 000000 111111 000000
+          index of slots[] with height 3 =>
+            @i & 000000 000000 111111
+        AND SO ON
+
+        if tree height is 6
+        then
+          index of slots[] with height 1 =>
+            @i & 11 000000 000000 000000 000000 000000
+          index of slots[] with height 2 =>
+            @i & 00 111111 000000 000000 000000 000000
+          index of slots[] with height 3 =>
+            @i & 00 000000 111111 000000 000000 000000
+          index of slots[] with height 4 =>
+            @i & 00 000000 000000 111111 000000 000000
+          index of slots[] with height 5 =>
+            @i & 00 000000 000000 000000 111111 000000
+          index of slots[] with height 6 =>
+            @i & 00 000000 000000 000000 000000 111111
