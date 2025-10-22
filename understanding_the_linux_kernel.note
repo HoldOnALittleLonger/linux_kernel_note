@@ -1281,6 +1281,8 @@ Chapter 2 : Memory Addressing
       pte_to_pgoff(pte)
       /*  extracts from the content @pte of a Page Table entry the file offset corresponding to a page belonging to
        *  a non-linear file memory mapping
+       *  <linux/types.h> #define pgoff_t unsigned long
+       *  # type of an index into the page cache
        */
 
       pgoff_to_pte(offset)
@@ -11925,7 +11927,7 @@ Chapter 8 : Memory Management
              * @ptl:          split pt lock
              * @slab:         SLUB: pointer to slab
              * @first_page:   compound tail pages
-             * @index:         offset within mapping
+             * @index:        offset within mapping
              * @freelist:     SLUB: freelist req. slab lock
              * @lru:          pageout list
              * @virtual:      kernel virtual address,NULL if not kmapped
@@ -29714,8 +29716,8 @@ Chapter 15 : The Page Cache
         };
 
       radix_tree_node.slots[] is used to stores node pointers or page descriptors,if current
-      node is not leave,@slots stores pointers to other nodes;otherwise,it stores page descriptors.
-      and the size of @slots is 64,thus,for a leave node,it can stores 64 pages from index 0 - 63.
+      node is not leaf,@slots stores pointers to other nodes;otherwise,it stores page descriptors.
+      and the size of @slots is 64,thus,for a leaf node,it can stores 64 pages from index 0 - 63.
       if a new page has the index greater than current highest index need to be inserted,
       the tree's height must be increased.
       e.g.
@@ -29728,15 +29730,15 @@ Chapter 15 : The Page Cache
         insert page64
 
         radix_tree_node.height == 1
-        radix_tree_node.slots[0] => radix_tree_node(leave,index 0 - 63)
-        radix_tree_node.slots[1] => radix_tree_node(leave,index 64 - 127)
-        radix_tree_node.slots[2] => radix_tree_node(leave,index 128 - 191)
+        radix_tree_node.slots[0] => radix_tree_node(leaf,index 0 - 63)
+        radix_tree_node.slots[1] => radix_tree_node(leaf,index 64 - 127)
+        radix_tree_node.slots[2] => radix_tree_node(leaf,index 128 - 191)
         ...
-        radix_tree_node.slots[63] => radix_tree_node(leave,index 4031 - 4095)
+        radix_tree_node.slots[63] => radix_tree_node(leaf,index 4031 - 4095)
 
-        leave1.height == 2
-        leave2.height == 2
-        leave2.count == 1 => page64 <= leave2.slots[0]
+        leaf1.height == 2
+        leaf2.height == 2
+        leaf2.count == 1 => page64 <= leaf2.slots[0]
     
         radix_tree_root.height == 2 /* current height of the tree is 2 */
 
@@ -29814,3 +29816,117 @@ Chapter 15 : The Page Cache
             @i & 00 000000 000000 000000 111111 000000
           index of slots[] with height 6 =>
             @i & 00 000000 000000 000000 000000 111111
+
+    Page Cache Handling Functions :
+      Finding a page :
+        routine find_get_page() is used to find and get a page reference from page cache.
+
+        <mm/filemap.c>
+          /**
+           * find_get_page - find and get a page reference
+           * @mapping:       address space
+           * @offset:        the page index
+           * return:         page descriptor OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine returns a page descriptor with refcount increased
+           * # steps :
+           *     1> acquire rcu_read_lock()
+           *     2> invokes radix_tree_lookup_slot() with arguments @mapping->page_tree, @offset
+           *     3> if returned void ** is not NULL
+           *        # lookup slot returns the address of a slot in radix tree member @slots[]
+           *          so,the type is void **
+           *     4> then get page descriptor through radix_tree_deref_slot() on the void ** pointer
+           *        # radix_tree_deref_slot() make use of rcu_dereference() to get the element
+           *          in that slot
+           *     5> repeat from step 2> if
+           *          NULL page descriptor OR page descriptor == RADIX_TREE_RETRY
+           *          page_cache_get_speculative() on the page descriptor was failed
+           *          # increase struct page._count member
+           *            it is a virtual memory BUG if
+           *              in_interrupt()
+           *              !in_atomic()
+           *              @_count == 0
+           *              PageTail(the page) is TRUE
+           *          address of the page descriptor != *(the void ** pointer)
+           *          # page_cache_release() current page descriptor
+           *     6> rcu_read_unlock()
+           *     7> return the page descriptor
+           */
+          struct page *find_get_page(struct address_space *mapping, pgoff_t offset);
+
+          /**
+           * find_get_pages - find and get a group of pages having contiguous indices
+           * @mapping:        address space
+           * @start:          start page index
+           * @nr_pages:       maximum number of pages
+           * @pages:          page descriptor pointer array provided by caller
+           * return:          number of pages which were found
+           * # search returns a group of mapping-contiguous pages with ascending indexes
+           *   there may be holes in the indices due to not-present pages
+           */
+          unsigned find_get_pages(struct address_space *mapping, pgoff_t start,
+                                  unsigned int nr_pages, struct page **pages);
+
+          brief description for find_get_pages() :
+            the primary routine is radix_tree_gang_lookup_slot().
+            find_get_pages() call to this routine with rcu_read_lock(),the arguments
+            are @mapping->page_tree, (void ***)@pages, @start, @nr_pages.
+                                     |
+                                     +--> /* used as slot pointers array */
+            radix_tree_gang_lookup_slot() returns the number of slots it has found.
+            then find_get_pages() processes a for-cycle,from 0 to number of found slots - 1,
+            it call to radix_tree_deref_slot() on (void **)@pages[current index] to
+            get the page descriptor,if the page descriptor passed some checkings,then place
+            it in current position of void * array @pages.
+            finally,rcu_read_unlock() and returns the number of found pages to caller.
+            /**
+             * the checkings in for-cycle is similar to find_get_page()
+             *   continue to next iteration if NULL page descriptor
+             *   restart searching from call to radix_tree_gang_lookup_slot() if page is RADIX_TREE_RETRY
+             *   repeat radix_tree_deref_slot() if page_cache_get_speculative() resulted FALSE
+             *   page_cache_release() current page and repeat radix_tree_deref_slot() if
+             *     this page is not equal to *((void **)@pages[current index])
+             */
+
+          /* find_lock_page - find and get a page in page cache,set PG_locked bit for it */
+          # EXPORT_SYMBOL
+          struct page *find_lock_page(struct address_space *mapping, pgoff_t offset);
+
+          /**
+           * this routine invokes lock_page() function to process setup of PG_locked bit.
+           * lock_page() is defined in <linux/pagemap.h> as a static function,it will invokes
+           * try_lock_page() at first.if failed,then invokes __lock_page() routine,in which,
+           * current process will be put in TASK_UNINTERRUPTIBLE state,and also be inserted into
+           * wait queue -
+           *   page_zone(the page)->wait_table[hash_ptr(the page, page_zone(the page)->wait_table_bits)]
+           * routine unlock_page() is used to release a locked page,it clear PG_locked bit,and process
+           * a SMP memory barrier after cleaned the bit,wake up the process waiting for this page.
+           *
+           * # __lock_page() and unlock_page() are defined in <mm/filemap.c>,each of them is
+           * EXPORT_SYMBOL
+           * # __lock_page() invokes routine __wait_on_bit_lock(),which is defined in <kernel/wait.c>.
+           *   function sync_page() as the parameter @action passed to __wait_on_bit_lock().
+           *   the function sync_page(),it retrieves @mapping of the page descriptor,then call to
+           *   @sync_page of @a_ops of @mapping if the method is defined,call to io_scheduler() to
+           *   relinquish CPU time;after resume,return _zero_ to caller that the routine __wait_on_bit_lock().
+           * # for block device,the default value of method @sync_page is block_sync_page() in <fs/buffer.c>,
+           *   which will call to blk_run_backing_dev() defined in <linux/backing-dev.h> if this page is in
+           *   page cache(@mapping of the page is not NULL),finally,method unplug_io_fn() is invoked if
+           *   it is exist.
+           */
+
+          /**
+           * find_or_create_page - locate or add a page in page cache
+           * @mapping:             page's address space
+           * @index:               page index into the mapping
+           * @gfp_mask:            gfp mask used for create new page
+           * return:               page descriptor OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine first invokes find_lock_page() attempts to get and lock a page at given index
+           *   into @mapping
+           *   if NULL pointer is returned,it will invokes __page_cache_alloc() with @gfp_mask to creates
+           *   a new page,then invokes add_to_page_cache_lru() attempts insert the new page to page cache
+           *   on the given index;finally,return the page descriptor with refcount been increased and bit
+           *   PG_locked is set
+           */
+          struct page *find_or_create_page(struct address_space *mapping, pgoff_t index, gfp_t gfp_mask);
