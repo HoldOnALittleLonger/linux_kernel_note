@@ -12058,6 +12058,7 @@ Chapter 8 : Memory Management
               };
 
               !!  page flag operations are defined in same file with these format :
+                    /* Name first character is uppercase */
                     Page<Name without "PG_" prefix>(page descriptor pointer)
                     SetPage<Name without "PG_" prefix>(page descriptor pointer)
                     ClearPage<Name without "PG_" prefix>(page descriptor pointer)
@@ -29930,3 +29931,136 @@ Chapter 15 : The Page Cache
            *   PG_locked is set
            */
           struct page *find_or_create_page(struct address_space *mapping, pgoff_t index, gfp_t gfp_mask);
+
+      Adding a page :
+        <linux/pagemap.h>
+          /**
+           * add_to_page_cache - lock the page and insert it into page cache at a given position
+           * @page:              page descriptor
+           * @mapping:           page mapping space
+           * @offset:            index into page cache
+           * @gfp_mask:          gfp mask used to allocate new radix tree node
+           * return:             0 OR error code
+           * # routine clear PG_locked if any error was happened
+           * # routine actually call to add_to_page_cache_locked() to deal with inserting
+           * # ! this routine returned with PG_locked is set
+           */
+          static inline int add_to_page_cache(struct page *page, struct address_space *mapping,
+                                              pgoff_t offset, gfp_t gfp_mask);
+
+        <mm/filemap.c>
+          /**
+           * add_to_page_cache_locked - add a locked page to the page cache
+           * @page:                     page descriptor
+           * @mapping:                  address space
+           * @offset:                   page index
+           * @gfp_mask:                 node allocation mode
+           * return:                    0 OR error code
+           * # EXPORT_SYMBOL
+           * # ! this routine returned with PG_locked is set
+           */
+          int add_to_page_cache_locked(struct page *page, struct address_space *mapping,
+                                       pgoff_t offset, gfp_t gfp_mask);
+
+          brief description for add_to_page_cache_locked() :
+            first,call to mem_cgroup_cache_charge(),this function is a part of memory
+            control group./* cgroup for virtual memory subsystem */
+            /**
+             * Control Groups -
+             *   provide a mechanism for aggregating/patitioning sets of tasks,and all
+             *   their future children,into hierarchical groups with specialized behavior.
+             * A cgroup associates a set of tasks with a set of parameters for one or 
+             * more subsystems.
+             */
+            for page is file cache and shared memory page,the function make use of different
+            charge type - file cache => MEM_CGROUP_CHARGE_TYPE_CACHE
+                          shm  page  => MEM_CGROUP_CHARGE_TYPE_SHM
+            if current process is kernel thread,then the function make use the memory descriptor
+            of "init" process. /* because kernel thread task_struct.mm is NULL */
+            after succeed to charge memory control group(return error code to caller if failed),
+            radix_tree_preload() is invoked with @gfp_mask & ~__GFP_HIGHMEM.
+            /**
+             * radix_tree_preload -
+             *   disable preempt
+             *   get per-CPU variable @radix_tree_preloads which is type of struct radix_tree_preload
+             *   enter a while-cycle until @radix_tree_preloads->nr >= RADIX_TREE_MAX_PATH
+             *     enable preempt
+             *     allocate new radix tree node through kmem_cache_alloc() from slab cache 
+             *     radix_tree_node_cachep with the given gfp mask
+             *     disable preempt
+             *     get the @radix_tree_preloads again
+             *     if no kernel control path allocated new radix tree node cause @nodes[]
+             *     become full,then place the newly allocated radix tree node at next position
+             *     else if @nodes[] become full,then free the radix tree node allocated previously
+             *   finally,return _zero_ or error code -ENOMEM to caller
+             *   # this routine returned with kernel preempt disabled
+             *
+             * struct radix_tree_preload {
+             *         int nr;  /* current number of elements */
+             *         struct radix_tree_node *nodes[RADIX_TREE_MAX_PATH]; /* node pointer array */
+             * }; /* per-CPU pool of preloaded nodes */
+             *
+             * by make use of radix_tree_preload(),seperate node memory allocating from insertion
+             */
+           
+           if we succeed to preload radix tree node,then _setup_ the page descriptor @page.
+           next,acquire @mapping->tree_lock with local interrupt disabled.
+           invoke radix_tree_insert() to process new node insertion.
+           succeed to insert new node,then
+             increase @mapping->nrpages
+             increase zone state NR_FILE_PAGES of current page's zone
+             increase zone state NR_SHMEM of current page's zone if the page is swap entry
+             release spin lock and enable interrupt
+           failed to insert new node,then
+             reset page descriptor
+             release spin lock and enable interrupt
+             uncharge this page from memory control group
+             invoke page_cache_release() on this page
+           call to radix_tree_preload_end(),this routine enable kernel preempt
+           finally return error code to caller,if no error detected,_zero_ will be returned
+           /* of course,if preload was failed,mem_cgroup_uncharge_cache_page() is called for
+            * uncharge @page from memory control group
+            */
+          
+          /**
+           * add_to_page_cache_lru - add a given page into page cache,and add the page
+           *                         to LRU list if successfully add it into page cache
+           * # EXPORT_SYMBOL
+           * # if @mapping has capability of swap-backed,then set SwapBacked for @page
+           *   in this case,the page becomes swap entry,routine add it to anonymous LRU
+           *   list instead to add it into file LRU list
+           * # routine add the page to page cache by call to add_to_page_cache(),thus
+           *   the page will resulted in PG_locked is set
+           */
+          int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
+                                    pgoff_t offset, gfp_t gfp_mask);
+
+        <lib/radix-tree.c>
+          /**
+           * radix_tree_insert - do radix tree node insertion
+           * @root:              radix tree root
+           * @index:             new page's index
+           * @item:              item,usually is page descriptor
+           * return:             0 OR error code
+           * # EXPORT_SYMBOL
+           * # about this routine -
+           *     make sure the tree is high enough by checks radix_tree_maxindex(@root->height)
+           *     if @index is greater than maxindex,then invoke radix_tree_extend() to extend
+           *     the tree
+           *     # extending would add a single node on top,that assign it to the root's @rnode
+           *       extending invoke radix_tree_node_alloc() to allocate new node
+           *     go down the tree by decode @index,at the bottom,leaf's height is _zero_
+           *     # go down make use of while-cycle until height becomes _zero_
+           *       if current node is NULL,then have to invoke radix_tree_node_alloc() to allocate
+           *       new tree node,because of radix tree preload,this routine first try per-CPU
+           *       preloaded nodes,allocate new node(might failed) if no free node is avaiable
+           *       after get a tree node,setup it with current height,and assign its pointer to
+           *       upper node's @slots[](for root,it is @rnode member)
+           *     if the final slot is NULL,return -EEXIST to caller
+           *     if the final radix tree node is not NULL,then place the @item(page) into the @slots[]
+           *     by invoke rcu_assign_pointer()
+           *     if the final radix tree node is NULL,that means we are deal with a new radix-tree,
+           *     so @item must be a radix-tree node,assign it to @rnode of root
+           *     finally,return _zero_ to caller
+           */
+          int radix_tree_insert(struct radix_tree_root *root, unsigned long index, void *item);
