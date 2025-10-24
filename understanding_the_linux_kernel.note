@@ -30064,3 +30064,156 @@ Chapter 15 : The Page Cache
            *     finally,return _zero_ to caller
            */
           int radix_tree_insert(struct radix_tree_root *root, unsigned long index, void *item);
+
+      Removing a page :
+        <mm/filemap.c>
+          /**
+           * remove_from_page_cache - remove a page from page cache
+           * @page:                   page descriptor
+           * # for remove @page,it must be locked(PG_locked)
+           * # this routine actually does
+           *     > acquire @tree_lock and disable local interrupt
+           *     > call to routine __remove_from_page_cache()
+           *     > release @tree_lock and enable local interrupt
+           *     > invoke mem_cgroup_uncharge_cache_page() to remove the page from
+           *       memory control group
+           */
+          void remove_from_page_cache(struct page *page);
+
+          /**
+           * __remove_from_page_cache - do remove page from page cache
+           * @page:                     page descriptor
+           */
+          void __remove_from_page_cache(struct page *page);
+
+          brief description for __remove_from_page_cache() :
+            call to radix_tree_delete() from remove the radix tree leaf node that corresponding
+            to @page.
+            /**
+             * <lib/radix-tree.c>
+             * void *radix_tree_delete(radix tree root pointer, index) - 
+             *   makeup an array of radix_tree_path object,size is RADIX_TREE_MAX_PATH + 1
+             *   checks whether @index is valid(must less than or equal to maximum index)
+             *   if current height of tree is _zero_,then invoke root_tag_clear_all() to
+             *   clear all tags in the tree,and set @rnode to NULL
+             *   enter a do-while-cycle,stop condition is height becomes _zero_
+             *     go down the tree,if encountered a NULL node,return NULL to caller
+             *     during the traverse,fill radix_tree_path objects in the array
+             *     # the go down is rely on decoding of @index
+             *     # local variable @pathp points to the radix_tree_path array
+             *       and it will skip the element whose index is 0
+             *   when cycle stopped,if the last node is NULL,then return NULL to caller
+             *   otherwise,iterate radix tree paths,for each node,invoke radix_tree_tag_clear()
+             *   to clear the tags on the paths associated with @index
+             *   # iterate tags from [0, RADIX_TREE_MAX_TAGS)
+             *   next,iterate @pathp until @pathp->node is NULL(that the path has index 0 in array)
+             *   # path go back
+             *   for each node on the path,sets @slots[@pathp->offset] to NULL,and decrease its
+             *   @count member.if its counter become _zero_,then we will free it at next iteration.
+             *   if its counter is not _zero_,but @pathp->node is equal to @rnode,then we have to
+             *   shrink the tree,and returns the delete item's address to caller.
+             *   finally,invoke root_tag_clear_all() on root,set tree height to _zero_,set @rnode
+             *   to NULL,free the last node on the path if necessary,then return the address of
+             *   delete item to caller.
+             *   # at the last iteration,the element has index 1 in the array is @rnode,so,
+             *     if its counter become _zero_,then we must free it on normal return path;
+             *     if the counter is not _zero_,tree shrink must happened
+             */
+            
+            after radix_tree_delete() returned,reset @page->mapping to NULL.
+            decrease the address space object's @nrpages member.
+            decrease zone state NR_FILE_PAGES of the zone that this @page come from
+            # increased in add_to_page_cache()
+            decrease zone state NR_SHMEM of the zone that this @page come from,if it is
+            a swap entry.
+            # after deleting and counter decreasing,if this page still mapped,then there must
+              be a BUG,because we are operating on it with PG_locked.
+            finally,checks if @page is dirty AND the address space object enabled dirty account,
+            then decrease zone state NR_FILE_DIRTY of the zone that this @page come from;decrease
+            backing device info stat BDI_RECLAIMABLE of the backing device of the address space
+            object.
+      
+      Updating a page :
+        <mm/filemap.c>
+          /**
+           * read_cache_page - read into page cache,fill it if needed
+           * @mapping:         address space
+           * @index:           page index
+           * @filler:          routine used to fill page
+           * @data:            data for @filler
+           * return:           page descriptor OR -EIO
+           * # EXPORT_SYMBOL
+           * # routine actuall call to wait_on_page_read(),argument for the function is
+           *   get from read_cache_page_async()
+           * # routine wait_on_page_read() first checks if the page pointer is a valid
+           *   pointer(IS_ERR() returned FALSE),then wait for the page to be unlocked,
+           *   checks PageUptodate(),if failed to up to date,then do page_cache_release()
+           *   for the page,and return -EIO to caller
+           *   - wait_on_page_read() will invokes wait_on_page_locked(),which will call
+           *     to wait_on_page_bit(),if PG_locked flag is enabled,the wait on the 
+           *     wait queue page_waitqueue(@page),action is @sync_page
+           * # routine read_cache_page_async() actually call to do_read_cache_page()
+           *   - the routine do not wait for page to become unlocked after submitting it
+           *     to the filler
+           */
+          struct page *read_cache_page(struct address_space *mapping, pgoff_t index,
+                                       int (*filler)(void *, struct page *), void *data);
+
+          /**
+           * do_read_cache_page - do read cache page,and fill it if needed
+           * @mapping:            address space
+           * @index:              page index
+           * @filler:             filler routine
+           * @data:               data for @filler
+           * @gfp:                gfp flag
+           */
+          static struct page *do_read_cache_page(struct address_space *mapping, pgoff_t index,
+                                                 int (*filler)(void *, struct page *), void *data,
+                                                 gfp_t gfp);
+
+          brief description for do_read_cache_page() :
+            invokes __read_cache_page() to process the main works.
+            /**
+             * <mm/filemap.c>
+             *   static struct page *__read_cache_page(struct address_space *mapping, pgoff_t index,
+             *                                         int (*filler)(void *, struct page *), void *data,
+             *                                         gfp_t gfp);
+             *   call to find_get_page() to get the cache page
+             *   if no such page is exist,then invoke __page_cache_alloc() with @gfp | __GFP_COLD to
+             *   allocate a new cache page,return -ENOMEM if allocating failed
+             *   next,call to add_to_page_cache_lru() to add the newly allocated page to cache and LRU list
+             *   if any error happens,page_cache_release() the page,and checks if the error is -EEXIST,that
+             *   someone have allocated such cache page during we in __page_cache_alloc(),then repeat again
+             *   from find_get_page();otherwise,return the error code to caller
+             *   proceeding invokes @filler(@data, page descriptor)
+             *   if @filler() returned a negative value,page_cache_release() the page and return the error code
+             *   to caller
+             *
+             *   if the page is exist in page cache or no error happened when have to create new page,
+             *   just return its descriptor to caller(of course,@filler() would not be called if the page
+             *   been exist in page cache,moreover,the page will have not PG_locked)
+             */
+            after __read_cache_page() returned a valid page descriptor(error code just return to caller).
+            checks PageUptodata(),if the page been up to date,then return the page descriptor to caller as well.
+            /* if the page is newly created in __read_cache_page(),then @filler() must be called if no error
+             * is returned from __read_cache_page()
+             */
+            if the page have not been up to data,then we lock_page(). /* not a newly created page */
+            checks @page->mapping,if it is NULL,that means the page is unmapped(because,add_to_page_cache_lru(),
+            its @mapping must be set to the parameter @mapping in __read_cache_page()),so we have to unlock it,
+            page_cache_release() it,and retry __read_cache_page().
+            |                                 /* if the page is in page cache,@mapping must not be NULL */
+            +--> /* page_cache_release -> put_page - free the page if recount becomes _zero_ */
+
+            if its @mapping is not NULL,then do PageUptodate() again,unlock it and return to the page descriptor to
+            caller if it been up to date;otherwise,invokes @filler() in do_read_cache_page().
+                                                   /* this is because @filler() only called by __read_cache_page()
+                                                    * when the page has to be newly allocated
+                                                    */
+            if @filler() returned an error code,page_cache_release() the page and return error code to caller.
+            at the end,if any thing is OK,then mark the page is accessed,return its descriptor to caller.
+                                          /* mark_page_accessed() <mm/swap.c>,mark a page as having
+                                           * seen activity.
+                                           */
+            ! note that,before @filler() is called,the page is PG_locked by directly call to lock_page()(in
+              do_read_cache_page()) or by indirectly call to add_to_page_cache_locked()(in __read_cache_page())
