@@ -29697,6 +29697,7 @@ Chapter 15 : The Page Cache
 
         #define RADIX_TREE_TAG_LONGS \
                 ((RADIX_TREE_MAP_SIZE + BITS_PER_LONG - 1) / BITS_PER_LONG)
+                /* 64 + 64 - 1 = 127, 127 / 64 = 1 */
 
         /**
          * radix_tree_node - node structure of radix tree
@@ -29704,7 +29705,11 @@ Chapter 15 : The Page Cache
          * @count:           not NULL pointers counter
          * @rcu_head:        RCU
          * @slots:           pointer array
-         * @tags:            array of flags
+         * @tags:            array of flags,used for quick search
+         *                   RADIX_TREE_MAX_TAGS == 2
+         *                     index 0 => PG_dirty (PAGECACHE_TAG_DIRTY)
+         *                     index 1 => PG_writeback (PAGECACHE_TAG_WRITEBACK)
+         *                                             <linux/fs.h>
          * # each node of radix tree can have up to 64(generally) pointers
          *   to other nodes or to page descriptors
          */
@@ -29863,7 +29868,8 @@ Chapter 15 : The Page Cache
            * @pages:          page descriptor pointer array provided by caller
            * return:          number of pages which were found
            * # search returns a group of mapping-contiguous pages with ascending indexes
-           *   there may be holes in the indices due to not-present pages
+           * # there may be holes in the indices due to not-present pages
+           *                # page index hole(not-present),not array hole
            */
           unsigned find_get_pages(struct address_space *mapping, pgoff_t start,
                                   unsigned int nr_pages, struct page **pages);
@@ -30095,7 +30101,7 @@ Chapter 15 : The Page Cache
              *   makeup an array of radix_tree_path object,size is RADIX_TREE_MAX_PATH + 1
              *   checks whether @index is valid(must less than or equal to maximum index)
              *   if current height of tree is _zero_,then invoke root_tag_clear_all() to
-             *   clear all tags in the tree,and set @rnode to NULL
+             *   clear tags of the tree root,and set @rnode to NULL,return NULL to caller
              *   enter a do-while-cycle,stop condition is height becomes _zero_
              *     go down the tree,if encountered a NULL node,return NULL to caller
              *     during the traverse,fill radix_tree_path objects in the array
@@ -30103,9 +30109,11 @@ Chapter 15 : The Page Cache
              *     # local variable @pathp points to the radix_tree_path array
              *       and it will skip the element whose index is 0
              *   when cycle stopped,if the last node is NULL,then return NULL to caller
-             *   otherwise,iterate radix tree paths,for each node,invoke radix_tree_tag_clear()
-             *   to clear the tags on the paths associated with @index
-             *   # iterate tags from [0, RADIX_TREE_MAX_TAGS)
+             *   otherwise,use a for-cycle with index 0 and 1,call radix_tree_tag_clear() on the
+             *   just-deleted item if it has been tagged;this will clear the corresponding tag flag
+             *   bits in @tags[0][0] and @tags[1][0](depends on the offset decoded from @index)
+             *   # just-deleted item,the node its the slot in @slots[] points to the leaf contains
+             *     the page that we want to delete
              *   next,iterate @pathp until @pathp->node is NULL(that the path has index 0 in array)
              *   # path go back
              *   for each node on the path,sets @slots[@pathp->offset] to NULL,and decrease its
@@ -30217,3 +30225,136 @@ Chapter 15 : The Page Cache
                                            */
             ! note that,before @filler() is called,the page is PG_locked by directly call to lock_page()(in
               do_read_cache_page()) or by indirectly call to add_to_page_cache_locked()(in __read_cache_page())
+
+    The Tags of the Radix Tree :
+      page cache allows the kernel to quickly retrieve pages in the cache that are in a given state.
+      for quickly search of pages in a given state,member @tags of radix tree node is used to stores flags
+      to indicate that whether such pages in the given state is exist in its subtree's leaves.the flag
+      will be set if and only if at least one leaf in the state,the flag of leaf is copied from the page descriptor.
+      in this way,kernel can skip other subtrees that are not have leaves in the given state.
+      /* intermediate node stores flags for each child node(or leaf) */
+
+      e.g.
+                                      ROOT
+                                        |
+                                        V
+                                      rnode
+                                      |                          T
+                                      +--> [0] => | 0 | => | 0 | 1 | 2 | ... | 63 |
+                                      |
+                                      +--> [1] => | 0 | => | 0 | 1 | 2 | ... | 63 |
+                                      |
+                                      +--> | 0 | 1 | 2 | ... | 63 |
+                                                 |
+                                                 V
+                                               node
+                                               |                      T       
+                                               +--> [0] => | 0 | => | 0 | 1 | 2 | ... | 63 |
+                                               |
+                                               +--> [1] => | 0 | => | 0 | 1 | 2 | ... | 63 |
+                                               |
+                                               +--> | 0 | 1 | 2 | ... | 63 |
+                                                      |
+                                                      V
+                                                     ...
+                                                      |
+                                                      V
+                                                    node(leaf) /* leaf node do not store flags */
+                                                    |                            
+                                                    +--> [0] => | 0 | => | 0 | 1 | 2 | ... | 63 |
+                                                    |
+                                                    +--> [1] => | 0 | => | 0 | 1 | 2 | ... | 63 |
+                                                    |
+                                                    +--> | 0 | 1 | 2 | ... | 63 |
+                                                                   |
+                                                                   +--> page descriptor    
+
+      <lib/radix-tree.c>
+        /**
+         * radix_tree_tag_set - set a tag on a radix tree node
+         * @root:               radix tree root
+         * @index:              index key
+         * @tag:                tag index
+         * return:              return the address of the tagged item(page descriptor)
+         * # EXPORT_SYMBOL
+         * # it is BUG if slot is NULL
+         * # routine go down the tree by decode index,for each intermediate tree nodes,
+         *   if it is not tagged,then tag it(do not tag leaf node)
+         *   finally,set radix tree root's tag bit if necessary(NOT NULL slot AND root un-tagged)
+         */
+        void *radix_tree_tag_set(struct radix_tree_root *root, unsigned long index,
+                                 unsigned int tag);
+        
+        ! radix_tree_tag_set() get tag of node by make use of tag_get(),set tag of node by make use
+          of tag_set();get tag of root by make use of root_tag_get(),set tag of root by make use of
+          root_tag_set().
+
+        /* __set_bit(@offset, @node->tags[@tag]) */
+        static inline void tag_set(struct radix_tree_node *node, unsigned int tag, int offset);
+
+        /* test_bit(@offset, @node->tags[@tag]) */
+        static inline int tag_get(struct radix_tree_node *node, unsigned int tag, int offset);
+
+        /* __clear_bit(@offset, @node->tags[@tag]) */
+        static inline void tag_clear(struct radix_tree_node *node, unsigned int tag, int offset);
+
+        ! tag_get(),tag_set(),tag_clear(),operate on a specified bit at a given index.
+
+        /* @root->gfp_mask |= (__force gfp_t)(1 << (@tag + __GFP_BITS_SHIFT)) */
+        static inline void root_tag_set(struct radix_tree_root *root, unsigned int tag);
+
+        /* (__force unsigned)@root->gfp_mask & (1 << (@tag + __GFP_BITS_SHIFT)) */
+        static inline int root_tag_get(struct radix_tree_root *root, unsigned int tag);
+
+        /* @root->gfp_mask &= (__force_gfp_t)~(1 << (@tag + __GFP_BITS_SHIFT)) */
+        static inline void root_tag_clear(struct radix_tree_root *root, unsigned int tag);
+
+        /* @root->gfp_mask &= __GFP_BITS_MASK */
+        static inline void root_tag_clear_all(struct radix_tree_root *root);
+
+        ! root_tag_set(),root_tag_get(),root_tag_clear(),root_tag_clear_all(),make use one
+          bit in @gfp_mask member.
+
+        /**
+         * radix_tree_tag_clear - clear a tag on a radix tree node
+         * @root:                 tree root
+         * @index:                item index
+         * @tag:                  tag index
+         * return:                return address of the tagged item on success
+         *                        return NULL if failed
+         * # EXPORT_SYMBOL
+         * # this routine does reverse to radix_tree_tag_set(),thus,it must make use
+         *   of an array of radix_tree_path objects to record the go down path,and
+         *   then go back to root,for each node on the path,invokes tag_clear() on it
+         * # if any one node is on the path but without the given tag is set,then it
+         *   must be an error,return NULL to caller
+         * # the go back might earlier stopped,if the node has other slot is tagged
+         *   with @tag,then we can not clear the tag of nodes in front of current node
+         * # if @index guide us to a NULL slot,that must be an error,then return NULL
+         *   to caller
+         * # if all intermediate nodes have been un-tagged,then we have to clear
+         *   root's tag if necessary(root_tag_get() returns TRUE)
+         */
+        void *radix_tree_tag_clear(struct radix_tree_root *root, unsigned long index,
+                                   unsigned int tag);
+                                                
+        /* radix_tree_tagged - test whether any items in the tree are tagged,just checks root node */
+        int radix_tree_tagged(struct radix_tree_root *root, unsigned int tag);
+
+      <mm/filemap.c>
+        /**
+         * find_get_pages_tag - find and return pages that match given tag
+         * @mapping:            address space
+         * @index:              the starting page index
+         * @tag:                the tag index
+         * @nr_pages:           the maximum number of pages
+         * @pages:              array of page descriptors that match @tag
+         * return:              0 OR error code
+         * # EXPORT_SYMBOL
+         * # the primary searching is handled by routine radix_tree_gang_lookup_tag_slot(),
+         *   the function is similar to radix_tree_gang_lookup_slot() but is only fill
+         *   the array that slots match the given @tag;function radix_tree_gang_lookup_slot()
+         *   rely on __lookup(),function radix_tree_gang_lookup_tag_slot() rely on __lookup_tag()
+         */
+        unsigned find_get_pages_tag(struct address_space *mapping, pgoff_t *index, int tag,
+                                    unsigned int nr_pages, struct page **pages);
