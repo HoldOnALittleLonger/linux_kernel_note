@@ -30358,3 +30358,314 @@ Chapter 15 : The Page Cache
          */
         unsigned find_get_pages_tag(struct address_space *mapping, pgoff_t *index, int tag,
                                     unsigned int nr_pages, struct page **pages);
+
+    Storing Blocks in the Page Cache :
+      in old versions of Kernel,there were two different main disk caches -
+        page cache     => whole pages of disk data resulting from accesses to the contents of disk files
+        buffer cache   => used tokeep in memory the contents of the blocks accessed by VFS to manage the
+                          disk-based filesystems
+
+      now,buffer cache is no longer allocated individually,they are stored in dedicated pages called
+      "buffer pages" which are kept in the page cache.
+
+      Block Buffers and Buffer Heads :
+        a buffer page is a page of data associated with additional descriptors called "buffer head",
+        whose main purpose is to quickly locate the disk address of each individual block in the page.
+        /* the chunks of data stored in a page belonging to the page cache are not necessarily adjacent
+         * on disk.
+         */
+
+        <linux/buffer_head.h>
+          /**
+           * buffer_head - buffer head,descriptor of buffer page
+           * @b_state:     buffer state bitmap
+           * @b_this_page: circular list of page's buffers
+           *               # each buffer page has a buffer_head descriptor
+           * @b_page:      the page this bh is mapped to
+           *               # that the buffer page holding this block
+           * @b_blocknr:   start block number
+           *               # logical block number
+           * @b_size:      size of mapping
+           * @b_data:      pointer to data within the page
+           *               # @page is high-memory => @b_data contains offset
+           *                 @page is not high-memory => @b_data is linear address
+           * @b_bdev:      block device which owns to this bh
+           *               # which contains the block
+           * @b_end_io:    routine called when I/O completed
+           *               # typedef void (bh_end_io_t)(struct buffer_head *bh, int uptodate)
+           * @b_private:   reserved for @b_end_io
+           * @b_assoc_buffers:
+           *               associated with another mapping
+           * @b_assoc_map: mapping this bufer is associated with
+           * @b_count:     users using this buffer_head
+           *               # @b_count is increased right before each operation on the block
+           *                 buffer,and decreased right after the operation done
+           * # buffer page,used to mapping a block
+           * # historically,a buffer_head was used to map a single block within
+           *   a page,and of course as the unit of I/O through the filesystem
+           *   and block layers
+           *   nowadays the basic I/O unit is the bio,and bufer_head(s) are used for
+           *   extracting block mappings,for tracking state within a page,and for
+           *   wrapping bio submission for backward compatibility reasons
+           * # buffer page is available when CONFIG_BLOCK is defined
+           */
+          struct buffer_head {
+                  unsigned long b_state;
+                  struct buffer_head *b_this_page;
+                  struct page *b_page;
+
+                  sector_t b_blocknr;
+                  size_t b_size;
+                  char *b_data;
+                 
+                  struct block_device *b_dev;
+                  bh_end_io_t *b_end_io;
+                  void *b_private;
+                  struct list_head b_assoc_buffers;
+                  struct address_space *b_assoc_map;
+
+                  atomic_t b_count;
+          };
+
+          ! block buffers in the page cache are examined both periodically
+            and when free memory becomes scarce,and only the block buffers
+            having _zero_ @b_count may be reclaimed.
+
+          enum bh_state_bits {
+                  BH_Uptodate,      /* contains valid data */
+                  BH_Dirty,         /* is dirty */
+                  BH_Lock,          /* is locked */
+                  BH_Req,           /* has been submitted for I/O */
+                  BH_Uptodate_Lock, /* used by the 1st bh in a page,to serialise
+                                     * I/O completion of other buffers in the page
+                                     */
+                  BH_Mapped,        /* has a disk mapping */
+                  BH_New,           /* disk mapping was newly created by get_block */
+                  BH_Async_Read,    /* under end_buffer_async_read I/O */
+                  BH_Async_Write,   /* under end_buffer_async_write I/O */
+                  BH_Delay,         /* buffer is not yet allocated on disk */
+                  BH_Boundary,      /* block is followed by a discontiguity */
+                  BH_Write_EIO,     /* I/O error on write */
+                  BH_Ordered,       /* ordered write */
+                  BH_Eopnotsupp,    /* unsupport operation(barrier) */
+                  BH_Unwritten,     /* buffer is allocated on disk but not writtent */
+                  BH_Quiet,         /* buffer error prinks to be quiet */
+                  BH_PrivateStart,  /* not a state bit,but the first bit avaiable
+                                     * for private allocation by other entities
+                                     */
+          };
+
+        +--> address space <-- @i_mapping
+        |
+        |             +--> general page(page descriptor)
+        |             |
+        +---------------------------------------------+
+        | ... | page | page | ... | page | page | ... | => page cache
+        +---------------------------------------------+
+               ^|                          |
+               ||                          +--> buffer page
+               |+--> buffer page                ^
+               |     ^                          |  +-------------+
+               |     |                          +--| buffer head |
+               |     |  +-------------+            +-------------+
+               |     +--| buffer head |
+               |        +-------------+
+               |          |
+               +----------+
+                (@b_page)
+
+      Managing the Buffer Heads :
+        use alloc_buffer_head() to allocate a new buffer head object,and use free_buffer_head() to
+        free it.
+        use __getblk() to locate a buffer page in the page cache,if it is not exist,will attempts
+        to create it automatically. /* increase @b_count automatically */
+        if kernel control path stops accessing a block buffer,then should invoke __brelse() or
+        __bforget() on it to decrease the correspondiung usage counter.
+
+        ! routine get_bh() and put_bh() increase and decrease @b_count,respectively.
+
+
+        <fs/buffer.c>
+          /* bh_cachep - slab cache used to allocate buffer_head object */
+          static struct kmem_cache *bh_cachep;
+
+          /* max_buffer_heads - maximum number of buffer heads are allowed in the machine,
+           *                    start stripping buffer heads in writeback if exceeded maximum
+           *                    number
+           */
+          static int max_buffer_heads;
+
+          /* buffer_heads_over_limit - buffer heads over limit indicator,TRUE or FALSE */
+          int buffer_heads_over_limit;
+
+          struct bh_accounting {
+                  int nr;         /* number of live bh(s) */
+                  int ratelimit;  /* limit cacheline bouncing */
+          };
+
+          static DEFINE_PER_CPU(struct bh_accounting, bh_accounting) = {0, 0};
+
+          #define BH_LRU_SIZE 8
+
+          struct bh_lru {
+                  struct buffer_head *bhs[BH_LRU_SIZE];
+          };
+
+          /* per-CPU buffer head LRU */
+          static DEFINE_PER_CPU(struct bh_lru, bh_lrus) = {{ NULL }};
+
+          /**
+           * alloc_buffer_head - allocate a buffer head
+           * @gfp_flags:         GFP flags used for allocating
+           * return:             buffer head pointer OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine invoke kmem_cache_zalloc() on @bh_cachep with @gfp_flags,
+           *   if succeed,init @b_assoc_buffers,increase per-CPU @bh_accounting.nr,next
+           *   invoke recalc_bh_state(),the function checks whether buffer heads over limit
+           *   finally,return pointer to caller
+           * # note,this routine do not increase @b_count
+           */
+          struct buffer_head *alloc_buffer_head(gfp_t gfp_flags);
+
+          /**
+           * free_buffer_head - free a buffer head
+           * @bh:               the buffer head
+           * # EXPORT_SYMBOL
+           * # kmem_cache_free()
+           *   decrease per-CPU @bh_accounting.nr
+           *   recalc_bh_state()
+           * # it is a BUG,if @bh->b_assoc_buffers is not empty,we can only free
+           *   a buffer head which is not mapped any block
+           */
+          void free_buffer_head(struct buffer_head *bh);
+
+          /**
+           * __getblk - locate(and,if necessary,create) the corresponding buffer_head 
+           *            in page cache
+           * @bdev:     block device descriptor
+           * @block:    logical block number
+           * @size:     size of block
+           * # EXPORT_SYMBOL
+           * # this routine might sleep,and it can not fail,retry on failed
+           * # this routine may return a buffer_head represents non-existent block
+           *   if @block is illegal
+           * # steps -
+           *     invoke __find_get_block() to get buffer head
+           *     try slow path through __getblk_slow() if __find_get_block() returned NULL
+           *     return buffer head pointer to caller
+           */
+          struct buffer_head *__getblk(struct block_device *bdev, sector_t block,
+                                       unsigned size);
+
+          /**
+           * __find_get_block - find and get a buffer head corresponding to the specified
+           *                    block
+           * @bdev:             block device descriptor
+           * @block:            logical block number
+           * @size:             size of block
+           * return:            buffer head pointer OR NULL
+           * # EXPORT_SYMBOL
+           * # this routine perform a page cache lookup for the matching buffer
+           *   if it is there,refresh it in the LRU and mark it as accessed;otherwise,
+           *   return NULL
+           * # this routine first try lookup_bh_lru()
+           *     lookup_bh_lru() - traverse current cpu's variable @bh_lrus,if such buffer head
+           *                       is found,call get_bh() on it,then return it to caller
+           *                                     # increase @b_count
+           *                       # found: @b_bdev == @bdev AND @b_blocknr == @block AND @b_size == @size
+           *   if lookup_bh_lru() failed,then try __find_get_block_slow();resulted in succeed,then install
+           *   the buffer head into @bh_lrus
+           *   before return to caller,if routine succeed to get such buffer head,then invoke
+           *   touch_buffer() on it(actually,invoke mark_page_accessed())
+           */
+          struct buffer_head *__find_get_block(struct block_device *bdev, secotr_t block,
+                                               unsigned size);
+
+          /* __find_get_block_slow - slow path for __find_get_block() */
+          static struct buffer_head *__find_get_block_slow(struct block_device *bdev, sector_t block);
+
+          brief description for __find_get_block_slow() :
+            get @bd_inode from @bdev,get the address space through @bd_inode(@i_mapping).
+            invoke find_get_page() on the address space of this block device.
+            /* index get from "@block >> (PAGE_CACHE_SHIFT - @bd_inode->i_blkbits)" */
+            lock @priave_lock of the address space.
+            checks whether the page is private(PagePrivate()),if the page has not buffers,then
+            page_cache_release() it and return NULL to caller.
+            if the page is private,then retrieve buffer head object from its @private member.
+            next,traverse @b_this_page to find a buffer head object whose @b_blocknr is equal to @block;
+            if find,then increase its @b_count,and return it to caller;otherwise,enter the normal return
+            path - printk messages if some of the buffers on this page are not mapped,page_cache_release()
+            the page got by find_get_page(),return the result to caller.              /* put page */
+            /* @private_lock will be released before function return to caller */
+            /* routine make use of a local variable @all_mapped to records whether there is some of
+             * buffers on the page are not mapped.if all mapped but we failed to find the buffer head,
+             * then have to printk error messages
+             * the variable maybe reset to _zero_ during traversing,if buffer_mapped(current buffer head)
+             * returned FALSE.
+             */
+
+          /**
+           * __getblk_slow - slow path for __getblk()
+           * @bdev:          block device descriptor
+           * @block:         logical block number
+           * @size:          size of block
+           * return:         buffer head pointer OR NULL
+           * # this routine may return NULL and dump stack if size is not multiple of hard sectorsize
+           * # this routine make use for infinity for-cycle to get the wished buffer head object
+           *     first,try __find_get_block(),this routine return a valid pointer if such buffer head
+           *     is exist in the page cache of this block device and matched @block and @size
+           *     __find_get_block() returned valid buffer head,then return it to caller
+           *     otherwise,invoke grow_buffers()
+           *       grow_buffers() - create buffers for the specified block device block's page
+           *                        if that page was dirty,the buffers are set dirty also
+           *                        # grow_buffers() calculate index of page in the page cache through
+           *                          @size
+           *                            sizebits = -1
+           *                            do-while { sizebits++ until @size << sizebits >= PAGE_SIZE }
+           *                            index = @block >> sizebits
+           *                        # the creating is handled by grow_dev_page() - create the page-cache
+           *                          that contains the requested block.which invoke find_or_create_page()
+           *                          to find the page from page cache or created a new cached page.
+           *                          if the page has buffers,then get buffer head from @private.
+           *                          checks its @b_size,if equal to the expected size,then call to init_page_buffers()
+           *                          on the page,and return it to caller;otherwise,try_to_free_buffers() of the
+           *                          page,return NULL to caller if try_to_free_buffers() failed.
+           *                          ! if the page is newly created,there must not has buffers
+           *                          for newly created page or the page has not buffers or the page has buffers but
+           *                          size is different,invoke alloc_page_buffers() on the page to create new
+           *                          buffers.
+           *                          alloc_page_buffers() succeed : lock @private_lock of @i_mapping
+           *                                                         set @b_this_page(link device buffers) of buffers
+           *                                                         attach the head to page's @private
+           *                                                         init page buffers(@b_bdev, @b_blocknr, ...)
+           *                                                         return the page
+           *                          alloc_page_buffers() failed  : unlock the page
+           *                                                         page_cache_release() it
+           *                                                         return NULL
+           *     if grow_buffers() returned a negative value,then return NULL to caller
+           *     if grow_buffers() returned _zero_ then invoke free_more_memory() and enter next
+           *     iteration                  # grow_dev_page() returned NULL
+           *                                # grow_buffers() do not returns the page to __getblk_slow(),
+           *                                  the newly established mapping will be found in next
+           *                                  __find_get_block()
+           */
+          static struct buffer_head *__getblk_slow(struct block_device *bdev, sector_t block, int size);
+
+          /**
+           * __brelse - put buffer head if @b_count is greater than _zero_
+           * # EXPORT_SYMBOL
+           */
+          void __brelse(struct buffer_head *buf);
+
+          /**
+           * __bforget - forget a buffer
+           *             clear buffer dirty
+           *             delete and int @b_assoc_buffers if @b_assoc_map is not NULL,and set
+           *             @b_assoc_map to NULL
+           *             __brelse() @bh
+           * # EXPORT_SYMBOL
+           * # by marks the buffer as clean to forcing the kernel to forget any change
+           *   in the buffer that has yet to be written to disk
+           */
+          void __bforget(struct buffer_head *bh);
+            
