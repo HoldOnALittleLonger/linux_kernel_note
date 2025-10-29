@@ -30642,6 +30642,8 @@ Chapter 15 : The Page Cache
            *                          alloc_page_buffers() failed  : unlock the page
            *                                                         page_cache_release() it
            *                                                         return NULL
+           *                          ! alloc_page_buffers() invoke alloc_buffer_head() several times for
+           *                            the new buffers
            *     if grow_buffers() returned a negative value,then return NULL to caller
            *     if grow_buffers() returned _zero_ then invoke free_more_memory() and enter next
            *     iteration                  # grow_dev_page() returned NULL
@@ -30654,6 +30656,7 @@ Chapter 15 : The Page Cache
           /**
            * __brelse - put buffer head if @b_count is greater than _zero_
            * # EXPORT_SYMBOL
+           * # wrapper : brelse() in <linux/buffer_head.h>
            */
           void __brelse(struct buffer_head *buf);
 
@@ -30666,6 +30669,42 @@ Chapter 15 : The Page Cache
            * # EXPORT_SYMBOL
            * # by marks the buffer as clean to forcing the kernel to forget any change
            *   in the buffer that has yet to be written to disk
+           * # wrapper : bforger() in <linux/buffer_head.h>
            */
           void __bforget(struct buffer_head *bh);
             
+      Buffer Pages :
+        two common cases in which the kernel creates buffer pages -
+          1> when reading or writing pages of a file that are not stored in contiguous disk blocks.
+             this happens either because the filesystem has allocated noncontiguous blocks to the
+             file,or because the file contains holes.
+          2> when accessing a single disk block(super block or inode block). /* block device buffer pages */
+             ! a strong constraint :
+                 all the block buffers must refer to adjacent blocks of the underlying block device.
+
+        all block buffers in a single block buffer page,must have the same size.for 80x86 architecture,the
+        page size usually is 4096 bytes,and the size of a single sector of block device usually is 512 bytes,
+        hence,a single block buffer page can include [1, 8] block buffers. /* depends on block size */
+
+        member @b_this_page is the list of buffer heads,for traverse the block buffers of a single block
+        buffer page.we can get the buffer head from page's @private member,then traverse @b_this_page until
+        @b_this_page is equal to the head.
+        /* if a page is a buffer page,PagePrivate() must returns TRUE */
+
+        suppose block size is 1024 bytes,and page size is 4096 bytes -
+        
+                +-------------------------------------------------------------+
+                |              |               |              |               |
+                | first buffer | second buffer | third buffer | fourth buffer | => a single buffer page
+                |              |               |              |               |
+           +--> +-------------------------------------------------------------+
+           |      ^ @b_data           ^                   ^               ^
+           |      |                   |                   |               |                   
+           |      |                   |                   |               +---+               +--> @b_this_page
+           |      |                   |                   |                   |               |
+           +----- +-------------+---->+-------------+---->+-------------+---->+-------------+----> the first 
+         @b_page  | buffer_head |     | buffer_head |     | buffer_head |     | buffer_head |      buffer_head
+                  +-------------+ <-+ +-------------+     +-------------+     +-------------+
+                                    |
+                                    |
+                  @page.private ----+
