@@ -30624,16 +30624,17 @@ Chapter 15 : The Page Cache
            *                            do-while { sizebits++ until @size << sizebits >= PAGE_SIZE }
            *                            index = @block >> sizebits
            *                        # the creating is handled by grow_dev_page() - create the page-cache
-           *                          that contains the requested block.which invoke find_or_create_page()
-           *                          to find the page from page cache or created a new cached page.
+           *                          that contains the requested block.
+           *                          which invoke find_or_create_page() to find the page from page cache
+           *                          or created a new cached page.
            *                          if the page has buffers,then get buffer head from @private.
            *                          checks its @b_size,if equal to the expected size,then call to init_page_buffers()
            *                          on the page,and return it to caller;otherwise,try_to_free_buffers() of the
            *                          page,return NULL to caller if try_to_free_buffers() failed.
-           *                          ! if the page is newly created,there must not has buffers
-           *                          for newly created page or the page has not buffers or the page has buffers but
-           *                          size is different,invoke alloc_page_buffers() on the page to create new
-           *                          buffers.
+           *                          if the page is newly created,it must has not buffers # find_or_create_page()
+           *                             OR the page has not buffers # not a new page,and it is not buffer page
+           *                             OR the page has buffers but size is different # not a new page,but splited
+           *                          invoke alloc_page_buffers() with disabled retry on the page to create new buffers.
            *                          alloc_page_buffers() succeed : lock @private_lock of @i_mapping
            *                                                         set @b_this_page(link device buffers) of buffers
            *                                                         attach the head to page's @private
@@ -30708,3 +30709,85 @@ Chapter 15 : The Page Cache
                                     |
                                     |
                   @page.private ----+
+
+      Allocating Block Device Buffer Pages :
+        kernel allocate a new block device buffer page when it discovers that the page cache does not
+        include a page containing the buffer for a given block.
+        the lookup operation on radix-tree of block device might fail because -
+          1> no such buffer page
+             kernel create a new buffer page and insert it into radix tree
+          2> it is not a buffer page
+             kernel create a new buffer head and link it to the page
+          3> page have been splited in blocks of size different from the size of requested block
+             kernel have to release the old heads,and allocate a new set of heads,then link them
+             to the page
+
+        the grow_buffers() routine :
+          as description as above,grow_buffers() is called in slow path of __getblk() that such
+          buffer page is not exist in radix tree.
+
+          <fs/buffer.c>
+            /**
+             * grow_buffers - create buffers for the specified block device block's page
+             * @bdev:         block device descriptor
+             * @block:        logical block number
+             * @size:         block size
+             * return:        1 => succeed
+             *                0 / error code => failed
+             * ! this routine will return -EIO if the index of the block is outside the maximum
+             *   possible page cache index
+             */
+            static int grow_buffers(struct block_device *bdev, sector_t block, int size);
+
+            /**
+             * alloc_page_buffers - create the appropriate buffers when given a page for data area
+             *                      and the size of each buffer
+             * @page:               data area
+             * @size:               buffer size,it could be the block size
+             * @retry:              shall we will retry if failed
+             * return:              buffer head object of the head buffer OR NULL
+             * # EXPORT_SYMBOL                     
+             */
+            struct buffer_head *alloc_page_buffers(struct page *page, unsigned long size, int retry);
+
+            brief description for alloc_page_buffers() :
+              we have known that,it will be called by grow_dev_page() in the slow path of __getblk().
+              this routine is called when kernel must create buffer page.
+              if @size is equal to PAGE_SIZE,there only a single buffer;for 80x86,the number of buffers
+              in @page has range [1, 8](4096 bytes -- 512 bytes).
+              creation is processed in a while-cycle,stop condtion is no remain space in @page.
+              new buffer_head is created through alloc_buffer_head() with GFP flag GFP_NOFS.
+              if failed on create new buffer head,jump to "no_grow" label.
+              for each new buffer head 
+                @b_bdev = NULL
+                @b_this_page - the first buffer head's @b_this_page is NULL,the second's is the first,
+                               and so on
+                @b_blocknr = -1
+                @b_state = 0
+                @b_count = 0
+                @b_private = NULL
+                @b_size = @size
+                @b_data = current offset
+
+                /* these two members are setup in init_buffer() */
+                @b_end_io = NULL
+                @b_private = NULL
+              if no error happened,routine return the first buffer head's address to caller;otherwise,
+              enter "no_grow" path.
+
+              "no_grow" :
+                because we have encountered error during allocating new buffer heads,thus we must
+                release all the buffer heads we have allocated previously.this UNDO is processed rely
+                on @b_this_page and routine free_buffer_head().
+                if @retry is FALSE,then routine return NULL to caller.
+                if @retry is TRUE,then invoke free_more_memory() and restart from the while-cycle.
+                /**
+                 * <fs/buffer.c>
+                 *   static void free_more_memory(void);
+                 *   - kick the writeback threads then try to free up some ZONE_NORMAL memory.
+                 *   # in alloc_page_buffers(),free more memory and try again.
+                 */
+
+            ! as the description,we can understand that no more page is allocated,just split the page
+              with several buffer head objects.
+             
