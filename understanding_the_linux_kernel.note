@@ -30790,4 +30790,91 @@ Chapter 15 : The Page Cache
 
             ! as the description,we can understand that no more page is allocated,just split the page
               with several buffer head objects.
-             
+
+      Releasing Block Device Buffer Pages :
+        block device buffer pages are released when kernel tries to get additional free memory.
+        if a buffer page contains dirty or locked buffers,then the page can not be freed.
+        routine try_to_release_page() is used to handle free buffer page.
+
+        <mm/filemap.c>
+          /**
+           * try_to_release_page - release old fs-specific metadta on a page
+           * @page:                the page
+           * @gfp_mask:            memory allocation flags(and I/O mode)
+           * return:               1 => released
+           *                       0 => failed
+           * # EXPORT_SYMBOL
+           * # @gfp_mask specifies whether I/O may be performed to release this page(__GFP_IO),
+           *   and whether the call may block(__GFP_WAIT & __GFP_FS)
+           * # if PG_fscache is set on @page,the page is known to the local caching routines
+           */
+          int try_to_release_page(struct page *page, gfp_t gfp_mask);
+
+          brief description for try_to_release_page() :
+            get address space object of @page.
+            do BUG checks,if @page is unlocked,then it is a BUG.
+            checks PG_writeback,return _zero_ to caller if this @page is under writeback,we
+            can not free it until writeback have accomplished.
+            if this @page is cached,then its @mapping must not be NULL,if @a_ops->releasepage
+            have been implemented,then call to it and return the returned value to caller.
+            otherwise,invoke generic buffer release routine try_to_free_buffers() on @page,
+            return the returned value to caller.
+
+        <fs/buffer.c>
+          /**
+           * try_to_free_buffers - try to free buffers on a given page
+           * @page:                the buffer page
+           * return:               1 => succeed
+           *                       0 => failed
+           * # EXPORT_SYMBOL
+           */
+          int try_to_free_buffers(struct page *page);
+
+          brief description for try_to_free_buffers() :
+            first,do the same checking as try_to_free_page(),if unlocked page or writeback page
+            report BUG and return 0 to caller,respectively.
+            if @mapping of page is NULL,that means this page is not cached,just invoke
+            drop_buffers() and jump to label "out".
+            if this @page have cached,then acquire @private_lock and invoke drop_buffers().
+            next,checks the return value from drop_buffers(),if it is TRUE,then invoke
+            cancel_dirty_page(),this routine test dirty flag of @page,if it is setup,then clear
+            it,and up to date some account data if @mapping is not NULL.
+            before enter "out" - the normal exit path,release @private_lock.
+
+            "out" :
+              local variable named @buffers_to_free is type of struct buffer_head *,its address
+              as the second argument passed into drop_buffers().routine drop_buffers() traverse
+              and check the buffers on @page,ollect the buffers by set @buffers_to_free points
+              to the head buffer_head object.
+              at the end of try_to_free_buffers(),if @buffers_to_free is not NULL,then make use
+              of a do-while cycle to iterate the buffers,for each buffer head object,invoke
+              free_buffer_head() on it.
+              finally,returns the return value of drop_buffers() to caller.
+
+          /**
+           * drop_buffers - check and collect the buffers on a buffer page that is going to be freed
+           * @page:         the page
+           * @buffers_to_free:
+           *                make use of the link-list @b_this_page to collect the buffers
+           * return:        1 => succeed
+           *                0 => failed
+           * # this routine process two do-while cycles(1st -> state check, 2nd -> another mapping check)
+           *   the first do-while :
+           *     traverse buffers on @page
+           *     if current buffer head state indicates write I/O error AND the @page is cached,
+           *     then set_bit() AS_EIO on @page->mapping->flags
+           *     next check if current buffer head is busy,that the buffer's usage ref count is
+           *     greater than 1 OR it is dirty or locked,then return 0 to caller
+           *   after the first do-while completed,enter the second do-while :
+           *     traverse buffers on @page
+           *     if current buffer have associated with another mapping,invoke __remove_assoc_queue()
+           *     on it,this routine will unlink this buffer and the another mapping;if the buffer
+           *     is write I/O error,set_bit() AS_EIO in the another mapping's @flags,finally,set
+           *     @b_assoc_map of this buffer to NULL
+           *     # list_del_init() is called on current buffer head's @b_assoc_buffers
+           *   after the second do-while completed,set *@buffers_to_free to the head buffer_head,
+           *   invoke __clear_page_buffers() on @page,return 1 to caller
+           *          # defined in the same file,the routine clear PG_private,clear @private of @page,
+           *            invoke page_cache_release() on @page
+           */
+          static int drop_buffers(struct page *page, struct buffer_head **buffers_to_free);
