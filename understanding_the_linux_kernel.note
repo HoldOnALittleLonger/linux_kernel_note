@@ -2457,6 +2457,36 @@ Chapter 3 : Processes
           /*  waitqueue_active - check if @q is activing(it is not empty) now.  */
           static inline int waitqueue_active(wait_queue_head_t @q);
 
+      Wait bit queue :
+        a wait queue used to waiting for a specified bit is set.
+
+        <linux/wait.h>
+          /**
+           * wait_bit_key - key of wait bit queue
+           * @flags:        address of flags that will be tested
+           * @bit_nr:       number of bit that will be tesed in @flags
+           */
+          struct wait_bit_key {
+                  void *flags;
+                  int bit_nr;
+          };
+
+          /**
+           * wait_bit_queue - wait queue for wait bit
+           * @key:            wait bit queue key
+           * @wait:           wait queue
+           */
+          struct wait_bit_queue {
+                  struct wait_bit_key key;
+                  wait_queue_t wait;
+          };
+
+          ! wait bit usually is handled by __wait_on_bit_lock(),which do checking in
+            a do-while cycle,stop condition is test_and_set_bit(@key.bit_nr, @key.flags),
+            that is wait until the bit is cleared,but return with it have been set.
+            # unlock version is __wait_on_bit(),the stop condition of do-while cycle is
+              test_bit(@key.bit_nr, @key.flags) returned FALSE OR @action() returned TRUE
+
       Process wishing to wait :
         <linux/wait.h>
           /*  sleep_on - let "current" sleep on @q and it will enter TASK_UNINTERRUPTIBLE state.  */
@@ -6593,6 +6623,11 @@ Chapter 5 : Kernel Synchronization
               clear_bit(nr, addr)           ->       clear the @nr_th bit of *addr
               change_bit(nr, addr)          ->       invert the @nr_th bit of *addr
               test_and_set_bit(nr, addr)    ->       set the @nr_th bit of *addr and return its old value
+                                                     the result is
+                                                       @old & @mask != 0
+                                                       |      |
+                                                       |      +--> mask that the bit at @nr is 1,others are 0
+                                                       +--> old value of *@addr 
               test_and_clear_bit(nr, addr)  ->       clear the @nr_th bit of *addr and return its old value
               test_and_change_bit(nr, addr) ->       invert the @nr_th bit of *addr and return its old value
 
@@ -30511,7 +30546,12 @@ Chapter 15 : The Page Cache
                   struct buffer_head *bhs[BH_LRU_SIZE];
           };
 
-          /* per-CPU buffer head LRU */
+          /* per-CPU buffer head LRU(Least Recently Used)
+           * # the same element in the array of a CPU can only appears once,but it
+           *   might appears several times between several CPUs
+           *   for each occurrence of a buffer head in the LRU block cache,
+           *   @b_count member is increased by one
+           */
           static DEFINE_PER_CPU(struct bh_lru, bh_lrus) = {{ NULL }};
 
           /**
@@ -30546,9 +30586,12 @@ Chapter 15 : The Page Cache
            * @block:    logical block number
            * @size:     size of block
            * # EXPORT_SYMBOL
-           * # this routine might sleep,and it can not fail,retry on failed
+           * # this routine might sleep,and it can not fail,automatically retry 
+           *   if it have failed
            * # this routine may return a buffer_head represents non-existent block
            *   if @block is illegal
+           * # the block buffer returned by this routine does not necessarily contain
+           *   valid data,that the BH_Uptodate flag of the buffer head might be cleared
            * # steps -
            *     invoke __find_get_block() to get buffer head
            *     try slow path through __getblk_slow() if __find_get_block() returned NULL
@@ -30593,8 +30636,8 @@ Chapter 15 : The Page Cache
             page_cache_release() it and return NULL to caller.
             if the page is private,then retrieve buffer head object from its @private member.
             next,traverse @b_this_page to find a buffer head object whose @b_blocknr is equal to @block;
-            if find,then increase its @b_count,and return it to caller;otherwise,enter the normal return
-            path - printk messages if some of the buffers on this page are not mapped,page_cache_release()
+            if find,then increase its @b_count,and return it to caller;otherwise,enter the "normal return
+            path" - printk messages if some of the buffers on this page are not mapped,page_cache_release()
             the page got by find_get_page(),return the result to caller.              /* put page */
             /* @private_lock will be released before function return to caller */
             /* routine make use of a local variable @all_mapped to records whether there is some of
@@ -30626,7 +30669,7 @@ Chapter 15 : The Page Cache
            *                        # the creating is handled by grow_dev_page() - create the page-cache
            *                          that contains the requested block.
            *                          which invoke find_or_create_page() to find the page from page cache
-           *                          or created a new cached page.
+           *                          or create a new cached page.
            *                          if the page has buffers,then get buffer head from @private.
            *                          checks its @b_size,if equal to the expected size,then call to init_page_buffers()
            *                          on the page,and return it to caller;otherwise,try_to_free_buffers() of the
@@ -30878,3 +30921,65 @@ Chapter 15 : The Page Cache
            *            invoke page_cache_release() on @page
            */
           static int drop_buffers(struct page *page, struct buffer_head **buffers_to_free);
+
+      Searching Blocks in the Page Cache :
+        routines that are used for searching blocks in the page cache have been described above(Managing
+        the Buffer Heads).
+
+        the enter point is __getblk(),fast path for __getblk() is __find_get_block(),and the slow paths
+        for __getblk() are __find_get_block_slow() OR __getblk_slow().
+
+        the page index of a cached page of a block deivce which mapping a block is encoded through the
+        logical block number.
+        /* @bdev->bd_block_size,a bit shift operation on the logical block number.for example,suppose
+         * the @bd_block_size is 1024 bytes,and page size is 4096 bytes,then the index is logical block
+         * number / 4
+         */
+
+        <fs/buffer.c>
+          /**
+           * __bread - read a specified block and return the buffer head
+           * @bdev:    the block device to read from
+           * @block:   logical block number
+           * @size:    size(in bytes) to read
+           * return:   buffer head object pointer OR NULL if the block was unreadable
+           * # EXPORT_SYMBOL
+           * # this routine first try __getblk()
+           *   if the buffer is not NULL AND it has not up to date(BH_Uptodate),then
+           *   invoke __bread_slow(),return the buffer head get from __bread_slow() to caller
+           *   otherwise,return the buffer head get from __getblk() to caller
+           * # buffer head is not NULL,but BH_Uptodate is cleared,then must read the block
+           *   from disk(not sync)
+           */
+          struct buffer_head *__bread(struct block_device *bdev, sector_t block, unsigned size);
+
+          /**
+           * __bread_slow - slow path for __bread()
+           * @bh:           buffer head
+           * return:        updated buffer head OR NULL
+           * # this routine process the following steps -
+           *     1> lock buffer @bh
+           *     2> if BH_Uptodate is set,then unlock buffer and return @bh
+           *     3> BH_Uptodate cleared,then
+           *          invoke get_bh() to increase ref count
+           *          set @b_end_io of @bh to end_buffer_read_sync()
+           *                                  # this routine will invoke
+           *                                    __end_buffer_read_notouch() and put_bh()
+           *                                  # __end_buffer_read_notouch() -
+           *                                      set OR clear BH_Uptodate and unlock
+           *                                      the buffer
+           *          invoke submit_bh() on @bh with action READ,this routine will
+           *          makeup a bio from @bh and call to sumbit_bio() submit the
+           *          requestion to Generic Block I/O Layer
+           *          invoke wait_on_buffer() # wait until BH_Lock is cleared in @bh->b_state
+           *          # this routine invoke __wait_buffer() if @bh have locked OR
+           *            its ref count is _zero_
+           *            __wait_buffer() finally endup at __wait_on_bit_lock(),thus
+           *            BH_Lock will be set after waiting have completed(that means
+           *            the buffer have been locked by this kernel control path)
+           *          after the kernel control path awaken,checks again BH_Uptodate,
+           *          if it is set,then return @bh to caller
+           *     4> even submitted a new bio,it stay BH_Uptodate is cleared(not sync),
+           *        brelse() @bh and return NULL to caller
+           */
+          static struct buffer_head *__bread_slow(struct buffer_head *bh);
