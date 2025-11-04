@@ -4956,7 +4956,7 @@ Chapter 4 : Interrupts and Exceptions
            */
           extern unsigned int __irq_entry do_IRQ(struct pt_regs *regs);
 
-        the high-level IRQ handler enter point :
+        the high-level IRQ handler entry point :
           1>  save the old registers in @old_regs.
 
           2>  get @vector from @orig_ax.
@@ -10663,7 +10663,7 @@ Chapter 7 :
             static int effective_prio(struct task_struct *p);
 
         The schedule() function :
-          the linux scheduler enter point.it must to find out a process in rq and assign the CPU
+          the linux scheduler entry point.it must to find out a process in rq and assign the CPU
           to it.it is invoked by several kernel routines directly or in a lzay way(deferred).
 
           <linux/sched.h>
@@ -10671,7 +10671,7 @@ Chapter 7 :
             #define __sched __attribute__((__section__(".sched.text")))
 
             /**
-             * schedule - the linux scheduler enter point
+             * schedule - the linux scheduler entry point
              * # asmlinkage __sched schedule(void) { ... } EXPORT_SYMBOL(schedule);  
             asmlinkage void schedule(void);
 
@@ -27504,7 +27504,7 @@ Chapter 14 : Block Device Drivers
                @bi_vcnt   - total number of segments in the bio
                @bi_rw     - requested operation flags(READ / WRITE)
                @bi_end_io - address of a completion procedure
-          3> invoke generic_make_request(),the main enter point of Generic Block Layer
+          3> invoke generic_make_request(),the main entry point of Generic Block Layer
           4> generic_make_request() does :
                1> checks if @bi_sector is valid.
                   set BIO_EOF in @bi_flags if invalid,and report error,call bio_endio(),
@@ -28467,7 +28467,7 @@ Chapter 14 : Block Device Drivers
                to the request just dispatched.
 
     Issuing a Request to the I/O Scheduler :
-      the function generic_make_request() is enter point of generic block layer,which call to @make_request_fn
+      the function generic_make_request() is entry point of generic block layer,which call to @make_request_fn
       of the request queue with the onging bio object.
       @make_request_fn has the default value __make_request(),as the preceding description,which call to
       get_request_wait() to issue a new request in the request queue.
@@ -30926,7 +30926,7 @@ Chapter 15 : The Page Cache
         routines that are used for searching blocks in the page cache have been described above(Managing
         the Buffer Heads).
 
-        the enter point is __getblk(),fast path for __getblk() is __find_get_block(),and the slow paths
+        the entry point is __getblk(),fast path for __getblk() is __find_get_block(),and the slow paths
         for __getblk() are __find_get_block_slow() OR __getblk_slow().
 
         the page index of a cached page of a block deivce which mapping a block is encoded through the
@@ -30970,7 +30970,7 @@ Chapter 15 : The Page Cache
            *                                      the buffer
            *          invoke submit_bh() on @bh with action READ,this routine will
            *          makeup a bio from @bh and call to sumbit_bio() submit the
-           *          requestion to Generic Block I/O Layer
+           *          requestion to Generic Block Layer
            *          invoke wait_on_buffer() # wait until BH_Lock is cleared in @bh->b_state
            *          # this routine invoke __wait_buffer() if @bh have locked OR
            *            its ref count is _zero_
@@ -30983,3 +30983,126 @@ Chapter 15 : The Page Cache
            *        brelse() @bh and return NULL to caller
            */
           static struct buffer_head *__bread_slow(struct buffer_head *bh);
+
+      Submitting Buffer Heads to the Generic Block Layer :
+        kernel routines submit_bh() and ll_rw_block() are used to submit buffer heads
+        to Gernric Block Layer,that is allow the kernel to start an I/O data transfer on
+        one or more buffers described by their buffer heads.
+
+        The submit_bh() function :
+          /* this routine is also called in the slow path for __bread() */
+
+          <fs/buffer.c>
+            /**
+             * submit_bh - submit a buffer to Generic Block Layer to start I/O
+             *             data transfer
+             * @rw:        data direction READ / WRITE
+             * @bh:        buffer head
+             * return:     0 OR error code
+             * # EXPORT_SYMBOL
+             */
+            int submit_bh(int rw, struct buffer_head *bh);
+
+            brief description for submit_bh() :
+              this routine process BUG checking immediately when start processing.
+              it is a BUG if 
+                buffer unlocked
+                buffer is not a valid mapping
+                @b_end_io is NULL
+                buffer is delayed
+                BH_Delay is set
+                BH_Unwritten is set
+              if @bh has set BH_Ordered AND @rw enabled WRITE,then enable WRITE_BARRIER in @rw.
+              next,check if test_set_buffer_req() AND @rw enabled WRITE,then clear BH_Write_EIO.
+              /* test_set_buffer_req() => test_and_set_bit() BH_Req in @bh->b_state */
+              /* if this buffer have been submitted for I/O then clear out write error when
+               * rewriting
+               * BH_Req is used to record that the buffer head have been submitted.
+               */
+              proceed executing,function invoke bio_alloc() with gfp flag GFP_NOIO and 1 vector
+              to create a bio object.
+              init the @bio from @bh {
+                      bi_sector = @b_blocknr * (@b_size >> 9)
+                      bi_bdev = @b_bdev
+                      bi_io_vec[0].bv_page = @b_page
+                      bi_io_vec[0].bv_len = @b_size
+                      bi_io_vec[0].bv_offset = @b_data & ~PAGE_MASK /* bh_offset() */
+              }
+              init the remains of @bio {
+                      bi_vcnt = 1
+                      bi_idx = 0
+                      bi_size = @bh->b_size
+                      bi_end_io = end_bio_bh_io_sync
+                      /**
+                       * called when I/O completed
+                       * end_bio_bh_io_sync() - get @bh from @bi_private,set some error bits
+                       *                        according to the parameter @err
+                       *                        set BH_Quiet if BIO_QUIET is set
+                       *                        invoke @b_end_io() of @bh with parameter 
+                       *                          @uptodate = test_bit(BIO_UPTODATE, @bi_flags)
+                       *                        invoke bio_put()
+                       */
+                      bi_private = @bh
+              }
+              invoke bio_get() on the @bio to increase ref count,and call to submit_bio(@rw, @bio)
+              to submit this new bio object.
+              finally,check the result,if @bio is flagged BIO_EOPNOTSUPP,then the return value will be
+              -EOPNOTSUPP,otherwise,it is _zero_.
+              invoke bio_put() on @bio to decrease ref count and return the return value to caller.
+              /**
+               * <block/blk-core.c>
+               *   void submit_bio(int rw, struct bio *bio);
+               *   - this routine process some checkings,update some account data,and invoke
+               *     generic_make_request() to access Generic Block Layer for submit this @bio
+               *   - per-CPU variable named @vm_event_states is type of struct vm_event_state,
+               *     the structure has a member is type of array of unsigned long named @event
+               *     in the header <linux/vmstat.h> defined a lot of values of enumerate type
+               *     as the index of @event.
+               *     if data direction is WRITE,then add bio_sectors(@bio) to @event[PGPGOUT];
+               *     otherwise,add bio_sectors(@bio) to @event[PGPGIN],besides,update task io
+               *     read account with @bi_size
+               */
+
+        The ll_rw_block() function :
+          this routine have been flagged with "DEPRECATED",it is a low-level routine for
+          access to block devices.
+
+          <fs/buffer.c>
+            /**
+             * ll_rw_block - low-level entry point for access to block devices [DEPRECATED]
+             * @rw:          data direction
+             * @nr:          number of buffers
+             * @bhs:         buffer head pointer array
+             * # EXPORT_SYMBOL
+             * # this routine traverse @bhs and invoke submit_bh() if the buffer satisfied
+             *   some requestions -
+             *     steps :
+             *       get next buffer head @bh
+             *       if @rw is SWRITE OR SWRITE_SYNC OR SWRITE_SYNC_PLUG then lock @bh
+             *       else if trylock_buffer() on @bh failed,then continue to next iteration
+             *       next,check if @rw is write direction(WRITE, SWRITE, SWRITE_SYNC, SWRITE_SYNC_PLUG)
+             *       then
+             *         @bh is dirty => clear dirty state
+             *                         set @b_end_io to end_buffer_write_sync()
+             *                         get_bh() on @bh to increase ref count
+             *                         invoke submit_bh() on @bh,rw indicator depends on @rw,
+             *                         WRITE_SYNC or WRITE
+             *                         continue to next iteration without unlock this @bh
+             *         # if @rw request writing but @bh is not dirty,we do not submit it
+             *       if @rw is read
+             *       then
+             *         BH_Uptodate is cleared in @bh => set @b_end_io to end_buffer_read_sync()
+             *                                          get_bh() on @bh to increase ref count
+             *                                          invoke submit_bh(),the rw indicator is @rw
+             *                                          continue to next iteration without unlock @bh
+             *       invoke unlock_buffer() at the end of iteration
+             *       # if @rw is write direction,we lock buffer at the starting of iteration,and
+             *         unlock it when @bh is not dirty,in this case,we do not need to writeback it
+             *         to disk
+             *         if @rw is read direction,we try to lock buffer also at the starting,if failed,
+             *         we must give up to READ for this @bh and get into next iteration(someone did this
+             *         or someone is using it)
+             *         @bh will be unlocked if t is in BH_Uptodate state,that means we do not need
+             *         to submit it for READ from disk
+             */
+            void ll_rw_block(int rw, int nr, struct buffer_head *bhs[]);
