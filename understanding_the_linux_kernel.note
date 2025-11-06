@@ -31106,3 +31106,168 @@ Chapter 15 : The Page Cache
              *         to submit it for READ from disk
              */
             void ll_rw_block(int rw, int nr, struct buffer_head *bhs[]);
+
+    Writing Dirty Pages to Disk :
+      Unix systems allow the deferred writes of dirty pages into block devices,because this
+      noticeably improves system performance.several write operations on a page in cache
+      could be satisfied by just one slow physical update of the corresponding disk sectors.
+      /* read operation is more critical than write operation
+       * by use of delay writing,physical block devices will service,on the average,
+       * many more read requests than write ones.
+       */
+
+      ! a dirty page might stay in main memory until the last possible moment - system shutdown.
+        but there may happens some problem -
+          > power supply failure occurs,updated contents will lost
+          > size of page cache would have to be huge - at least as big as the size of the
+            accessed block devices
+
+      conditions for pages are flushed to disk :
+        1> page cache gets too full and more pages are needed,or the number of
+           dirty pages becomes too large
+        2> too much time has elapsed since a page has stayed dirty
+        3> a process requests all pending changes of a block device or of a particular file
+           to be flushed(sync(), fsync(), fdatasync() system calls)
+
+      PG_dirty on buffer page -
+        the PG_dirty flag of the buffer page should be set if at least one of associated
+        buffer heads has the BH_Dirty flag set.
+        when kernel selected the PG_dirty buffer page to be flushed,it can traverse the buffers
+        on the page,and only flush the buffers have BH_Dirty is set.
+        after kernel flushed dirty contents,it will clear the PG_dirty flag of the page.
+
+      The pdflush Kernel Threads :
+        earlier versions of Linux used a kernel thread called "bdflush" to systematically scan
+        the page cache looking for dirty pages to flush,and they used a second kernel thread
+        called "kupdate" to ensure that no page remains dirty for too long.
+        since Linux 2.6,they are replaced with a group of general purpose kernel threads called
+        "pdflush".
+
+        the number of pdflush threads in the system is dynamically adjusted -
+          new threads are created when they are too few and existing threads are killed when
+          they are too many.
+          /* these kernel threads can block */
+
+        create and kill rules :
+          1> there must be at least two "pdflush" kernel threads and at most eight.
+          2> if there were no idle "pdflush" during the last second,a new "pdflush" should
+             be created.
+          3> if more than one second elapsed since the last "pdflush" became idle,a "pdflush"
+             should be removed.
+
+        !! LINUX 2.6.34.1 HAVE HAND OVER THE "WRITEBACK" TO BACKING DEV.IN <mm/backing-dev.c>,
+           FOR EACH REGISTERED BDI,VM WILL START A KERNEL THREAD,THE NAME FORMAT IS
+           "bdi-$device_name",THREAD FUNCTION IS bdi_forker_task().
+           AND IN FUNCTION bdi_forker_task(),IT MIGHT START A NEW KERNEL THREAD HAS THE NAME FORMAT
+           "flush-$device_name",THREAD FUNCTION IS bdi_start_fn().
+           THE WRITEBACK IS HANDLED BY FUNCTION bdi_writeback_task(),WHICH WILL CALLED BY
+           bdi_start_fn().
+           THUS,NO STRUCTURE struct pdflush_work IS DEFINED IN LINUX 2.6.34.1 .
+
+        <linux/writeback.h>
+          /* sync modes for writeback */
+          enum writeback_sync_modes {
+                  WB_SYNC_NONE,     /* do not wait on anything */
+                  WB_SYNC_ALL,      /* wait on every mapping - buffer */
+          };
+
+          /**
+           * writeback_control - structure used for writeback work control,the control
+           *                     structure which tells the writeback code what to do
+           * @bdi:               bdi of the block device,if !NULL,only write back
+           *                     this queue
+           * @sb:                super block of file system,if !NULL,only write
+           *                     inodes from this super_block
+           * @sync_mode:         writeback sync mode
+           * @older_than_this:   if !NULL,only write back inodes older than this
+           * @wb_start:          time writeback_inodes_wb() was called,this is needed
+           *                     to avoid extra jobs and livelock
+           * @nr_to_write:       write this many pages,and decrement this for each page
+           *                     written
+           * @pages_skipped:     pages which were not written
+           * @range_start:       hint for a_ops->writepages() to start at this position(byte)
+           * @range_end:         hint for a_ops->writepages() to end at this position(byte)
+           * @nonblocking:       do not get stuck on request queues
+           * @encountered_congestion:
+           *                     an output: a queue is full
+           * @for_kupdate:       a kupdate writeback
+           * @for_background:    a background writeback
+           * @for_reclaim:       invoked from the page allocator,reclaim pages
+           * @range_cyclic:      @range_start is cyclic
+           * @more_io:           more I/O to be dispatched
+           * @no_nrwrite_index_update:
+           *                     write_cache_pages() would not update wbc->nr_to_write
+           *                     and mapping->writeback_index if @no_nrwrite_index_update
+           *                     is set
+           *                     # write_cache_pages() may write more than we requested
+           *                       and we want to make sure @nr_to_write and @writeback_index
+           *                       are updated in a consistent manner so we use a single
+           *                       control to update them
+           * # un-specified fields are initialized to _zero_
+           */
+          struct writeback_control {
+                  struct backing_dev_info *bdi;
+                  struct super_block *sb;
+                  enum writeback_sync_modes sync_mode;
+                  unsigned long *older_than_this;
+                  unsigned long wb_start;
+                  long nr_to_write;
+                  long pages_skipped;
+                  loff_t range_start;
+                  loff_t range_end;
+                  unsigned nonblocking:1;
+                  unsigned encountered_congestion:1;
+                  unsigned for_kupdate:1;
+                  unsigned for_background:1;
+                  unsigned for_reclaim:1;
+                  unsigned range_cyclic:1;
+                  unsigned more_io:1;
+                  unsigned no_nrwrite_index_update:1;
+          };
+
+          ! structure block_device has a member named "bd_super",which is type of
+            struct super_block
+            structure super_block has a member named "s_bdi",which is type of
+            struct backing_dev_info
+            structure backing_dev_info has a member named "wb",it is type of
+            struct bdi_writeback
+          ! backing_dev_info object initialized through bdi_init()
+            bdi_writeback object initialized through bdi_wb_init(),but @task
+            member is setup later in bdi_register()
+            /* bdi_register_dev() is called in add_disk() */
+
+        <linux/backing-dev.h>
+          /**
+           * bdi_writeback - backing device info writeback structure
+           * @list:          hangs off the bdi(linked into @bdi->wb_list)
+           * @bdi:           parent bdi
+           * @nr:            bitmap used to record bdi works
+           * @task;          writeback task
+           *                 # usually is "bdi_forker_task" or "bdi_start_fn"
+           * @b_dirty:       dirty inodes
+           * @b_io:          parked for writeback
+           * @b_more_io:     parked for more writeback
+           * # lock @wb_lock of backing_dev_info object is used to protect
+           *   its @wb member
+           * # @task is woke up when a new bdi_work have queued
+           */
+          struct bdi_writeback {
+                  struct list_head list;
+                  struct backing_dev_info *bdi;
+                  unsigned int nr;
+                  unsigned long last_old_flush;
+                  struct task_struct *task;
+                  struct list_head b_dirty;
+                  struct list_head b_io;
+                  struct list_head b_more_io;  
+          };
+
+        ! kernel have introduced two different source files for writeback -
+            <fs/fs-writeback.c> : contains all the functions related to writing
+                                  back and waiting upon dirty inodes against
+                                  superblocks,and writing back dirty pages against
+                                  inodes
+                                  /* normal case */
+            <mm/page-writeback.c> : contains functionsrelated to writing back
+                                    dirty pages at the address_space level
+                                    /* focus on "laptop mode" */
