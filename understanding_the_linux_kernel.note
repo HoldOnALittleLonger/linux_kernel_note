@@ -31155,7 +31155,7 @@ Chapter 15 : The Page Cache
           3> if more than one second elapsed since the last "pdflush" became idle,a "pdflush"
              should be removed.
 
-        !! LINUX 2.6.34.1 HAVE HAND OVER THE "WRITEBACK" TO BACKING DEV.IN <mm/backing-dev.c>,
+        !! LINUX 2.6.34.1 HAVE HAND OVER THE "WRITEBACK" TO BACKING DEVICE.IN <mm/backing-dev.c>,
            FOR EACH REGISTERED BDI,VM WILL START A KERNEL THREAD,THE NAME FORMAT IS
            "bdi-$device_name",THREAD FUNCTION IS bdi_forker_task().
            AND IN FUNCTION bdi_forker_task(),IT MIGHT START A NEW KERNEL THREAD HAS THE NAME FORMAT
@@ -31165,6 +31165,9 @@ Chapter 15 : The Page Cache
            THUS,NO STRUCTURE struct pdflush_work IS DEFINED IN LINUX 2.6.34.1 .
 
         <linux/writeback.h>
+          /* number of pdflush threads,this global variable is exported to sysctl read-only */
+          extern int nr_pdflush_threads;
+
           /* sync modes for writeback */
           enum writeback_sync_modes {
                   WB_SYNC_NONE,     /* do not wait on anything */
@@ -31231,17 +31234,26 @@ Chapter 15 : The Page Cache
             struct backing_dev_info
             structure backing_dev_info has a member named "wb",it is type of
             struct bdi_writeback
-          ! backing_dev_info object initialized through bdi_init()
+          ! backing_dev_info object initialized through bdi_init(),the members
+            wb_mask and wb_cnt all set to 1 - just one thread support for now
+            # wb_mask => bitmask of registered tasks
+              wb_cnt  => number of registered tasks(wb threads)
             bdi_writeback object initialized through bdi_wb_init(),but @task
             member is setup later in bdi_register()
             /* bdi_register_dev() is called in add_disk() */
 
         <linux/backing-dev.h>
           /**
-           * bdi_writeback - backing device info writeback structure
+           * bdi_writeback - writeback structure contains some info about
+           *                 the writeback thread of a bdi
            * @list:          hangs off the bdi(linked into @bdi->wb_list)
            * @bdi:           parent bdi
-           * @nr:            bitmap used to record bdi works
+           * @nr:            bit number used by get_next_work_item() to checks
+           *                 the next bdi_work item registered in the bdi
+           *                 whether been processed by this wb thread
+           *                 # for gendisk,its initial value is zero,because
+           *                   alloc_disk() get a new gendisk object with
+           *                   GFP flag __GFP_ZERO
            * @task;          writeback task
            *                 # usually is "bdi_forker_task" or "bdi_start_fn"
            * @b_dirty:       dirty inodes
@@ -31271,3 +31283,148 @@ Chapter 15 : The Page Cache
             <mm/page-writeback.c> : contains functionsrelated to writing back
                                     dirty pages at the address_space level
                                     /* focus on "laptop mode" */
+
+      file system writeback :
+        the source file <fs/fs-writeback.c> contains implementations of file system
+        writeback mechanism.actually,a lot of block devices are hard disks,and many
+        filesystems based on physical disk,so fs-writeback is the normal case.
+
+        <fs/fs-writeback.c>
+          /**
+           * wb_writeback_args - arguments passed into wb_writeback(),essentially a
+           *                     subset of writeback_control
+           */
+          struct wb_writeback_args {
+                  long nr_pages;
+                  struct super_block *sb;
+                  enum writeback_sync_modes sync_mode;
+                  int for_kupdate:1;
+                  int range_cyclic:1;
+                  int for_background:1;
+          };
+
+          /**
+           * bdi_work - work item for the bdi_writeback threads
+           * @list:     pending work list
+           * @rcu_head: work RCU
+           * @seen:     threads that have seen this work
+           * @pending:  number of threads still to do work
+           * @args:     writeback arguments
+           * @state:    flag bits(WS_*)
+           *            # WS_USED_B = 0
+           *              WS_ONSTACK_B = 1
+           *              WS_USED = 1 << WS_USED_B
+           *              WS_ONSTACK = 1 << WS_ONSTACK_B
+           */
+          struct bdi_work {
+                  struct list_head list;
+                  struct rcu_head rcu_head;
+                  unsigned long seen;
+                  atomic_t pending;
+                  struct wb_writeback_args args;
+                  unsigned long state;
+          };
+
+          /**
+           * bdi_work_init - initialize a bdi work
+           * # INIT_RCU_HEAD(&@work->rcu_head)
+           *   @work->args := args
+           *   @work->state := WS_USED
+           */
+          static inline void bdi_work_init(struct bdi_work *work, struct wb_writeback_args *args);
+
+          /**
+           * bdi_work_free - free a bdi work
+           * # this routine get bdi_work object through @head
+           *   if the work is on stack,then invoke kfree() to free it
+           *   otherwise,invoke bdi_work_clear() to free it
+           */
+          static void bdi_work_free(struct rcu_head *head);
+
+          /**
+           * bdi_work_clear - clear a bdi work which is not on stack
+           * # this routine first clear WS_USED_B bit of @work->state,change
+           *   state to unused
+           *   then process a SMP memory barrier through smp_mb_after_clear_bit()
+           *   finally,invoke wake_up_bit() to wake up processes that waiting
+           *   for WS_USED_B of @work->state to be cleared
+           */
+          static void bdi_work_clear(struct bdi_work *work);
+
+          /**
+           * writeback_in_progress - determine whether there is writeback in progress
+           * @bdi:                   the device's backing_dev_info structure
+           * return:                 1 => in progress
+           *                         0 => not in progress
+           * # this routine actually check list_empty() for @bdi->work_list
+          int writeback_in_progress(struct backing_dev_info *bdi);
+
+        queue a bdi work :
+
+          /**
+           * bdi_queue_work - queue a bdi work into backing device
+           * @bdi:            the device's backing_dev_info
+           * @work:           bdi work
+           */
+          static void bdi_queue_work(struct backing_dev_info *bdi, struct bdi_work *work);
+
+          brief description for bdi_queue_work() :
+            this routine set @work->seen to @bdi->wb_mask when at the starting.
+            if @work->seen is _zero_,that must be a BUG.
+            then set @work->pending to @bdi->wb_cnt,of course,it also is a BUG if
+            @bdi->wb_cnt is _zero_.
+            if no BUG detected,then acquire @bdi->wb_lock.
+            invoke list_add_tail_rcu() to link @work->list at the tail of @bdi->work_list.
+            /* list_add_tail_rcu() contains the necessary barriers to make sure the
+             * above stores are seen before the item is noticed on the list
+             */
+            next,release the lock and check @bdi->wb_list whether is empty.
+            if it is empty,that means the default thread is not there,thus must add it.
+            this is completed by wake up process @default_backing_dev_info.wb.task .
+            if default thread been there,then we can simply wake up the task of the
+            bdi_writeback object of @bdi if task have specified,that is @bdi->wb->task is
+            not NULL.
+
+          /**
+           * bdi_alloc_queue_work - allocate and initialize a new bdi work,then queue it
+           * @bdi:                  the device's backing_dev_info
+           * @args;                 writeback arguments
+           * # this routine make use of kmalloc() with GFP flag GFP_ATOMIC to allocate
+           *   new bdi work
+           *   if new work get allocated,then init it through bdi_work_init(),queue it
+           *   through bdi_queue_work()
+           *   else,wake up @bdi->wb->task if @task have specified
+           *        # wake up the thread for old dirty data writeback(WB_SYNC_NONE writeback)
+           */
+          static void bdi_alloc_queue_work(struct backing_dev_info *bdi,
+                                           struct wb_writeback_args *args);
+
+        start writeback :
+          /**
+           * bdi_sync_writeback - start and wait for writeback
+           * @bdi:                the bdi
+           * @sb:                 super block
+           * # this routine create new bdi work on stack(that is the function stack frame)
+           *   writeback argument initialized with {
+           *           .sb = @sb,
+           *           .sync_mode = WB_SYNC_ALL,
+           *           .nr_pages = LONG_MAX,
+           *           .range_cyclic = 1,
+           *   }
+           *   set WB_ONSTACK in the state member of the bdi work object
+           *   queue it and invoke bdi_wait_on_work_clear()
+           *                       # wait until WB_USED_B cleared,process enter TASK_UNINTERRUPTIBLE
+           */
+          static void bdi_sync_writeback(struct backing_dev_info *bdi, struct super_block *sb);
+
+          /**
+           * bdi_start_writeback - async version,and new bdi work is not on stack
+           * # for writeback arguments
+           *     range_cyclic set to 1
+           *     sync_mode set to WB_SYNC_NONE
+           *     nr_pages set to @nr_pages OR LONG_MAX(if @nr_pages is 0,in this case,for_background set
+           *                                           to 1)
+           * # this routine call to bdi_alloc_queue_work() to create bdi work,so the new bdi work
+           *   object is in general slab cache
+           */
+          void bdi_start_writeback(struct backing_dev_info *bdi, struct super_block *sb, long nr_pages);
