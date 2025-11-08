@@ -31428,3 +31428,81 @@ Chapter 15 : The Page Cache
            *   object is in general slab cache
            */
           void bdi_start_writeback(struct backing_dev_info *bdi, struct super_block *sb, long nr_pages);
+
+        the bdi_forker_task() and bdi_start_fn() functions :
+          function bdi_forker_task() is executed by kernel bdi thread,it will start flush thread for
+          dirty pages on-demand
+          
+          ! a bdi thread is created and started when the new bdi is registered,and which must has
+            capability - flush forker.
+            /* bdi_cap_flush_forker() check this capability,only @default_backing_dev_info is able
+             * to create bdi forker thread
+             */
+
+          <mm/backing-dev.c>
+            /**
+             * bdi_register - register a bdi
+             * @bdi:          the bdi to be registered
+             * @parent:       parent device of the going to be created device of @bdi
+             * @fmt:          variable parameters describing string
+             * @...:          variable parameters
+             * return:        0 OR error code
+             * # EXPORT_SYMBOL
+             * # this routine is called by bdi_register_dev(),in this case,variable parameters
+             *   are major number and minor number
+             * # steps - 
+             *     1> check @bdi->dev,for a new one,it can not has @dev specified,in this case,
+             *        just return 0 to caller and do nothing
+             *        # driver needs to use separate queues per device
+             *     2> analyze variable parameters
+             *     3> invoke device_create_vargs() to create new device for @bdi with analyzed
+             *        variable parameters,return error code if failed
+             *        # parent device of the new device is @parent
+             *     4> acquire @bdi_lock and disable bottom half
+             *        add @bdi->bdi_list to global bdi list @bdi_list through list_add_tail_rcu()
+             *        release @bdi_lock and enable bottom half
+             *     5> check bdi_cap_flush_forker(),start forker thread for default backing_dev_info
+             *        if condition satisfied,then invoke kthread_run() to start kernel thread,
+             *        function is bdi_forker_task(),parameter is &@bdi->wb
+             *        # init function default_bdi_init() is called during kernel boot phase,the first
+             *          item in global bdi list @bdi_list is @default_backing_dev_info,and of course,
+             *          bdi_register() is called in default_bdi_init() for register the default bdi
+             *        if kernel thread creating failed,@bdi->bdi_list will be unlinked,and return
+             *        -ENOMEM to caller
+             *     6> if everything is OK,then invoke bdi_debug_register() to register bdi in debugfs,
+             *        and set BDI_registered in @bdi->state,return 0 to caller
+             */
+            int bdi_register(struct backing_dev_info *bdi, struct device *parent, const char *fmt, ...);
+
+            /**
+             * bdi_unregister - unregister a bdi
+             * @bdi:            bdi is going to be unregistered
+             * # EXPORT_SYMBOL
+             * # if @bdi->dev is not NULL,that means this bdi have been registered,we can unregister it
+             * # unregister -
+             *     invoke bdi_prune_sb()
+             *     # make sure no super blocks point to it
+             *     if @bdi is not default bdi,invoke bdi_wb_shutdown()
+             *     # remove bdi from @bdi_list,and shutdown any threads we have running
+             *     invoke bdi_debug_unregister()
+             *     # unregister from debugfs
+             *     invoke device_unregister() for @bdi->dev
+             *     set @bdi->dev to NULL
+             */
+            void bdi_unregister(struct backing_dev_info *bdi);
+
+            /**
+             * bdi_task_init - init bdi task
+             * @bdi:           the bdi that contains @wb
+             * @wb:            writeback structure
+             * # this routine make use the task @current,because it is invoked in bdi_forker_task(),
+             *   thus @current is the kernel thread
+             *   # except bdi_forker_task(),this routine also called by bdi_start_fn()
+             * # routine invoke list_add_tail_rcu() to add @wb to @bdi->wb_list,for do this,must
+             *   acquire @wb_lock of @bdi
+             *   then enable PF_FLUSHER | PF_SWAPWRITE flags in @task->flags 
+             *   next,disable PF_NOFREEZE flag in @task->flags,this let freezer can freeze this task
+             *   set user nice value of @task to 0 - normal priority
+             */
+            static void bdi_task_init(struct backing_dev_info *bdi, struct bdi_writeback *wb);
+            
