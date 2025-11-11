@@ -31247,6 +31247,7 @@ Chapter 15 : The Page Cache
            * bdi_writeback - writeback structure contains some info about
            *                 the writeback thread of a bdi
            * @list:          hangs off the bdi(linked into @bdi->wb_list)
+           *                 # @bdi->wb_list : the flusher threads hang of this @bdi
            * @bdi:           parent bdi
            * @nr:            bit number used by get_next_work_item() to checks
            *                 the next bdi_work item registered in the bdi
@@ -31359,7 +31360,7 @@ Chapter 15 : The Page Cache
            * # this routine actually check list_empty() for @bdi->work_list
           int writeback_in_progress(struct backing_dev_info *bdi);
 
-        queue a bdi work :
+        Queue a bdi work :
 
           /**
            * bdi_queue_work - queue a bdi work into backing device
@@ -31399,7 +31400,24 @@ Chapter 15 : The Page Cache
           static void bdi_alloc_queue_work(struct backing_dev_info *bdi,
                                            struct wb_writeback_args *args);
 
-        start writeback :
+        The bdi_lock,bdi_list,and bdi_pending_list :
+          <mm/backing-dev.c>
+            /* bdi_lock - lock protect @bdi_list and @bdi_pending_list */
+            DEFINE_SPINLOCK(bdi_lock);
+
+            /* bdi_list - global list collect registered and active bdi's */
+            LIST_HEAD(bdi_list);
+
+            /* bdi_pending_list - global list collect registered bdi's each of them has
+             *                    pending works
+             */
+            LIST_HEAD(bdi_pending_list);
+
+            ! if the bdi in @bdi_list has pending work,it will be moved into @bdi_pending_list,
+              and get back into @bdi_list later by bdi_start_fn().
+
+
+        Start writeback :
           /**
            * bdi_sync_writeback - start and wait for writeback
            * @bdi:                the bdi
@@ -31429,14 +31447,15 @@ Chapter 15 : The Page Cache
            */
           void bdi_start_writeback(struct backing_dev_info *bdi, struct super_block *sb, long nr_pages);
 
-        the bdi_forker_task() and bdi_start_fn() functions :
-          function bdi_forker_task() is executed by kernel bdi thread,it will start flush thread for
-          dirty pages on-demand
+        The bdi_forker_task() and bdi_start_fn() functions :
+          function bdi_forker_task() is executed by kernel bdi flush forker thread,it will start flush
+          thread for dirty pages on-demand
           
-          ! a bdi thread is created and started when the new bdi is registered,and which must has
-            capability - flush forker.
+          ! a bdi flush forker thread is created and started when the new bdi is registered,and which
+            must has capability - flush forker.
             /* bdi_cap_flush_forker() check this capability,only @default_backing_dev_info is able
-             * to create bdi forker thread
+             * to create bdi flush forker thread,thus there is only one flush forker task on the
+             * system which is attached to @default_backing_dev_info during kernel boot phase.
              */
 
           <mm/backing-dev.c>
@@ -31505,4 +31524,109 @@ Chapter 15 : The Page Cache
              *   set user nice value of @task to 0 - normal priority
              */
             static void bdi_task_init(struct backing_dev_info *bdi, struct bdi_writeback *wb);
-            
+
+            /**
+             * bdi_forker_task - function executed by kernel flush forker thread
+             * @ptr:             the parameter bound by kthread_run()
+             * return:           always return 0
+             */
+            static int bdi_forker_task(void *ptr);
+
+            description for bdi_forker_task() :
+              this routine is executed by bdi thread which started by @default_backing_dev_info.
+              at the beginning,routine convert @ptr to bdi_writeback pointer @me.
+              /* @me -> writeback info of @default_backing_dev_info */
+              next,invoke bdi_task_init() to initialize the kernel thread itself.
+              the main work is handled in a infinite for cycle.
+              for {
+                      invoke wb_has_dirty_io(@me) and list_empty(@me->bdi->work_list),
+                      check their results - if @default_backing_dev_info has dirty data or
+                      new writeback has queued into work list,then invoke wb_do_writeback()
+                      with parameters @me and 0 to start writeback.
+                      if no dirty data or new works,then acquire @bdi_lock and disable
+                      bottom half.
+                      call list_for_each_entry_safe() to traverse @bdi_list the global bdi list
+                      of registered bdi.
+
+                      if current bdi's wb has specified a task - there been a writeback thread is running,
+                      then continue to next iteration - next bdi.
+                      if current bdi's work list is empty AND which has not dirty data,also continue
+                      to next iteartion - next bdi.
+                      otherwise,invoke bdi_add_default_flusher_task() on current bdi.
+                      /* bdi_add_default_flusher_task() -
+                       *   add the default flusher task that gets created for any bdi that has dirty data
+                       *   pending writeout.
+                       *   # check bdi_cap_writeback_dirty() and BDI_registered,if conditions are not satisfied,
+                       *     return to caller.
+                       *   # check and set bit BDI_pending,if it is not pending,then invoke RCU callback
+                       *     bdi_add_to_pending().
+                       *   # before call to RCU callback,this routine will remove the bdi from @bdi_list
+                       *     the global bdi list.
+                       * bdi_add_to_pending() -
+                       *   reset @bdi_list of the bdi,add the @bdi_list to the global list @bdi_pending_list,
+                       *   it collects the bdi's that have work is pending.
+                       *   wake up @default_backing_dev_info.wb.task - the kernel thread that executes
+                       *   bdi_forker_task()
+                       */
+
+                      after list traversing,set this kernel thread to TASK_INTERRUPTIBEL.
+                      check list @bdi_pending_list,if bdi_add_to_pending() have called in previous step,then
+                      it must not be empty - some bdi's have work is pending.
+                      @bdi_pending_list is empty -
+                        convert result of "@dirty_writeback_interval * 10" to jiffies(ms -> jiffies)
+
+                        invoke schedule_timeout(wait jiffies)
+                        try to freeze this kernel thread -
+                          no result checking at there,if this kernel thread is sucessfully been freezed,
+                          TIF_FREEZE PF_FREEZING will be set,task enter TASK_UNINTERRUPTIBLE until unfreezed.
+                          after unfreezed,task state reset to TASK_INTERRUPTIBLE.
+                        /* might wake up by bdi_add_to_pending() */
+
+                        continue the next iteration of infinite for-cycle - no pending work,restart.
+
+                      @bdi_pending_list is not empty,that means the registered bdi's have some work is pending,
+                      thus kernel thread enter TASK_RUNNING.
+                      retrieve the next item in @bdi_pending_list,remove the bdi from @bdi_pending_list,because
+                      we are going to handle it.
+                      release @bdi_lock and enable bottom half.
+                      for this bdi has pending work,invoke kthread_run() to start a new kernel flusher thread,
+                      the function will be executed is bdi_start_fn(),parameter is @wb of this bdi.
+                      if we failed on kthread_run() with pending bdi's,@wb->task IS_ERR,then
+                        reset @wb->task to NULL /* default */
+                        insert this pending bdi to @bdi_pending_list again
+                        invoke bdi_flush_io() on it /* force writeout of the bdi from this forker thread */
+                        /**
+                         * bdi_flush_io() -
+                         *   create writeback_control message {
+                         *     sync_mode = WB_SYNC_NONE
+                         *     older_than_this = NULL
+                         *     range_cyclic = 1
+                         *     nr_to_write = 1024
+                         *   call writeback_inodes_wbc() on the created wbc
+                         * # do filesystem writeback
+                         */
+              }
+
+            /**
+             * bdi_start_fn - function executed by kernel flush thread,that is attached
+             *                to the bdi's in @bdi_list except @default_backing_dev_info
+             * @ptr:          member @wb of the bdi which has pending work
+             * return:        0 OR error code
+             */
+            static int bdi_start_fn(void *ptr);
+
+            brief description for bdi_start_fn() :
+              add the bdi into the global @bdi_list. /* removed in bdi_add_default_flusher_task() */
+              /* need @bdi_lock and bottom half disabled,release and enabled after adding finished */
+              invoke bdi_task_init() to initialize kernel flush thread itself.
+              clear BDI_pending in @state of the bdi.
+              call smp_mb__after_clear_bit() to sync with SMP CPUs.
+              wake up the tasks waiting for BDI_pending cleared.
+              invoke bdi_writeback_task() with paramter @wb = (struct bdi_writeback *)@ptr.
+
+              unlink @wb from the bdi's @wb_list. /* need @wb_lock,release after operation finished */
+              /* @wb->list added into bdi's @wb_list by bdi_task_init() */
+              
+              check the bdi's work_list,if any bdi_work is raced with the @wb exiting,flush them -
+                invoke wb_do_writeback() with parameter @wb, 1
+              set @wb->task to NULL,return result of bdi_writeback_task() to caller.
