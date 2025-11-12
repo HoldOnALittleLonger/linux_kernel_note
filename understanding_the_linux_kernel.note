@@ -20386,7 +20386,12 @@ Chapter 11 : Signals
 
         description for get_signal_to_deliver() :
           try_to_freeze(),if @current is in freezing(TIF_FREEZE enabled),then call to refrigerator() to
-          frozen() it,and recalculate its pending signals.
+          freeze it,and recalculate its pending signals.
+          /*
+           * routine thaw_process() in <kernel/freezer.c> is used to thaw the frozen process.
+           * it clear TIF_FREEZE and PF_FROZEN,then wake up the proces - wake up from refrigerator().
+           * flag PF_FREEZING is enabled and disabled in refrigerator().
+           */
           next,acquires spinlock @current->sighand->siglock.
           if @current->signal->flags enabled SIGNAL_CLD_MASK,disable the flag,if the process is traced by
           a debugger,then do_notify_parent_cldstop() to tell the debugger the tracing process is stopped,
@@ -31310,6 +31315,8 @@ Chapter 15 : The Page Cache
            * @rcu_head: work RCU
            * @seen:     threads that have seen this work
            * @pending:  number of threads still to do work
+           *            # actually,it is initalized to @wb_cnt of the
+           *              bdi
            * @args:     writeback arguments
            * @state:    flag bits(WS_*)
            *            # WS_USED_B = 0
@@ -31577,10 +31584,17 @@ Chapter 15 : The Page Cache
 
                         invoke schedule_timeout(wait jiffies)
                         try to freeze this kernel thread -
-                          no result checking at there,if this kernel thread is sucessfully been freezed,
+                          no result checking at there,if this kernel thread is sucessfully freezed,
                           TIF_FREEZE PF_FREEZING will be set,task enter TASK_UNINTERRUPTIBLE until unfreezed.
                           after unfreezed,task state reset to TASK_INTERRUPTIBLE.
-                        /* might wake up by bdi_add_to_pending() */
+                          /* PF_FROZEN also be set in the saved process flags,but only TIF_FREEZE flag is set
+                           * in the thread flags,try_to_freeze() will freeze the process and place it into
+                           * refrigerator.
+                           * in most cases,process need to be freezed when system suspend,so that,bdi forker
+                           * thread and flush threads will not be freezed when system is running
+                           */
+
+                        /* might wake up by bdi_add_to_pending() if schedule_timeout() have not timeout */
 
                         continue the next iteration of infinite for-cycle - no pending work,restart.
 
@@ -31630,3 +31644,86 @@ Chapter 15 : The Page Cache
               check the bdi's work_list,if any bdi_work is raced with the @wb exiting,flush them -
                 invoke wb_do_writeback() with parameter @wb, 1
               set @wb->task to NULL,return result of bdi_writeback_task() to caller.
+
+        Do writeback :
+          the entry point of filesystem writeback task is the routine wb_do_writeback().
+          it is called in bdi_forker_task() for writeout dirty data of @default_backing_dev_info,and
+          also called in bdi_writeback_task() in kernel flush thread for writeout dirty data of other
+          bdi's.
+
+          <fs/fs-writeback.c>
+            /**
+             * bdi_writeback_task - handle writeback of dirty data for the device backed by the bdi,
+             *                      also wake up periodically and does kupdated style flushing
+             * @wb:                 bdi writeback
+             * return:              always return 0
+             * # this routine is executed by kernel flush thread - bdi_start_fn()
+             * # steps this routine process -
+             *     use a while-cycle with stop condition is !kthread_should_stop() - kthread should stop
+             *
+             *     declare a local variable named @pages_written to record how many dirty pages been
+             *     written by wb_do_writeback() with parameters @wb, 0
+             *     if have written at least one dirty page,then set local variable @last_active to current
+             *     jiffies
+             *     otherwise,check local variable @wait_jiffies(default value is -1UL,the longest period of
+             *     inactivity) is equal to -1UL
+             *     if it is not equal,that means we have waited enough for dirty data at last iteration and no
+             *     new dirty data has came,thus function will exit if current @jiffies is after to
+             *     "max(5UL * 60 * HZ, @wait_jiffies) + @last_active" - timeout
+             *     # if the dirty data have seen again later,the task will get recreated automatically
+             *
+             *     next,check @dirty_writeback_interval,if it has defined,then schedule_timeout_interruptible()
+             *     will be called,@wait_jiffies is equal to "@dirty_writeback_interval * 10" - ms -> jiffies
+             *     otherwise,just invoke schedule()
+             *     at the end of iteration,invoke try_to_freeze() which freeze the process if needed
+             */
+            int bdi_writeback_task(struct bdi_writeback *wb);
+
+            /**
+             * wb_do_writeback - retrieve work items and do the writeback they describe
+             * @wb:              writeback info
+             * @force_wait:      sync all
+             * return:           number pages that have been writeout
+             */
+            long wb_do_writeback(struct bdi_writeback *wb, int force_wait);
+
+            description for wb_do_writeback() :
+              this function make use of a while-cycle to handle writeback works,the condition is
+              get_next_work_item() return NULL.
+              /**
+               * <fs/fs-writeback.c>
+               *   get_next_work_item - get next work item of the work list
+               *   static struct bdi_work *get_next_work_item(struct backing_dev_info *bdi,
+               *                                              struct bdi_writeback *wb);
+               *   # the current work item has seen by @wb,then clear seen bit of it,and
+               *     return it to caller
+               *     the checking is test_bit(@wb->nr, @work->seen),if have not seen by @wb,
+               *     then test the next work item,and so on,until the end of list
+               *     if no work item find,return NULL
+               */
+               
+              get writeback arguments from @work->args.
+              if @force_wait is TRUE,then sync_mode is WB_SYNC_ALL,otherwise,it remains unchanged.
+              if sync_mode is WB_SYNC_NONE,that means this is not a data integrity operation,so
+              we will starting to handle this work.invoke wb_clear_pending() on it to decrease
+              @work->pending,if pending becomes _zero_,that means this work should be freed,
+              thus it will be removed from bdi's @work_list and wb_work_complete() will be called.
+                                                                /* bdi_work_free() for !on-stack
+                                                                 * bdi_work_clear() for on-stack
+                                                                 */
+
+              now trigger writeback by invoke wb_writeback() with parameters @wb, @work->args.
+              after finished,check sync_mode whether is WB_SYNC_ALL,if it is,invoke wb_clear_pending().
+              /* WB_SYNC_NONE - we decrease pending before we starting work handle
+               * WB_SYNC_ALL  - we decrease pending after all have finished
+               */
+
+              after while-cycle stopped,invoke wb_check_old_data_flush(),this is for check periodic
+              writeback,kupdated() style writeback.
+              /* wb_check_old_data_flush() may invoke wb_writeback to trigger a writeback operation,
+               * if there is some old data have to be flushed
+               * return the number written pages,if no old data,return 0
+               */
+
+              finally,function returns the number of written pages that is the total number of pages
+              have written in while-cycle add to return value of wb_check_old_data_flush().
