@@ -31263,7 +31263,7 @@ Chapter 15 : The Page Cache
            * @task;          writeback task
            *                 # usually is "bdi_forker_task" or "bdi_start_fn"
            * @b_dirty:       dirty inodes
-           * @b_io:          parked for writeback
+           * @b_io:          parked for writeback - dispatch list
            * @b_more_io:     parked for more writeback
            * # lock @wb_lock of backing_dev_info object is used to protect
            *   its @wb member
@@ -31727,3 +31727,103 @@ Chapter 15 : The Page Cache
 
               finally,function returns the number of written pages that is the total number of pages
               have written in while-cycle add to return value of wb_check_old_data_flush().
+
+            /**
+             * wb_writeback - explicit flushing or periodic writeback of "old" data
+             * @wb:           writeback info needed by flush thread
+             * @args:         writeback arguments
+             * return:        number of pages have written out
+             * # "old" - the first time one of an inode's pages is dirtied,we mark the dirtying-time
+             *           in the inode's address_space.so this periodic writeback code just walks
+             *           the superblock inode list,writing back any inodes which are older than
+             *           a specific point in time
+             * # @older_than_this takes precedence over @nr_to_write,so we will only write back
+             *   all dirty pages if they are all attached to "old" mappings
+             */
+            static long wb_writeback(struct bdi_writeback *wb, struct wb_writeback_args *args);
+
+            description for wb_writeback() :
+              create writeback control structure @wbc and initialize it from @wb and @args.
+              @older_than_this of @wbc default is NULL.
+              if @for_kupdate is TRUE,then set @older_than_this points to a local variable @oldest_jif,
+              and set its value to current @jiffies - @dirty_expire_interval * 10(covert to jiffies).
+              if @range_cyclic is FALSE,then set @wbc.range_start to 0,@wbc.range_end = LLONG_MAX.
+              make use of an infinite for-cycle to process handle main works.
+              for {
+                      if @nr_pages <= 0 - no remain pages,then break cycle.
+                      if specified background mode but have not over background thresh,then break cycle.
+                         /* @for_background */
+                      set some @wbc's members :
+                              @more_io = 0 /* only once */
+                              @nr_to_write = MAX_WRITEBACK_PAGES /* defined to 1024 */
+                              @pages_skipped = 0
+                      invoke the inode writeback routine writeback_inodes_wb() with parameters @wb and @wbc.
+                      update @args->nr_pages,the result is equal to "@nr_pages -= MAX_WRITEBACK_PAGES - @nr_to_write".
+                      /* @nr_to_write will be decreased automatically if succeed to writeback one page */
+                      update local variable @wrote to record how many pages have written out in this iteration,
+                      the variable will be returned to called at the end of this routine.
+
+                      check continue conditions -
+                        if @nr_to_write <= 0 - we have write out all(1024 pages),then break cycle,otherwise,continue
+                        to next iteration.
+                        if @more_io is FALSE - we have not write out all,but we can only process once,break cycle.
+                        if @nr_to_write < MAX_WRITEBACK_PAGES - we have written out something,then continue to next
+                        iteration.(if no @more_io have specified,we can not retry again)
+
+                      ! if more_io is FALSE,for-cycle will have broken.
+
+                      if no a branch is taken from above branches,that means we written nothing,then acquire
+                      @inode_lock,check @wb->b_more_io.if it is not empty,then retrieve the previous inode of
+                      @b_more_io,and invoke inode_wait_for_writeback() on the previous inode.
+                      /**
+                       * routine queue_io() splice inode list @b_more_io and @b_io.prev,and move
+                       * inodes in @b_dirty into @b_io.
+                       * queue_io() need second parameter is @older_than_this,only inode's dirtying-time
+                       * is older than this time point can be moved into dispatch queue.
+                       */
+                      release @inode_lock and go to next iteration.
+              }
+
+              finally,return @wrote to caller.              
+
+            /**
+             * writeback_inodes_wb - do writeback dirty inodes
+             * @wb:                  writeback info
+             * @wbc:                 writeback control info
+             * # may be preempted
+             */
+            static void writeback_inodes_wb(struct bdi_writeback @wb, struct writeback_control *wbc);
+
+            description for writeback_inodes_wb() :
+              this routine traverse @b_io the dispatch queue,for each inode,pin its super block for 
+              writeback,and write a portion of @b_io inodes which belong to the super block.the real
+              writeback work is handled by writeback_single_inode(),which finally invoke do_writepages().
+
+              first,set @wbc->wb_start to current @jiffies,and acquire @inode_lock.
+              check @for_kupdate is FALSE OR @b_io is empty,if it is,then invoke queue_io() to move
+              some dirty inodes into @b_io.
+              make use of a while-cycle until @b_io is empty.
+              in the while-cycle {
+                      get current inode.
+                      get the super block of this inode.
+                      check whether the super block is matched @wbc->sb,if it is not matched,then
+                      redirty_tail() this inode,and skip it,get into next iteration.
+                      /* we are handling @wbc->sb,not the super block of this inode */
+                      /* bdi_writeback object is get from inode_to_bdi(@inode)->wb */
+                      /* if @b_dirty is not empty,have to update @inode->dirtied_when to current jiffies
+                       * if the dirty time of the object at @b_dirty->next is time_after() than this inode's.
+                       * at the end del @i_list,and add it at @b_dirty->next.
+                       */
+                      function pin_sb_for_writeback() is called,pin the super block for writeback.
+                      /* pinned => @s_count++,@s_root must not be NULL - have mounted */
+                      if SB_PIN_FAILED returned - pin failed,invoke requeue_io() on this inode,and continue to
+                      next iteration.                               /* list_move() the inode into @b_more_io */
+                                                                    /* it will be dealt with at next period */
+                      invoke writeback_sb_inodes() to writeback dirty inodes of super block which this inode
+                      is belong to.
+                      unpin_sb_for_writeback().
+                      if writeback_sb_inodes() returned 1 - the caller writeback routine should be interrupted,
+                      then break while-cycle;otherwise,continue to next iteration.
+              }
+              release @inode_lock and return to caller.
+
