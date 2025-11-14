@@ -5542,12 +5542,17 @@ Chapter 4 : Interrupts and Exceptions
             [0, 7]        preemption counter      /*  how many times preemption is explicitly disabled,max depth 256  */
             [8, 15]       softirq counter         /*  how many levels deep the disabling of deferrable functions is  */
             [16, 27]      hardirq counter         /*  specifies the number of nested interrupt handlers on the local CPU  */
-            [28]          PREEMPT_ACTIVE flag     /*  allow preemption or refuse preemption  */
+            [28]          PREEMPT_ACTIVE flag     /*  allow preemption(0) or refuse preemption(1)
+                                                   *  when this flag is set,that means there is a preemption in progress,
+                                                   *  schedule() routine will be called at next
+                                                   */
           
             /*  some bits in @preempt_count are used to keep track of kernel preemption and of nesting of kernel
              *  control paths.
              *  softirq counter = 0 => deferrable functions are enabled
              *  hardirq counter => irq_enter() increase it and irq_exit() decrease it
+             *  macro PREEMPT_ACTIVE is the mask of PREEMPT_ACTIVE flag of preempt_count,which is defined in
+             *  <linux/hardirq.h>
              */
           
             useful macro function to determine where the kernel path is now :
@@ -6294,9 +6299,12 @@ Chapter 5 : Kernel Synchronization
       kernel preemption is disabled when thread_info.preempt_count > 0,the following cases that preempt_count
       is greater than zero :
         1>  the kernel is executing an interrupt service routine
+            /* hardirq counter of preempt_count > 0 */
         2>  the deferrable functions are disabled(always true when the kernel is executing a softirq or tasklet)
+            /* softirq counter of preempt_count > 0 */
         3>  the kernel preemption has been explicitly disabled by setting the preemption counter to a positive 
             value
+            /* preempt_count == 1 OR preempt_count[PREEMPT_ACTIVE] is set - preempt is progressing */
 
         !  thus,the kernel can be preempted only when it is executing an exception handler(in particular a system call)
            and the kernel preemption has not been explicitly disabled.
@@ -31767,6 +31775,8 @@ Chapter 15 : The Page Cache
                         if @nr_to_write <= 0 - we have write out all(1024 pages),then break cycle,otherwise,continue
                         to next iteration.
                         if @more_io is FALSE - we have not write out all,but we can only process once,break cycle.
+                        
+                        /* check if written out something */
                         if @nr_to_write < MAX_WRITEBACK_PAGES - we have written out something,then continue to next
                         iteration.(if no @more_io have specified,we can not retry again)
 
@@ -31809,6 +31819,7 @@ Chapter 15 : The Page Cache
                       check whether the super block is matched @wbc->sb,if it is not matched,then
                       redirty_tail() this inode,and skip it,get into next iteration.
                       /* we are handling @wbc->sb,not the super block of this inode */
+                      /* if @wbc->sb is NULL,that means match all super block objects */
                       /* bdi_writeback object is get from inode_to_bdi(@inode)->wb */
                       /* if @b_dirty is not empty,have to update @inode->dirtied_when to current jiffies
                        * if the dirty time of the object at @b_dirty->next is time_after() than this inode's.
@@ -31826,4 +31837,63 @@ Chapter 15 : The Page Cache
                       then break while-cycle;otherwise,continue to next iteration.
               }
               release @inode_lock and return to caller.
+
+            /**
+             * writeback_sb_inodes - writeback inodes of the given super block
+             * @sb:                  super block
+             * @wb:                  writeback info
+             * @wbc:                 writeback control
+             * return:               0 => the caller writeback routine should continue
+             *                       1 => the caller writeback routine should be interrupted
+             * # this routine is called by writeback_inodes_wb()
+             */
+            static int writeback_sb_inodes(struct super_block *sb, struct bdi_writeback *wb,
+                                           struct writeback_control *wbc);              
+
+            description for writeback_sb_inodes() :
+              check the dispatch queue @wb->b_io,make use of while-cycle to taverse each element
+              in the queue until queue become empty.
+              get the inode at the tail of @b_io.
+              /* list_entry(@b_io.prev, ...) */
+              process the same match checking between @wbc->sb and the super block of this inode,if
+              super block is not matchecd,redirty_tail() the inode and get into next iteration.
+              /* if @wbc->sb is NULL,that means match all super block objects */
+              process another match checking between @sb and the super block of this inode,if
+              it is not matched,routine return 0.
+              /* @sb been finished(no inodes of @sb or everthing have done) */
+              proceed check inode state,if it is new inode(I_NEW) or it will be freed(I_WILL_FREE),
+              we requeue_io() on it and continue to next iteration.
+              check dirty time of this inode,if it is dirtied after @wbc->wb_start,we return 1 to
+              caller.
+              /* when writeback started,the inode dirtied before @wbc->wb_start will be written out,
+               * the newly dirtied will be written out later.
+               * # this inode is dirtied after sync_sb_inodes() was called.
+               */
+              do BUG test - BUG_ON,inode's state is I_FREEING or I_CLEAR.
+              all necessary checkings have done,prepare writeback it.
+              invoke __iget() on it. /* increase ref count */
+              set local variable @pages_skipped to @wbc->pages_skipped,used as a record.
+              call to writeback_single_inode() to writeback this inode.
+              check @pages_skipped whether not equal to @wbc->pages_skipped,if it is TRUE,then
+              redirty_tail() this inode,that means we failed on writeback it.
+              /* writeback is not making progress due to locked buffers,skip this inode for now */
+              release @inode_lock,this lock is acquired in writeback_inodes_wb(),the reason of
+              release it at there because we have to check kernel preempt.
+              iput() this inode and call cond_resched() /* we release @inode_lock before every 
+                                                         * possible kernel preempt
+                                                         */
+              next,acquire @inode_lock again.
+              check @nr_to_write of @wbc,if it is less than or equal to _zero_,that means have written out
+              all required pages,set @more_io to 1,and return 1 to caller.
+                                      /* wb_writeback() continue,but writeback_inodes_wb() should stop */
+              otherwise,we have work to do,check @b_more_io,if it is not empty,also set @more_io to 1.
+              this tell kernel control path continue wb_writeback() after writeback_inodes_wb() finished.
+              /* this routine get into next iteration */
+              at the end of this routine,@b_io is empty,we return 1 to caller to stop writeback_inodes_wb().
+              /**
+               * if we did not consumed everything,@wbc->nr_to_write will be a postive.
+               * if @b_more_io is not empty,@more_io will be 1,thus wb_writeback() will check whether 
+               * writeback routine have written out something.
+               */
+              
 
