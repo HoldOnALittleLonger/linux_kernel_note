@@ -31669,7 +31669,7 @@ Chapter 15 : The Page Cache
              * # steps this routine process -
              *     use a while-cycle with stop condition is !kthread_should_stop() - kthread should stop
              *
-             *     declare a local variable named @pages_written to record how many dirty pages been
+             *     declare a local variable named @pages_written to record how many dirty pages have been
              *     written by wb_do_writeback() with parameters @wb, 0
              *     if have written at least one dirty page,then set local variable @last_active to current
              *     jiffies
@@ -31729,8 +31729,8 @@ Chapter 15 : The Page Cache
               after while-cycle stopped,invoke wb_check_old_data_flush(),this is for check periodic
               writeback,kupdated() style writeback.
               /* wb_check_old_data_flush() may invoke wb_writeback to trigger a writeback operation,
-               * if there is some old data have to be flushed
-               * return the number written pages,if no old data,return 0
+               * if there is some old data have to be flushed         # wb_writeback()
+               * return the number of wrote pages,if no old data,return 0
                */
 
               finally,function returns the number of written pages that is the total number of pages
@@ -31756,7 +31756,7 @@ Chapter 15 : The Page Cache
               if @for_kupdate is TRUE,then set @older_than_this points to a local variable @oldest_jif,
               and set its value to current @jiffies - @dirty_expire_interval * 10(covert to jiffies).
               if @range_cyclic is FALSE,then set @wbc.range_start to 0,@wbc.range_end = LLONG_MAX.
-              make use of an infinite for-cycle to process handle main works.
+              make use of an infinite for-cycle to handle main works.
               for {
                       if @nr_pages <= 0 - no remain pages,then break cycle.
                       if specified background mode but have not over background thresh,then break cycle.
@@ -31767,7 +31767,7 @@ Chapter 15 : The Page Cache
                               @pages_skipped = 0
                       invoke the inode writeback routine writeback_inodes_wb() with parameters @wb and @wbc.
                       update @args->nr_pages,the result is equal to "@nr_pages -= MAX_WRITEBACK_PAGES - @nr_to_write".
-                      /* @nr_to_write will be decreased automatically if succeed to writeback one page */
+                      /* @nr_to_write will be decreased automatically if succeed to writeback at least one page */
                       update local variable @wrote to record how many pages have written out in this iteration,
                       the variable will be returned to called at the end of this routine.
 
@@ -31776,13 +31776,13 @@ Chapter 15 : The Page Cache
                         to next iteration.
                         if @more_io is FALSE - we have not write out all,but we can only process once,break cycle.
                         
-                        /* check if written out something */
+                        /* check if have written out something */
                         if @nr_to_write < MAX_WRITEBACK_PAGES - we have written out something,then continue to next
                         iteration.(if no @more_io have specified,we can not retry again)
 
                       ! if more_io is FALSE,for-cycle will have broken.
 
-                      if no a branch is taken from above branches,that means we written nothing,then acquire
+                      if no a branch is taken from above branches,that means we wrote nothing,then acquire
                       @inode_lock,check @wb->b_more_io.if it is not empty,then retrieve the previous inode of
                       @b_more_io,and invoke inode_wait_for_writeback() on the previous inode.
                       /**
@@ -31865,8 +31865,8 @@ Chapter 15 : The Page Cache
               we requeue_io() on it and continue to next iteration.
               check dirty time of this inode,if it is dirtied after @wbc->wb_start,we return 1 to
               caller.
-              /* when writeback started,the inode dirtied before @wbc->wb_start will be written out,
-               * the newly dirtied will be written out later.
+              /* when writeback started,the inode dirtied before @wbc->wb_start will be wrote out,
+               * the newly dirtied will be wrote out later.
                * # this inode is dirtied after sync_sb_inodes() was called.
                */
               do BUG test - BUG_ON,inode's state is I_FREEING or I_CLEAR.
@@ -31895,5 +31895,137 @@ Chapter 15 : The Page Cache
                * if @b_more_io is not empty,@more_io will be 1,thus wb_writeback() will check whether 
                * writeback routine have written out something.
                */
+
+            /**
+             * writeback_single_inode - write out an inode's dirty pages
+             * @inode:                  the inode is going to be wrote out
+             * @wbc:                    writeback control
+             * return:                  0 OR error code
+             * # this routine must be called under @inode_lock held
+             * # the inode either the caller has ref on it or it has I_WILL_FREE set
+             */
+            static int writeback_single_inode(struct inode *inode, struct writeback_control *wbc);
+
+            what writeback_single_inode() does :
+              1> get mapping of this inode.
+                 check @i_count,print warning message if @i_count is _zero_ and I_WILL_FREE or I_FREEING
+                 have not  setup.
+                 if @i_count is not _zero_,print warning message if I_WILL_FREE is set.
+              2> check I_SYNC,if it is set,must check @sync_mode.
+                 if @sync_mode is not WB_SYNC_ALL,have to requeue_io() this inode and return 0 to caller,
+                 /* this inode is locked for writeback,and we are not doing writeback-for-data-integrity */
+                 if sync_mode is WB_SYNC_ALL,invoke inode_wait_for_writeback() on @inode.
+                 /* inode_wait_for_writeback() - # data-integrity sync
+                  *   create wait bit queue,task enter TASK_UNINTERRUPTIBLE state,wait until __I_SYNC
+                  *   is cleared.
+                  */
+              3> bug test,BUG_ON if I_SYNC is set even we have waited on bit.
+              4> record I_DIRTY status,set I_SYNC,this tells other kernel control path that this inode
+                 is dealt with writeback.
+                 clear I_DIRTY status.
+                 unlock @inode_lock.
+              5> invoke do_writepages() on the mapping of @inode with writeback control @wbc.
+                 /**
+                  * routine do_writepages() is defined in <mm/page-writeback.c>.
+                  * if @wbc->nr_to_write is _zero_,this routine return 0 to caller with do nothing.
+                  * otherwise,invoke either @a_ops->writepages() or generic_writepages(),return the value
+                  *                  # routine has implemented
+                  * returned by the called routine.
+                  * # generic_writepages() invoke write_cache_pages() with write page back routine
+                  *   __writepage(),and write_cache_pages() invoke this routine for each dirty page.
+                  *   __writepage() exactly invoke @a_ops->writepage().
+                  *   for ext2 filesystem,the implementation is ext2_writepage(),which call to
+                  *   block_write_full_page(),then __block_write_full_page() is called,finally,
+                  *   submit_bh() is called for convert buffer page into bio and submit it.
+                  */
+              6> if we are in WB_SYNC_ALL mode,process filemap_fdatawait() on the mapping.
+                 /* make sure to wait on the data before writing out the meta data.
+                  * this is important for filesystems that modify metadata on data I/O completion.
+                  */
+                 /**
+                  * <mm/filemap.c>
+                  *   int filemap_fdatawait(struct address_space *mapping);
+                  *   - wait for all under-writeback pages to complete,walk the list of under-writeback
+                  *     pages of the given address space and wait for all of them.
+                  *     actually,invoke filemap_fdatawait_range() on @mapping in byte range [0, @i_size - 1].
+                  *     # EXPORT_SYMBOL
+                  *   int filemap_fdatawait_range(struct address_space *mapping, loff_t start_byte,
+                  *                               loff_t end_byte);
+                  *   - for pages in page cache have spanned page index @start_byte >> PAGE_CACHE_SHIFT
+                  *     to @end_byte >> PAGE_CACHE_SHIFT,for each of them has tagged PAGECACHE_TAG_WRITEBACK,
+                  *     wait on the page until PG_writeback is cleared.
+                  *     at the end of iteration of first while-cycle,call to cond_resched() for check
+                  *     kernel preempt.
+                  *     # EXPORT_SYMBOL
+                  *     # the first while-cycle's stop condition is start index > end index AND
+                  *       pagevec_lookup_tag() returned _zero_.but the iterator @index do not
+                  *       increase,thus the stop condition is there is no more pages during writeback 
+                  *       in the mapping.cond_resched() is used to wait block I/O finished.
+                  */
+                 if any error has happened,this routine will return the error to caller at the end.
+              7> if dirty state of @inode is I_DIRTY_SYNC or I_DIRTY_DATASYNC,invoke write_inode()
+                 on @inode with @wbc.
+                 /* do not write the inode if only I_DIRTY_PAGES was set */
+                 if any error has happened,this routine will return the error to caller at the end.
+              8> re-acquire @inode_lock again.
+                 clear I_SYNC,that means writeback have completed,but we do not wake up the tasks
+                 waiting on the bit immediately.
+              9> check inode state,if it is not in I_FREEING or not in I_CLEAR,
+                 then select one of the following branch -
+                         > I_DIRTY_PAGES AND @for_kupdate,goto label "select_queue"
+                           /* more pages get dirtied by a fast dirtier */
+                         > I_DIRTY,redirty_tail() @inode
+                           /* at least,XFS will redirty the inode during the writeback
+                            * (delalloc) and on IO completion(isize)
+                            */
+                         > mapping of @inode has tagged PAGECACHE_TAG_DIRTY,check @for_kupdate
+                           /* did not write back all the pages,redirty it and move it from
+                            * dispatch queue to @b_more_io OR @b_dirty
+                            */
+                             @for_kupdate is TRUE
+                             /* caller is kupdate function,put @inode at the head of @b_dirty */
+                                     set I_DIRTY_PAGES
+                               "select_queue":
+                                     check @nr_to_write <= 0
+                                     TRUE:
+                                             requeue_io() @inode
+                                     FALSE:
+                                             redirty_tail() @inode /* retry later */
+                             @for_kupdate is FALSE
+                             /* caller is not kupdate function,put @inode at the tail */
+                                     set I_DIRTY_PAGES
+                                     redirty_tail() @inode
+                         > @i_count is not _zero_,list_move() @inode->i_list into @inode_in_use
+                         > otherwise,list_move() @inode->i_list into @inode_unused
+             10> invoke inode_sync_complete() on @inode,return the final ret value to caller.
+                 /* process a SMP memory barrier,and wake up the task waiting for __I_SYNC clear */
+
+
+          The flow of functions invocations starting from bdi_start_fn() :
+            bdi_start_fn() -> bdi_writeback_task() ->
+            wb_do_writeback() -> {
+                    wb_writeback() ->
+                    writeback_inodes_wb() -> {
+                            writeback_sb_inodes() -> writeback_single_inode() ->
+                            do_writepages() ->
+                            write_cache_pages() -> {
+                                    @a_ops->writepage() -> (FOR EXT2) ext2_writepage() ->
+                                    block_write_full_page() -> __block_write_full_page() ->
+                                    submit_bh() -> ...
+
+                                    pick up next dirty page in the mapping
+                            }
+
+                            pick up next item in the dispatch queue @b_io of the writeback object
+                    }
+
+                    pick up next bdi work in @work_list of the BDI
+            }
+            ! bdi_writeback_task() will stopped if kthread_should_stop() returned TRUE or longest
+              period have passed but no dirty pages occurred.
+            
+
+
+                
               
 
