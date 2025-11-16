@@ -18315,17 +18315,21 @@ Chapter 9 : Process Address Space
           ! all other process are forked by init process,thus they would inherit the memory address space
             from init process.
           ! now we can know that how a C program's brk and start brk are arranged in memory
-              [ text | data | bss | heap (brk, start_brk) | ... unmapped ... | stack-start ] <- ESP
-              <low address>                                                   <high address>
+              [ text | data | bss |(start_brk) heap (brk)| ... unmapped ... | stack-start ] <- ESP
+              <low address>                                                  <high address>
             heap : grows up
             stack : grows down
             <fs/binfmt_elf.c>: set_brk(@start, @end): current->mm->start_brk = current->mm->brk = end
             /**
-             * if @end > @start => do_brk(@start, @end) before setup @start_brk and @end.
+             * function set_brk() calculate elf page aligned @start and @end,if @end is greater than @start,
+             * acquire @current->mm_mmap_sem for write,do_brk(@start, @end - @start).
              * # do_brk() will establish memory region mapping [@start, @end - 1],new VMA will be allocated
              *   from kernel slab.
-             * set_brk() is a static linkage function,it will be called by a static linkage function
-             * load_elf_binary() which is defined in the same file.
+             * finally,set @start_brk and @brk of @current to the elf page aligned @end.
+             * # this routine is called by load_elf_binary(),which invoke set_brk() with local variables
+             *   @elf_bss and @elf_brk,they specified the range of bss section.
+             *   after set_brk() mapped bss section,the @start_brk and @brk are set to the page aligned address
+             *   that is greater than the address of bss section's boundary.
              */
 
         @start_brk and @brk members inside memory descriptor are used to delimit the starting and ending
@@ -18335,6 +18339,9 @@ Chapter 9 : Process Address Space
         system call brk() is used to modifies the size of the heap directly,it receive a parameter is a
         linear address,which would be the new value of @current->mm->brk.
         /* program break -> the end of the process's data segment */
+        /* it do not modify @start_brk because the process's @start_brk is initialized
+         * when loading ELF binary file.
+         */
         system call sbrk() is used to increase heap region.
         /**
          * on Linux,sbrk() is implemented as a library function which uses brk() system call
