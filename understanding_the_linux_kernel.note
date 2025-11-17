@@ -31203,6 +31203,10 @@ Chapter 15 : The Page Cache
            *                     inodes from this super_block
            * @sync_mode:         writeback sync mode
            * @older_than_this:   if !NULL,only write back inodes older than this
+           *                     # that is the pages dirtied before @older_than_this,
+           *                       because time is go forward,the recent time point
+           *                       is newer,and time point less than the newer is older
+           *                       time point
            * @wb_start:          time writeback_inodes_wb() was called,this is needed
            *                     to avoid extra jobs and livelock
            * @nr_to_write:       write this many pages,and decrement this for each page
@@ -31247,6 +31251,48 @@ Chapter 15 : The Page Cache
                   unsigned more_io:1;
                   unsigned no_nrwrite_index_update:1;
           };
+
+          ! kupdate style :
+              periodic checking,the structure bdi_writeback has a member named @last_old_flush.
+              which migjt be reset to current @jiffies in wb_check_old_data_flush().
+              if "@last_old_flush + ms_to_jiffies(@dirty_writeback_interval * 10)" is time after
+              current @jiffies,then reset @last_old_flush to @jiffies,get number of pages have to
+              be writeback through -
+                /* dirty file pages */             /* unstable nfs pages */
+                global_page_state(NR_FILE_DIRTY) + global_page_state(NR_UNSTABLE_NFS) +
+                (inodes_stat.nr_inodes - inodes_stat.nr_unused)
+                 /* inodes in icache */  /* inodes in icache is in unused */
+
+                ! zone based page accounting with per CPU differentials.
+                  # global_page_state() - retrieve zone accounting
+                ! @inodes_stat.nr_unused-- when __iget() is called successfully.
+              then trigger wb_writeback() again for the kupdated writeback.
+              /*
+               * writeback arg :
+               *   nr_pages = result of the expression
+               *   sb = unspecified,this will let wb_writeback() match all inodes
+               *   sync_mode = WB_SYNC_NONE # async writeback
+               *   for_kupdate = 1
+               *   range_cyclic = 1
+               *   for_background = 0 # we want to trigger proactive writeback
+               *
+               * !! @nr_pages IS THE REQUEST NUMBER OF PAGES SHOULD TO BE WRITEBACK,
+               *    BUT THE writeback_control OBJECT CREATED BY wb_writeback() DO NOT
+               *    RELY ON @nr_pages,AND WHICH ONLY WRITEBACK INODES IN THE DISPATCH
+               *    QUEUE OF THE GIVEN bdi_writeback OBJECT.
+               *    THUS EVEN @nr_pages IS GREATER THAN THE NUMBER OF INODES IN @b_io,
+               *    wb_writeback() DO NOT WRITEBACK THE ADDITIONAL INODES.
+               *    IN wb_writeback(),IF @nr_pages <= 0,WRITEBACK WOULD STOP,BECAUSE
+               *    THERE IS NO MORE DIRTY PAGES.
+               *    # NUMBER OF PAGES TO BE WRITEBACK IN ONCE ITERATION OF wb_writeback()
+               *      IS MAX_WRITEBACK_PAGES = 1024
+               */
+              /* wb_writeback() is called by wb_do_writeback() for each bdi work in the work
+               * list.
+               * wb_check_old_data_flush() is called before wb_do_writeback() return.
+               * that is kernel will does periodic checking after current bdi work all
+               * been accomplished.
+               */
 
           ! structure block_device has a member named "bd_super",which is type of
             struct super_block
@@ -31314,6 +31360,11 @@ Chapter 15 : The Page Cache
           /**
            * wb_writeback_args - arguments passed into wb_writeback(),essentially a
            *                     subset of writeback_control
+           * @nr_pages:          number of pages need to be writeback
+           * @sb:                the relative super block
+           * @for_kupdate:       kupdate style writeback - periodic writeback
+           * @range_cyclic:      only writeback specified range
+           * @for_background:    writeback only the background dirty thresh have overed
            */
           struct wb_writeback_args {
                   long nr_pages;
@@ -31797,6 +31848,7 @@ Chapter 15 : The Page Cache
                        * inodes in @b_dirty into @b_io.
                        * queue_io() need second parameter is @older_than_this,only inode's dirtying-time
                        * is older than this time point can be moved into dispatch queue.
+                       *    # time value less than recent time value
                        */
                       release @inode_lock and go to next iteration.
               }
