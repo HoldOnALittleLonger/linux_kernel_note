@@ -2366,8 +2366,8 @@ Chapter 3 : Processes
           };
 
         there are two kinds of sleeping processes :
-          exclusive processes - wait_queue_t.flags == 1 are selectively woken up by the kernel;
-          nonexlusive processes - wait_queue_t.flags == 0 are always woken up by the kernel when the event occurs.
+          exclusive processes - wait_queue_t.flags == 1 are selectively woken up by the kernel
+          nonexlusive processes - wait_queue_t.flags == 0 are always woken up by the kernel when the event occurs
 
           #  two kinds to prevent race for a resource accessing just allow one process on it.
              a process waiting for a resource that can be granted to just one process at a time is a typical
@@ -15350,8 +15350,8 @@ Chapter 8 : Memory Management
             @curr_nr is always lower than or equal to @min_nr.
           ! @alloc and @free interface with the underlying memory allocator to get and release
             a memory element,respectively.
-          !! if the memory elements are slab objects,then @alloc and @free generally are the
-             functions mempool_alloc_slab() and mempool_free_slab(),respectively.
+          !! if the memory elements are slab objects,then @alloc and @free generally are set to
+             the functions mempool_alloc_slab() and mempool_free_slab(),respectively.
              in this case,@pool_data is the slab cache descriptor.
              /* alloc slab : kmem_cache_alloc ; free slab : kmem_cache_free */
 
@@ -31802,7 +31802,7 @@ Chapter 15 : The Page Cache
              * # "old" - the first time one of an inode's pages is dirtied,we mark the dirtying-time
              *           in the inode's address_space.so this periodic writeback code just walks
              *           the superblock inode list,writing back any inodes which are older than
-             *           a specific point in time
+             *           a specific time point
              * # @older_than_this takes precedence over @nr_to_write,so we will only write back
              *   all dirty pages if they are all attached to "old" mappings
              */
@@ -32082,9 +32082,58 @@ Chapter 15 : The Page Cache
             }
             ! bdi_writeback_task() will stopped if kthread_should_stop() returned TRUE or longest
               period have passed but no dirty pages occurred.
-            
+
+        Wake up flusher threads :
+          except the kupdate style writeback - periodic checking,there are some cases the flusher
+          threads are woke up by kernel control path,such in the executing of free_more_memory().
+          in the function,try_to_free_pages() would be called,then is do_try_to_free_pages().
+          in function do_try_to_free_pages(),except shrink zones and shrink slabs,if the writeback
+          threshold has reached,then function wakeup_flusher_threads() will be invoked.
+          /**
+           * try_to_free_pages(),do_try_to_free_pages() are defined in <mm/vmscan.c>
+           * @writeback_threshold := scanning control->number to reclaim +
+           *                         scanning control->number to reclaim / 2
+           * if the total number of scanned reclaimable pages is greater than @writeback_threshold,
+           * wakeup_flusher_threads() will be called.
+           * # for laptop mode,the argument is 0,otherwise,it is the total scanned pages.
+           */
+
+          <fs/fs-writeback.c>
+            /**
+             * wakeup_flusher_threads - start writeback
+             * @nr_pages:               the number of pages should be written back
+             * # if @nr_pages is zero,write back the whole 'world' - everything
+             *   - @nr_pages is set to global_page_state() NR_FILE_DIRTY + NR_UNSTABLE_NFS
+             *     # per-CPU has different accounting info
+             * # this routine actually invoke bdi_writeback_all() with NULL and @nr_pages
+             */
+            void wakeup_flusher_threads(long nr_pages);
+
+            /**
+             * bdi_writeback_all - schedule writeback for all backing devices
+             * @sb:                specified super block,if it is NUL,that means
+             *                     match all
+             * @nr_pages:          number of pages should be written back
+             * # this routine makeup writeback argument @args 
+             *     .sb = @sb
+             *     .nr_pages = @nr_pages
+             *     .sync_mode = WB_SYNC_NONE
+             *     # bdi_sync_writeback() process WB_SYNC_ALL writeback
+             *   then traverse each registered bdi on the system,for each of them,if
+             *   anyone has dirty io,then invoke bdi_alloc_queue_work() for it with
+             *   the argument @args
+             */
+            static void bdi_writeback_all(struct super_block *sb, long nr_pages);
 
 
-                
-              
-
+          ! writeback flusher threads usually are woke up when :
+              1> syscalls sync(),fsync(),fdatasync() have issued by user space
+              2> grow_buffers() was failed in __getblk_slow()
+              3> page frame reclaiming algorithm invokes free_more_memory() or
+                 try_to_free_pages()
+              !! 4> mempool_alloc() fails to allocate a new memory pool element
+                 IN LINUX 2.6.34.1,THIS ROUTINE JUST WAIT UNTIL @alloc FUNCTION
+                 THE MEMBER OF mempool structure SUCCEED TO ALLOCATE A NEW ELEMENT,
+                 OR A FREE ELEMENT IS AVAILABLE FROM THE mempool.
+                 # mempool_alloc() INVOKE io_schedule_timeout(5 * HZ) IF @curr_nr
+                   IS 0.
