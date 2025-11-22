@@ -159,5 +159,66 @@ Linux Kernel note >
       callback set rip to hook function ->
       hook function start execute
 
-  
+  ACPI NETLINKE message :
+    Im looking for a way to monitor the contents changing of the file in sysfs.
+    the target is battery object of class power_supply,i want to wait on event that
+    battery start charging or stop charging.
+    I have tried file descriptor multiplex and inotify,but unfortunately,both of them are
+    designed for network file descriptor or the file descriptor which corresponding to
+    a inode.
+    So,I had dived into kernel ACPI driver.It is very complex,however,I found out there
+    are come notifiers have attached to the driver,they would be called in function
+    acpi_battery_notify().This driver function is called by driver to notify power
+    event.
+    If I want to listen on such power event,then I must have a kernel module who attach
+    a new notifier to the power driver,and tell the process of User Mode that it is time
+    to checks the content of sysfs file.
+    If I determine to apply this method,then I must insert a new kernel module,it might cause
+    kernel panic.Thus,I want to find out another way to help me solve this problem.
+    Netlink message,acpi_battery_function() would create bus netlink message,it is type of
+    netlink generic message,and payload is nlattr structure added acpi_genl_event structure.
+    the NLA type is ACPI_GENL_ATTR_EVENT,and the type of event is reported by driver.
+     
+    [ nlmsghdr | pading | payload | pading | ... ]
+                          |
+                          +--> [ genlmsghdr |  [ nlahdr | pading | acpi_genl_event | pading ] | ... ]
+                                                 |
+                                                 +--> struct nlattr
+    /**
+     * unfortunately,the multicast group of ACPI event is registered dynamically,thus there is not way
+     * to get the group id of ACPI event.even I tried to listen on some multicast groups,but no
+     * netlink message has came.
+     * may be I should try kobject uevent.
+     */
+
+    I have found out that the mcast group id and mcast group name both are inclued in a nested nlattr
+    message,and for each of them,a nlattr header is prefixed.
+    It seems like this -
+                  7 => CTRL_ATTR_MCAST_GROUPS
+      [ nla_len | nla_type | pading | payload | pading ]
+                                      |                1 => CTRL_ATTR_MCAST_GRP_NAME
+                                      +--> [ nla_len | nla_type | pading | payload | pading ]
+                                                                           |
+      +--------------------------------------------------------------------+
+      |                                                                    
+      V           2 => CTRL_ATTR_MCAST_GRP_ID                  1 => CTRL_ATTR_MCAST_GRP_NAME
+      [ nla_len | nla_type | pading | ID | pading ][ nla_len | nla_type | pading | NAME | pading]
+                                    __u16
+
+    The information is got from the kernel documentation "generic-netlink" in "docs.kernel.org".
+    # attribute message of CTRL_ATTR_MCAST_GROUPS included CTRL_ATTR_MCAST_GRP_ID attribute and
+      CTRL_ATTR_MCAST_GRP_NAME attribute.
+
+    And then,I tried to gdb the demo program,find out this relationship by use of "x/FMT" command.
+    But it is strange that flag NLA_F_NESTED is not set in the @nla_type of first nlattr message.
+
+    ACK message from kernel that corresponding to the previous GENL_ID_CTRL request is send to
+    user-space in a short time,it will appears in the result of next recvmsg().
+
+    Now I have succeed to subscribe the ACPI multicast group,so I can let program to read the
+    specified sysfs files when ACPI event has came.
+
+    ! Thanks to the github user "tedfelix",whose project "acpid2" told me the way how to get multicast
+      group id of ACPI.
+      
 
