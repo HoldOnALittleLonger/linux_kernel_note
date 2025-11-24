@@ -31184,14 +31184,99 @@ Chapter 15 : The Page Cache
            bdi_start_fn().
            THUS,NO STRUCTURE struct pdflush_work IS DEFINED IN LINUX 2.6.34.1 .
 
+
+        <linux/backing-dev.h>
+          /**
+           * backing_dev_info - low-level device information
+           * @bdi_list:         linked to global registered bdi list
+           * @rcu_head:         updating
+           * @ra_pages:         max readahead in PAGE_CACHE_SIZE units
+           * @state:            bitmap for bdi state,operate it with atomic bitops
+           *                    # bit 0 - BDI_pending          => being activated
+           *                      bit 1 - BDI_wb_alloc         => default embedded wb allocated
+           *                      bit 2 - BDI_async_congested  => async write queue is getting full
+           *                      bit 3 - BDI_sync_congested   => sync queue is getting full
+           *                      bit 4 - BDI_registered       => registered
+           *                      bit 5 - BDI_unused           => unused bit
+           * @capabilities:     device capabilities
+           * @congested_fn:     function pointer if device is md/dm
+           *                    # typedef int (congested_fn)(void *, int);
+           * @congested_data:   pointer to aux data for congested func
+           * @unplug_io_fn:     unplug I/O function
+           * @unplug_io_data:   data for @unplug_io_fn
+           * @name:             name
+           * @bdi_stat:         per-CPU variable for bdi stat
+           *                    # BDI_RECLAIMABLE - 0
+           *                      BDI_WRITEBACK   - 1
+           * @completions:      floting proportions for completions
+           * @dirty_exceeded:   is threshold of dirty data has exceeded
+           * @min_ratio:        minimum ratio for dirty data
+           * @max_ratio:        maximum ratio for dirty data
+           * @max_prop_frac:    maximum fraction for proportion
+           * @wb:               default writeback info for this bdi
+           * @wb_lock:          protects update side of @wb_list
+           * @wb_list:          the flusher threads hanging off this bdi
+           * @wb_mask:          bitmask of registered tasks
+           * @wb_cnt:           number of registered tasks
+           * @work_list:        collection of bdi works
+           * @dev:              device descriptor
+           * @debug_dir:        filesystem debug dir
+           * @debug_stats:      filesystem debug stats
+           */
+          struct backing_dev_info {
+                  struct list_head bdi_list;
+                  struct rcu_head rcu_head;
+                  unsigned long ra_pages;
+                  unsigned long state;
+                  unsigned int capabilities;
+                  congested_fn *congested_fn;
+                  void *congested_data;
+                  void (*unplug_io_fn)(struct backing_dev_info *, struct page *);
+                  void *unplug_io_data;
+
+                  char *name;
+
+                  struct percpu_counter bdi_stat[NR_BDI_STAT_ITEMS];
+            
+                  struct prop_local_percpu completions;
+                  int dirty_exceeded;
+
+                  unsigned int min_ratio;
+                  unsigned int max_ratio, max_prop_frac;
+
+                  struct bdi_writeback wb;
+                  spinlock_t wb_lock;
+                  struct list_head wb_list;
+                  unsigned long wb_mask;
+                  unsigned int wb_cnt;
+                  
+                  struct list_head work_list;
+
+                  struct device *dev;
+
+          #ifdef CONFIG_DEBUG_FS
+                  struct dentry *debug_dir;
+                  struct dentry *debug_stats;
+          #endif
+          };
+
+
         <linux/writeback.h>
           /* number of pdflush threads,this global variable is exported to sysctl read-only */
           extern int nr_pdflush_threads;
 
           /* sync modes for writeback */
           enum writeback_sync_modes {
-                  WB_SYNC_NONE,     /* do not wait on anything */
-                  WB_SYNC_ALL,      /* wait on every mapping - buffer */
+                  WB_SYNC_NONE,     /**
+                                     * do not wait on anything
+                                     * locked buffer(page) are simply skipped
+                                     */
+                  WB_SYNC_ALL,      /**
+                                     * wait on every mapping - buffer
+                                     * if a locked buffer(page) is encountered,
+                                     * must be waited upon and not just skipped over
+                                     */
+                                    
           };
 
           /**
@@ -31325,6 +31410,12 @@ Chapter 15 : The Page Cache
            *                 # usually is "bdi_forker_task" or "bdi_start_fn"
            * @b_dirty:       dirty inodes
            * @b_io:          parked for writeback - dispatch list
+           *                 # in the page writeback routines,they usually check
+           *                   whether @b_io is become empty
+           *                   if an inode is not dirty after flushing,it will
+           *                   be moved into @inode_in_use
+           *                   @b_dirty is the collection of dirty inode of "this"
+           *                   bdi,the connector is @i_list the member of inode
            * @b_more_io:     parked for more writeback
            * # lock @wb_lock of backing_dev_info object is used to protect
            *   its @wb member
@@ -31778,7 +31869,7 @@ Chapter 15 : The Page Cache
                                                                  * bdi_work_clear() for on-stack
                                                                  */
 
-              now trigger writeback by invoke wb_writeback() with parameters @wb, @work->args.
+              now trigger writeback by invoke wb_writeback() with arguments @wb, @work->args.
               after finished,check sync_mode whether is WB_SYNC_ALL,if it is,invoke wb_clear_pending().
               /* WB_SYNC_NONE - we decrease pending before we starting work handle
                * WB_SYNC_ALL  - we decrease pending after all have finished
@@ -31819,6 +31910,11 @@ Chapter 15 : The Page Cache
                       if @nr_pages <= 0 - no remain pages,then break cycle.
                       if specified background mode but have not over background thresh,then break cycle.
                          /* @for_background */
+                         /**
+                          * the threshold dirty ratio for background writeback can be adjusted by writing
+                          * in the /proc/sys/vm/dirty_background_ratio file,or by set sysctl config
+                          * in /etc/sysctl.conf - vm.dirty_background_ratio =<value>
+                          */
                       set some @wbc's members :
                               @more_io = 0 /* only once */
                               @nr_to_write = MAX_WRITEBACK_PAGES /* defined to 1024 */
@@ -31873,7 +31969,7 @@ Chapter 15 : The Page Cache
               some dirty inodes into @b_io.
               make use of a while-cycle until @b_io is empty.
               in the while-cycle {
-                      get current inode.
+                      get current inode - from the tail of @b_io
                       get the super block of this inode.
                       check whether the super block is matched @wbc->sb,if it is not matched,then
                       redirty_tail() this inode,and skip it,get into next iteration.
@@ -31914,12 +32010,15 @@ Chapter 15 : The Page Cache
               in the queue until queue become empty.
               get the inode at the tail of @b_io.
               /* list_entry(@b_io.prev, ...) */
-              process the same match checking between @wbc->sb and the super block of this inode,if
-              super block is not matchecd,redirty_tail() the inode and get into next iteration.
+              process the same match checking between @wbc->sb and the super block of current inode,
+              if super block is not matchecd,redirty_tail() the inode and get into next iteration.
               /* if @wbc->sb is NULL,that means match all super block objects */
-              process another match checking between @sb and the super block of this inode,if
+              process another match checking between @sb and the super block of current inode,if
               it is not matched,routine return 0.
-              /* @sb been finished(no inodes of @sb or everthing have done) */
+              /* @sb been finished
+               * no dispatching inodes of @sb - the remaining inodes are not belong to @sb,or
+               * everthing have done - all inodes in @b_io are belong to @sb and have flushed
+               */
               proceed check inode state,if it is new inode(I_NEW) or it will be freed(I_WILL_FREE),
               we requeue_io() on it and continue to next iteration.
               check dirty time of this inode,if it is dirtied after @wbc->wb_start,we return 1 to
