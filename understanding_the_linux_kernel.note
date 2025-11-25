@@ -15415,6 +15415,7 @@ Chapter 8 : Memory Management
            *   until memory available under the circumstance that __GFP_WAIT is
            *   enabled and retry allocating after "this" kernel control path is
            *   woken up(retry allocate from underlying memory allocator)
+           * # the schedule entry-point is io_schedule_timeout()
            */
           void *mempool_alloc(mempool_t *pool, gfp_t gfp_mask);
           
@@ -31416,6 +31417,9 @@ Chapter 15 : The Page Cache
            *                   be moved into @inode_in_use
            *                   @b_dirty is the collection of dirty inode of "this"
            *                   bdi,the connector is @i_list the member of inode
+           *                   when an inode become dirty,it will be marked,and
+           *                   moved into the list @b_dirty,the connector also
+           *                   is the @i_list member
            * @b_more_io:     parked for more writeback
            * # lock @wb_lock of backing_dev_info object is used to protect
            *   its @wb member
@@ -31965,8 +31969,8 @@ Chapter 15 : The Page Cache
               writeback work is handled by writeback_single_inode(),which finally invoke do_writepages().
 
               first,set @wbc->wb_start to current @jiffies,and acquire @inode_lock.
-              check @for_kupdate is FALSE OR @b_io is empty,if it is,then invoke queue_io() to move
-              some dirty inodes into @b_io.
+              check @for_kupdate is FALSE OR @b_io is empty,if the result is TRUE,then invoke queue_io()
+              to move some dirty inodes into @b_io.
               make use of a while-cycle until @b_io is empty.
               in the while-cycle {
                       get current inode - from the tail of @b_io
@@ -32049,9 +32053,12 @@ Chapter 15 : The Page Cache
               /* this routine get into next iteration */
               at the end of this routine,@b_io is empty,we return 1 to caller to stop writeback_inodes_wb().
               /**
-               * if we did not consumed everything,@wbc->nr_to_write will be a postive.
-               * if @b_more_io is not empty,@more_io will be 1,thus wb_writeback() will check whether 
+               * if we did not consumed everything,@wbc->nr_to_write must be a postive.
+               * if @b_more_io is not empty,@more_io is set to 1,thus wb_writeback() will check whether 
                * writeback routine have written out something.
+               * when writeback_inodes_wb() is restarted by wb_writeback(),it will invoke to queue_io(),
+               * splice @b_more_io into @b_io,move some dirty inodes from @b_dirty to @b_more_io if
+               * the inodes are "older".
                */
 
             /**
@@ -32095,6 +32102,11 @@ Chapter 15 : The Page Cache
                   *   for ext2 filesystem,the implementation is ext2_writepage(),which call to
                   *   block_write_full_page(),then __block_write_full_page() is called,finally,
                   *   submit_bh() is called for convert buffer page into bio and submit it.
+                  * # write_cache_pages() will construct a vector for dirty pages of the mapping,
+                  *   thus it call to pagevec_lookup_tag(),this function is defined in <mm/swap.c>,
+                  *   then find_get_pages_tag() is invoked to retrieve all dirty pages in the
+                  *   mapping,and pagevec_lookup_tag() return the number of pages in the vector to
+                  *   write_cache_pages().(tag is PAGECACHE_TAG_DIRTY)
                   */
               6> if we are in WB_SYNC_ALL mode,process filemap_fdatawait() on the mapping.
                  /* make sure to wait on the data before writing out the meta data.

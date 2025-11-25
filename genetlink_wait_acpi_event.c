@@ -1,3 +1,45 @@
+/**
+ * genetlink_wait_acpi_event.c
+ * 
+ * Use the socket API to listen on ACPI Generic Netlink event.
+ *
+ * The event usually is produced by ACPI driver in Kernel Mode,
+ * from the function acpi_battery_notify().
+ * The driver make use of netlink multicast group to broardcast
+ * ACPI event over protocol NETLINK_GENERIC.
+ *
+ * Generic Netlink command GENL_ID_CTRL is used to retrieve the
+ * information about ACPI multicast family from kernel.
+ *
+ * Event Message format :
+ *
+ * |<--------------------------------- msghdr.msg_iov.iov_len -------------------------------------->|
+ * [netlink msg hdr | ... | generic netlink msg hdr | nlattr hdr | ... | acpi_genl_event | ... | ... ]
+ * ^
+ * |
+ * +-- msghdr.msg_iov.iov_base
+ *
+ * CTRL_ATTR_MCAST_GROUPS contained nested attributes about
+ * mcast group name and mcast groups id :
+ *
+ * +--> nlahdr
+ * |           +--> nlahdr + NLA_HDRLEN
+ * |           |           +--> nlahdr + 2 * NLD_HDRLEN 
+ * |           |           |                    +--> nlahdr + 3 * NLA_HDRLEN
+ * |           |           |                    |
+ * +---------------------------------------------------------------------------+
+ * |   |   |   |   |   |   |   |   |   |    |   |   |   |   |      |   |   |   |
+ * | L | T | P | L | T | P | L | T | P | ID | P | L | T | P | NAME | P | P | P |
+ * |   |   |   |   |   |   |   |   |   |    |   |   |   |   |      |   |   |   |
+ * +---------------------------------------------------------------------------+
+ *       7           1       8   2     __u16          1
+ *                           |
+ *                           +--> 4 + 2 => aligned to 8
+ *
+ * ! For read files resided on sysfs,must use Linux SYSCALLs,the C Library FILE stream
+ *   is invalid.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -284,24 +326,7 @@ void parse_genl_id_ctrl_attrs(struct nlmsghdr *hdr, ssize_t datum_len, struct ge
                                 break;
 
                         case CTRL_ATTR_MCAST_GROUPS:
-                        /**
-                         * CTRL_ATTR_MCAST_GROUPS contained nested attributes about
-                         * mcast group name and mcast groups id -
-                         *
-                         * +--> nlahdr
-                         * |           +--> nlahdr + NLA_HDRLEN
-                         * |           |           +--> nlahdr + 2 * NLD_HDRLEN 
-                         * |           |           |                    +--> nlahdr + 3 * NLA_HDRLEN
-                         | |           |           |                    |
-                         * +---------------------------------------------------------------------------+
-                         * |   |   |   |   |   |   |   |   |   |    |   |   |   |   |      |   |   |   |
-                         * | L | T | P | L | T | P | L | T | P | ID | P | L | T | P | NAME | P | P | P |
-                         * |   |   |   |   |   |   |   |   |   |    |   |   |   |   |      |   |   |   |
-                         * +---------------------------------------------------------------------------+
-                         *       7           1       8   2     __u16          1
-                         *                           |
-                         *                           +--> 4 + 2 => aligned to 8
-                         */
+
                         {
                                 struct nlattr *nested_nla = (void *)nlahdr + nlattrhdr_size_aligned;
                                 struct nlattr *grpid_nla = (void *)nested_nla + nlattrhdr_size_aligned;
@@ -325,13 +350,7 @@ void parse_genl_id_ctrl_attrs(struct nlmsghdr *hdr, ssize_t datum_len, struct ge
 
 int main(void)
 {
-        /**
-         * |<--------------------------------- msghdr.msg_iov.iov_len -------------------------------------->|
-         * [netlink msg hdr | ... | generic netlink msg hdr | nlattr hdr | ... | acpi_genl_event | ... | ... ]
-         * ^
-         * |
-         * +-- msghdr.msg_iov.iov_base
-         */
+
 
         int netlink_fd = -1;
         errno = 0;
