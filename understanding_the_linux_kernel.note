@@ -31340,7 +31340,7 @@ Chapter 15 : The Page Cache
 
           ! kupdate style :
               periodic checking,the structure bdi_writeback has a member named @last_old_flush.
-              which migjt be reset to current @jiffies in wb_check_old_data_flush().
+              which might be reset to current @jiffies in wb_check_old_data_flush().
               if "@last_old_flush + ms_to_jiffies(@dirty_writeback_interval * 10)" is time after
               current @jiffies,then reset @last_old_flush to @jiffies,get number of pages have to
               be writeback through -
@@ -31826,12 +31826,16 @@ Chapter 15 : The Page Cache
              *     written by wb_do_writeback() with parameters @wb, 0
              *     if have written at least one dirty page,then set local variable @last_active to current
              *     jiffies
-             *     otherwise,check local variable @wait_jiffies(default value is -1UL,the longest period of
-             *     inactivity) is equal to -1UL
+             *     otherwise,check local variable @wait_jiffies(default value is -1UL) is equal to -1UL
+             *     # the default value is -1UL,if we did some works and have waitted a while,the value of
+             *       @wait_jiffies must changed
              *     if it is not equal,that means we have waited enough for dirty data at last iteration and no
              *     new dirty data has came,thus function will exit if current @jiffies is after to
-             *     "max(5UL * 60 * HZ, @wait_jiffies) + @last_active" - timeout
+             *     "max(5UL * 60 * HZ, @wait_jiffies) + @last_active" => timeout
              *     # if the dirty data have seen again later,the task will get recreated automatically
+             *     # the expression "5UL * 60 * HZ" - x86 platform,it is 300 * 1000
+             *     # sysctl binary interface have provided a way to modify @dirty_writeback_interval,the file
+             *       is "/proc/sys/vm/dirty_writeback_centisecs"
              *
              *     next,check @dirty_writeback_interval,if it has defined,then schedule_timeout_interruptible()
              *     will be called,@wait_jiffies is equal to "@dirty_writeback_interval * 10" - ms -> jiffies
@@ -32248,3 +32252,179 @@ Chapter 15 : The Page Cache
                  OR A FREE ELEMENT IS AVAILABLE FROM THE mempool.
                  # mempool_alloc() INVOKE io_schedule_timeout(5 * HZ) IF @curr_nr
                    IS 0.
+
+        Retrieving Old Dirty Pages :
+          the book have mentioned "dirty_writeback_centisecs",it is the period that
+          timer @wb_timer decays.if timeout,the timer handler @wb_timer_fn() would
+          be started automatically,which invoke wb_kupdate() function.
+          
+          but in Linux 2.6.34.1,only laptop mode has a timer named @laptop_mode_wb_timer,
+          the handler is laptop_timer_fn().
+          after the period past,the timer function invoke wakeup_flusher_threads() with
+          parameter 0 to wake up all writeback threads.
+
+          actually,the work of wb_kupdate() have handed over to wb_check_old_data_flush()
+          and it is called in wb_do_writeback().
+
+        The sync(),fsync(),fdatasync() system calls :
+          <fs/sync.c>
+            /**
+             * sys_sync - system call sync
+             * return:    0 or negative value
+             * # this routine just do :
+             *     1> invoke wakeup_flusher_threads() with parameter 0
+             *     2> invoke sync_filesystems() with parameter 0
+             *        # first flushing,skip all locked buffers
+             *     3> invoke sync_filesystems() with parameter 1
+             *        # second flushing,wait on all locked buffers for do writeback
+             *     4> if we are in laptop mode,invoke laptop_sync_completion()
+             *     5> return 0 to caller if everything is OK
+             */
+            SYSCALL_DEFINE0(sync)
+            => asmlinkage long sys_sync(void);
+
+            /**
+             * sync_filesystems - sync all mounted filesystems
+             * @wait:             1 => do sync_inodes_sb()
+             *                    0 => do writeback_inodes_sb()
+             * # this routine traverse all super block objects in the list @super_blocks,
+             *   for each of them,set @s_need_sync to 1
+             *   next,traverse super block objects again,for each super block whose
+             *   @s_need_sync is 1,set the member to 0,and invoke __sync_filesystem()
+             *   on current super block if it is not MS_RDONLY AND its @s_root is not NULL
+             *   AND its @s_bdi is not NULL
+             *   the traversing maybe restart fron the head of list @super_blocks,if
+             *   current super block is no longer on the list
+             *   ! because we need to sync the super block,thus we have to increase @s_count,
+             *     after the sync is completed,@s_count would be decreased,if it is equal to 0,
+             *     that means it will be destroyed.but the checking for @s_list is empty is
+             *     before @s_count decreasing
+             *     if @s_list is empty,that mean the super block is unlinked from @super_blocks,
+             *     then we decrease @s_count and restart the traversing;otherwise,just decrease
+             *     @s_count as well(if the super block is not unlinked,but @s_count become _zero_,
+             *     it is a BUG)
+             *   ! before we call to __sync_filesystem(),we must acquire @s_umount rw_semaphore to
+             *     avoid other kernel control path umount it(down_read()),and release it right after
+             *     __sync_filesystem() return,thus other kernel control path may umount it before
+             *     we determining if it is need to restart the traversing
+             */
+            static void sync_filesystems(int wait);
+
+            /**
+             * routine used to sync a file system
+             * the filesystem must have a backing device,can not be @noop_backing_dev_info
+             * if @s_qcop->quota_sync has implemented,must do quota sync at first
+             * if @wait is 1,invoke sync_inodes_sb,otherwise,it is writeback_inodes_sb()
+             * if @s_op->sync_fs has implemented,must invoke the routine to sync filesystem state
+             * finally,sync block device,if @wait is 0,filemap_flush() would be called,otherwise,
+             * invoke filemap_write_and_wait(),each of these two functions are flush the mapping
+             * of the master inode in bdev filesystem of the block device
+             * # sync_inodes_sb() => just invoke bdi_sync_writeback() and wait_sb_inodes()
+             */
+            static int __sync_filesystem(struct super_block *sb, int wait);
+
+            /**
+             * <fs/fs-writeback.c>
+             *   static void wait_sb_inodes(struct super_block *sb);
+             *   # acquire @inode_lock
+             *     for each inode of @sb
+             *       check its state,if it is in I_FREEING OR I_CLEAR OR
+             *       I_WILL_FREE OR I_NEW,skip current inode and get next iteration
+             *       # I_NEW no dirty pages
+             *       
+             *       if current inode's mapping's @nrpages is 0 - no page cached,skip it
+             *       
+             *       otherwise,__iget() it,and release @inode_lock,iput() the last inode @old_inode,
+             *       invoke filemap_fdatawait() on the mapping of current inode 
+             *       # of course,@old_inode is up date to current inode
+             *      
+             *       check kernel preempt,and acquire @inode_lock again,get into next iteration
+             *     before return,release @inode_lock and iput() the last inode @old_node
+             */
+
+
+            /**
+             * sys_fsync - system call fsync
+             * @fd:        file descriptor
+             * return:     0 OR negative value
+             * # sync on @fd,this routine just invoke do_fsync() with parameters @fd,0
+             * # writeback all dirty pages and the inode information associated to the file(
+             *   buffer containing the inode)
+             */
+            SYSCALL_DEFINE1(fsync, unsigned int, fd)
+            => asmlinkage long sys_fsync(unsigned int fd);
+
+            /**
+             * sys_fdatasync - system call fdatasync
+             * @fd:            file descriptor
+             * # data sync on @fd,this routine just invoke do_fsync() with parameters @fd,1
+             * # writeback all dirty pages but without inode information
+             */ 
+            SYSCALL_DEFINE1(fdatasync, unsigned int, fd)
+            => asmlinkage long sys_fdatasync(unsigned int fd);
+
+            /**
+             * do_fsync - do fsync
+             * @fd:       file descriptor
+             * @datasync: whether do data sync only
+             * return:    0 OR error code
+             * # this routine is sync on file object that associated to @fd,it invoke
+             *   fget() to get the file object and invoke vfs_fsync() on it if it is not
+             *   NULL,fput() it after work accomplished
+             * # vfs_fsync() : invoke vfs_fsync_range() on range 0 -- LLONG_MAX
+             *                 ! dentry is @file->f_path.dentry
+             */
+            static int do_fsync(unsigned int fd, int datasync);
+
+            /**
+             * vfs_fsync_range - helper to sync a range of data & metadata to disk
+             * @file:            file to sync
+             * @dentry:          file dentry
+             * @start:           offset in bytes of the beginning of data range to sync
+             * @end:             offset in bytes of the end of data range(inclusive)
+             * @datasync:        whether perform only datasync
+             *                   # if it is 1,only metadata needed to access modified file data
+             *                     is written
+             * return:           0 OR error code
+             * # for called from nfsd,@file may be NULL and @dentry is set,this can only happen
+             *   when the filesystem implements the export_operations API
+             * # for ext2 filesystem,the fsync() is implemented by ext2_fsync(),which just invoke
+             *   simple_fsync() defined in <fs/libfs.c>
+             *   function simple_fsync() create writeback control with @sync_mode = WB_SYNC_ALL,
+             *   @nr_to_write = 0,then invoke sync_mapping_buffers() on the mapping of inode;
+             *   next,check @datasync and I_DIRTY_DATASYNC,if @datasync is TRUE AND no I_DIRTY_DATASYNC,
+             *   return the return value of sync_mapping_buffers() to caller,otherwise,invoke
+             *   sync_inode(),and writeback_single_inode() is called,then is write_inode() is called
+             *   for ext2 filesystem,it is ext2_write_inode() - writeback inode information
+             *   ! if sync_mapping_buffers() failed but sync_inode() succeed,the error code of
+             *     sync_mapping_buffers() will be returned to caller
+             */
+            int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
+                                loff_t end, int datasync);
+
+            brief description for vfs_fsync_range() :
+              if @file is not NULL,get mapping @f_mapping and file operation set @f_op,
+              otherwise,get maping @dentry->d_inode->i_mapping and file operation set @dentry->d_inode->i_fop.
+              if @fop->fsync have not implemented,return -EINVAL to caller.
+              next,invoke filemap_write_and_wait_range() for the @mapping on range @start -- @end.
+              acquire @i_mudex of the host of the mapping,invoke @fop->fsync() on it,release mutex,
+              return the value returned by @fop->fsync() to caller.
+              /* the return value might be the error code returned from filemap_write_and_wait_range(),
+               * if that function returned an error code exactly;otherwise,it is the return value from
+               * @fop->fsync().
+               * parameter @datasync will as an argument pass to @fops->fsync().
+               */
+
+            !! filemap_write_and_wait() => filemap_fdatawrite() => __filemap_fdatawrite_range() =>
+                                        do_writepages()                      /* 0 -- LLONG_MAX */
+    
+                                        if filemap_fdatawrite() succeeed => filemap_fdatawait()
+
+                                              +--> "call to"
+                                              |
+               filemap_write_and_wait_range() => __filemap_fdatawrite_range()
+
+                                        if __filemap_fdatawrite_range() succeed => filemap_fdatawait_range()
+
+               both functions are return -EIO if writing was failed
+              
