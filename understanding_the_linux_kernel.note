@@ -32428,3 +32428,235 @@ Chapter 15 : The Page Cache
 
                both functions are return -EIO if writing was failed
               
+
+Chapter 16 : Accessing Files
+    The different ways to access a file :
+      1> Canonical mode -
+           file is opened with the O_SYNC and O_DIRECT flags cleared,and its content is accessed by means
+           of the read() and write() system calls.
+           read() blocks until the file data is copied into User Mode address space.
+           write() do not block,it terminates right after the data has copied into the page cache.
+
+      2> Synchronous mode -
+           file is opened with the O_SYNC is set(or set by fcntl()).this flag affects only the write operation,
+           process will be blocked until the data is effectively written to disk.
+
+      3> Memory mapping mode -
+           after file opened,mmap() it into a memory area,the file appears as an array of bytes in RAM.
+
+      4> Direct I/O mode -
+           file is opened with the O_DIRECT flag is set,any read or write operation transfers data directly from
+           the User Mode address space to disk,or vice versa,bypassing the page cache.
+
+      5> Asynchronous mode -
+           file is accessed -- either through a group of POSIX APIs,or by means of Linux-specific system calls.
+           the requests for data transfers never block the calling process,rather,they are carried on 
+           "in the background" while the application continues its normal execution.
+
+    Reading and Writing a File :
+      reading a file is page-based,the kernel always transfers whole pages of data at once.
+      some disk-based filesystem's file operation is set to the "generic_ro_fops",it is type of
+      struct file_operations,and in which,only reading related methods have implemented.the @read
+      is do_sync_read(),the @aio_read is generic_file_aio_read(),etc.
+      /* @generic_ro_fops is defined in <fs/read_write.c> */
+
+      writing a file is more complicated to handle,because the file size could increase,and therefore
+      the kernel might allocate some physical blocks on the disk.
+      the common write method for some filesystems is do_sync_write(),and the aio write method is
+      generic_file_aio_write(),which is defined in <mm/filemap.c>,in the file function generic_file_aio_read()
+      is defined,too.
+      /* for ext2 filesystem,the read method usually is do_sync_read(),and
+       * the write method usually is do_sync_write()
+       */
+
+      Reading from a File :
+        because do_sync_read() actually invoke aio_read() method of the file operations,which usually is
+        generic_file_aio_read(),thus the function performs an asynchronous I/O operation.
+        the kernel structure kiocb is used to control kernel synchronous/asynchronous I/O request.
+
+        <linux/aio.h>
+          /**
+           * kiocb - kernel io control block,the kiocb struct to advance by peforming an operation
+           *         this structure represents the aio control block in kernel space,and the
+           *         structure "iocb" in <linux/aio_abi.h> represents the aio control block in
+           *         user space
+           * @ki_run_list:
+           *         linked into the pending io list
+           * @ki_flags:
+           *         flags
+           * @ki_users:
+           *         users of this kio
+           * @ki_key:
+           *         id of this request
+           *         for synchronous I/O,it is KIOCB_SYNC_KEY => ~0U
+           * @ki_filp:
+           *         file object
+           * @ki_ctx:
+           *         kio context,may be NULL for sync ops
+           * @ki_cancel:
+           *         method to cancel this request
+           * @ki_retry:
+           *         method to retry this request
+           * @ki_dtor:
+           *         method to destroy this request
+           * @ki_obj:
+           *         User Mode user identifier
+           *         @user => point to user iocb
+           *                  # asynchronous
+           *         @tsk  => task struct for the User Mode process
+           *                  # synchronous
+           * @ki_user_data:
+           *         user's data for completion,value to be returned to
+           *         the User Mode process
+           * @ki_pos:
+           *         current file offset
+           * @private:
+           *         private data,freely usable by the filesystem layer
+           * @ki_opcode:
+           *         IOCB_CMD
+           * @ki_nbytes:
+           *         copy of iocb->aio_nbytes - length of transfer
+           * @ki_buf:
+           *         location of buffer
+           * @ki_left:
+           *         remaining bytes
+           * @ki_inline_vec:
+           *         inline vector
+           * @ki_iovec:
+           *         io vector array,if there is only one vector,then
+           *         make use of @ki_inline_vec,in this case,
+           *         @iov_base is @ki_buf,and @iov_len is @ki_left
+           * @ki_nr_segs:
+           *         number of segments
+           * @ki_cur_seg:
+           *         current segment
+           * @ki_list:
+           *         the aio core uses this for cancellation
+           *         linked into the list of active onging I/O operation
+           *         on an asynchronous I/O context
+           * @ki_eventfd:
+           *         kio event fd,if the @aio_resfd field of the userspace iocb
+           *         is not zero,this is the underlying eventfd context to deliver
+           *         events to
+           */
+          struct kiocb {
+                  struct list_head ki_run_list;
+                  unsigned long ki_flags;
+                  int ki_users;
+                  unsigned ki_key;
+
+                  struct file *ki_filp;
+                  struct kioctx *ki_ctx;
+                  int (*ki_cancel)(struct kiocb *, struct io_event *);
+                  ssize_t (*ki_retry)(struct kiocb *);
+                  void (*ki_dtor)(struct kiocb *);
+
+                  union {
+                          void __user *user;
+                          struct task_struct *tsk;
+                  } ki_obj;
+
+                  __u64 ki_user_data;
+                  loff_t ki_pos;
+                    
+                  void *private;
+
+                  unsigned short ki_opcode;
+                  size_t ki_nbytes;
+                  char __user *ki_buf;
+                  size_t ki_left;
+                  struct iovec ki_inline_vec;
+                  struct iovec *ki_iovec;
+                  unsigned long ki_nr_segs;
+                  unsigned long ki_cur_seg;
+
+                  struct list_head ki_list;
+
+                  struct eventfd_ctx *ki_eventfd;
+          };
+
+
+          /**
+           * kioctx - kernel io context,usually used for asynchronous I/O operation
+           * @users:  users of this context
+           * @dead:   whether this context is dead
+           * @mm:     usually points to the memory descriptor of @current
+           * @user_id:
+           *          user id
+           * @list:   linked into @ioctx_list of the memory descriptor
+           * @wait:   wait queue head
+           * @ctx_lock:
+           *          concurrent protection
+           * @reqs_active:
+           *          number of activated requests
+           * @active_reqs:
+           *          list of active requests,used for cancellation
+           * @run_list:
+           *          list collected pending kiocbs,used for kicked requests
+           * @max_reqs:
+           *          maximum number of requests
+           * @ring_info:
+           *          aio ring info
+           * @wq:     bottom half workqueue
+           * @rcu_head:
+           *          RCU updating
+           */
+          struct kioctx {
+                  atomic_t users;
+                  int dead;
+                  struct mm_struct *mm;
+
+                  unsigned long user_id;
+                  struct hlist_node list;
+
+                  wait_queue_head_t wait;
+
+                  spinlock_t ctx_lock;
+                  
+                  int reqs_active;
+                  struct list_head active_reqs;
+                  struct list_head run_list;
+        
+                  unsigned max_reqs;
+
+                  struct aio_ring_info ring_info;
+
+                  struct delayed_work wq;
+
+                  struct rcu_head rcu_head;
+          };
+
+          /**
+           * aio_ring_info - aio ring information
+           * @mmap_base:     the starting linear address of memory mapping
+           * @mmap_size:     size of the memory mapping
+           * @ring_pages:    if the request pages is less than AIO_RING_PAGES,
+           *                 then make use of @internal_pages;otherwise,make
+           *                 use of the memory chunk get through kcalloc()
+           * @ring_lock:     concurrent protection
+           * @nr_pages:      number of pages
+           * @nr:            usually is the number of io events,the result rely
+           *                 on @max_reqs of the kioctx structure
+           * @tail:          indicates the tail of @ring_pages
+           * @internal_pages:
+           *                 internal page descriptor array has predefined fixed size
+           * # the starting of page @ring_pages[0] containing the object "struct aio_ring",
+           *   and the remaining space contains the objects are type of "struct io_event"
+           *   [ struct aio_ring | io_event | io_event | ... ][ io_event | io_event | ... ]...
+           *   |                                              |                            |
+           *   |                                              |                            +--> [2 ... N]
+           *   |                                              +--> [1] 
+           *   +--> [0]            <-------------------- @nr io events -------------------->
+           */
+          struct aio_ring_info {
+                  unsigned long mmap_base;
+                  unsigned long mmap_size;
+                 
+                  struct page **ring_pages;
+                  spinlock_t ring_lock;
+                  long nr_pages;
+
+                  unsigned nr, tail;
+                  
+                  struct page *internal_pages[AIO_RING_PAGES];
+          };
