@@ -32979,4 +32979,34 @@ Chapter 16 : Accessing Files
                */
               update *@ppos,this parameter is @ki_pos,and finally,the file's position will be updated by use @ki_pos.
               invoke file_accessed() on @filp to update atime,if necessary.
-             
+
+            image >
+
+              if @len spanned two or more pages,the for-cycle must get continue into next iteration for read more
+              data,except the file is end or other error was happend.
+
+              if @pgindex falled into "un-cached" zone,must process readahead some contents of the file on disk to
+              fill several pages and add them into page cache of the inode.
+              /* depends on readahead strategy */
+
+              !O_DIRECT --+                                                                      O_DIRECT --+
+                          |                                                                                 |
+                          |                                                                                 |
+            +-------------+                                                                                 |
+            |                                                    +--> page index                            |
+            |                   +-> len <-+ => spanned two pages |                                          |
+            V                   |         |                      |                                          |
+            [ page0 | page1 | page2 | page3 | ... | pageN | <-- un-cached --> ] => inode mapping <--+       |
+                              |  |                                                                  |       |
+                              |  |                                                                  |       |
+                              |  |                                                                  |       |
+                              +--|--> page index    /* f_pos >> PAGE_CACHE_SHIFT */                 |       |
+                              |  |                                                                  |       |
+                              |  +--> page offset   /* f_pos & ~PAGE_CACHE_MASK */                  |       |
+                              |  |                                                                  |       |
+                         +--> f_pos                                              (direct IO failed) |       |
+                         |                                                              +-----------+       |
+            <=======================================================>  => file stream   |                   |
+            [ sector1 | sector2 | sector3 | sector4 | sector5 | ... ]  => file on disk <+-------------------+            
+              |<----------- one page ------------>|
+              /* suppose PAGE_SIZE is 4096,sector size is 512 */
