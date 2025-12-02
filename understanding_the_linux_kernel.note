@@ -21625,6 +21625,26 @@ Chapter 12 : The Virtual Filesystem
 
        <linux/fs.h>
          /**
+          * file_ra_state - track a single file's readahead state
+          * @start:         where readahead started
+          * @size:          size of readahead pages
+          * @async_size:    size of asynchronous readahead pages
+          * @ra_pages:      maximum readahead window
+          * @mmap_miss:     cache miss stat for mmap accesses
+          * @prev_pos:      cache last read() position
+          */
+         struct file_ra_state {
+                 pgoff_t start;
+                 unsigned int size;
+                 unsigned int async_size;
+                 
+                 unsigned int ra_pages;
+                 unsigned int mmap_miss;
+                 loff_t prev_pos;
+         };
+
+
+         /**
           * file - file object used to represents an opened file
           * @fu_list:    file object list
           * @fu_rcuhead: file list updating protection
@@ -23681,10 +23701,13 @@ Chapter 12 : The Virtual Filesystem
              finally,returns the number of bytes we have readed.
              /**
               * about do_sync_read() :
+              *   ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos);
+              *
               *   it is defined in the same file.
               *   this function will creates a iovec structure for reading,and a structure kiocb for
-              *   I/O control.
-              *   # kiocb => kernel I/O control block for asynchronous I/O
+              *   I/O control in the function frame(local variables).
+              *   # kiocb object is initialized by macro function init_sync_kiocb()
+              *   # kiocb => kernel I/O control block for synchronous/asynchronous I/O
               *   call to @file->f_op->aio_read() in a infinite for-cycle,call to wait_on_retry_sync_kiocb()
               *   at the end of each iteration for synchronization.
               *   break the cycle if return value is not -EIOCBRETRY.
@@ -32496,7 +32519,9 @@ Chapter 16 : Accessing Files
            * @ki_cancel:
            *         method to cancel this request
            * @ki_retry:
-           *         method to retry this request
+           *         method to retry this request,invoked in aio_run_iocb(),
+           *         initialized in aio_setup_iocb(),usually is
+           *         aio_rw_vect_retry()
            * @ki_dtor:
            *         method to destroy this request
            * @ki_obj:
@@ -32527,7 +32552,7 @@ Chapter 16 : Accessing Files
            *         make use of @ki_inline_vec,in this case,
            *         @iov_base is @ki_buf,and @iov_len is @ki_left
            * @ki_nr_segs:
-           *         number of segments
+           *         number of segments,each io vector represents one segment
            * @ki_cur_seg:
            *         current segment
            * @ki_list:
@@ -32575,6 +32600,18 @@ Chapter 16 : Accessing Files
                   struct eventfd_ctx *ki_eventfd;
           };
 
+          /**
+           * init_sync_kiocb - initialize a synchronous I/O request
+           * @x:               pointer to kiocb object
+           * @filp:            the file I/O operation on
+           * # @ki_obj.tsk = @current
+           *   @ki_filp = @filp
+           *   @ki_users = 1
+           *   @ki_key = KIOCB_SYNC_KEY
+           *   other fields are initialize to NULL or ZERO
+           */
+          #define init_sync_kiocb(x, filp)
+
 
           /**
            * kioctx - kernel io context,usually used for asynchronous I/O operation
@@ -32598,6 +32635,7 @@ Chapter 16 : Accessing Files
            * @ring_info:
            *          aio ring info
            * @wq:     bottom half workqueue
+           *          the handler is aio_kick_handler()
            * @rcu_head:
            *          RCU updating
            */
@@ -32660,3 +32698,285 @@ Chapter 16 : Accessing Files
                   
                   struct page *internal_pages[AIO_RING_PAGES];
           };
+
+          /**
+           * aio_ring - aio ring
+           * @id:       kernel internal index number
+           * @nr:       number of io_events
+           * @head:     head of the ring
+           * @tail:     tail of the ring
+           * @magic:    aio magic,default is AIO_RING_MAGIC - 0xa10a10a1
+           * @compat_features:
+           *            compat features,default is AIO_RING_COMPAT_FEATURES - 1
+           * @incompat_features:
+           *            incompat features,default is AIO_RING_INCOMPAT_FEATURES - 0
+           * @header_length:
+           *            size of struct aio_ring
+           * @io_events:
+           *            variable array for io_event elements
+           */
+          struct aio_ring {
+                  unsigned id;
+                  unsigned nr;
+                  unsigned head;
+                  unsigned tail;
+
+                  unsigned magic;
+                  unsigned compat_features;
+                  unsigned incompat_features;
+                  unsigned header_length;
+                  
+                  struct io_event io_events[0];
+          };
+
+        <linux/aio_abi.h>
+          /**
+           * io_event - structure used to represent io event
+           * @data:     data field from the iocb
+           * @obj:      what iocb this event came from
+           * @res:      result code for this event
+           * @res2:     secondary result
+           * # read() from /dev/aio returns these structures
+           */
+          struct io_event {
+                  __u64 data;
+                  __u64 obj;
+                  __s64 res;
+                  __s64 res2;
+          };
+
+          /**
+           * iocb - io control block for userland
+           * @aio_data:
+           *        data to be returned in event's data
+           * @aio_key:
+           *        kernel sets this field to the req
+           * @aio_reserved1:
+           *        reserve
+           * @aio_lio_opcode:
+           *        userland aiocb.aio_lio_opcode
+           * @aio_reqprio:
+           *        request priority
+           * @aio_fildes:
+           *        file descriptor
+           * @aio_buf:
+           *        buffer address
+           * @aio_nbytes:
+           *        buffer size
+           * @aio_offset:
+           *        file offset
+           * @aio_reserved2:
+           *        reserve
+           * @aio_flags:
+           *        flags
+           * @aio_resfd:
+           *        if IOCB_FLAG_RESFD(1 << 0) is set,this is
+           *        an eventfd to signal AIO readiness to 
+           */
+          struct iocb {
+                  __u64 aio_data;
+                  __u32 PADDED(aio_key, aio_reserved1);
+            
+                  __u16 aio_lio_opcode;
+                  __s16 aio_reqprio;
+                  __u32 aio_fildes;
+
+                  __u64 aio_buf;
+                  __u64 aio_nbytes;
+                  __s64 aio_offset;
+
+                  __u64 aio_reserved2
+
+                  __u32 aio_flags;
+
+                  __u32 aio_resfd;
+          };
+
+        !! kernel make use of aio_context_t the memory address that is the
+           @mmap_base of aio_ring_info of a kioctx object to find out the
+           exactly object.
+           then allocate a new kiocb object,initialize it from iocb the userland
+           io control block,and invoke aio_run_iocb() on the kiocb object.
+
+        <mm/filemap.c>
+          /**
+           * generic_file_aio_read - generic filesystem aio reading
+           * @iocb:                  kernel io control block
+           * @iov:                   io vector array
+           * @nr_segs:               number of segments
+           * @pos:                   file offset
+           */
+          ssize_t generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
+                                        unsigned long nr_segs, loff_t pos);
+
+          brief description for generic_file_aio_read() :
+            this routine process generic_segment_checks() on all segments,the access
+            flag is VERIFY_WRITE,if each segment is access_ok(),then return 0,otherwise,
+            return error code;thus generic_file_aio_read() would return it to caller,too.
+
+            if I/O mode is O_DIRECT,that is bypass page cache,then get inode size of the
+            file,we can not read the data at the position exceeded file size.
+            @pos < file size
+              try filemap_wrtie_and_wait_range() at first,
+              if the function was failed,try @a_ops->direct_IO()
+              if direct_IO() returned a positive value,increase @iocb->ki_pos,touch_atime()
+              of the file through file_accessed() /* O_NOATIME is set,do not touch atime */
+            in other case that @pos >= file size OR these two tries all are failed,give up
+            direct I/O,continue page cache I/O /* returned 0 - nothing have readed */
+            of course,if direct I/O succeed,do not need to proceed page cache I/O.
+
+            I/O mode is not O_DIRECT,make use of a for-cycle,stop condition is reach maximum
+            segments.
+            for {
+                    create a read_descriptor_t object @desc
+                    initialize it from current segment - current io vector
+                    /* skip zero length vector */
+                    invoke do_generic_file_read(),the read method is file_read_actor()
+                    updating readed bytes
+                    check if any error was encountered,or @count of @desc is greater than 0,
+                    this means the remaining data of @filp is less than the length of current
+                    vector,break cycle
+            }
+
+            if anything is OK,return the number readed bytes,otherwise,return error code.
+
+            /**
+             * <linux/fs.h>
+             *   typedef struct {
+             *           size_t written;  /* number of bytes has written into buffer */
+             *           size_t count;    /* number of bytes expect to be readed */
+             *           union {
+             *                   char __user *buf;  /* buffer from user space */
+             *                   void *data;        /* data buffer in kernel space,
+             *                                       * copied to @buf
+             *                                       */
+             *           } arg;
+             *           int error;                 /* record error code */
+             *   } read_descriptor_t;
+             */
+
+          /**
+           * do_generic_file_read - do generic file reading
+           * @filp:                 file object
+           * @ppos:                 current file position
+           * @desc:                 read descriptor
+           * @actor:                read method
+
+           */
+          static void do_generic_file_read(struct file *filp, loff_t *ppos,
+                                           read_descriptor_t *desc, read_actor_t actor);
+
+          description for do_generic_file_read() :
+            convert *@ppos to the index of cached page of @filp through "*@ppos >> PAGE_CACHE_SHIFT",
+            then get page offset through "*@ppos & ~PAGE_CACHE_MASK".
+            get the record about last read() on page cache,that is stored in @filp->f_ra.
+            /**
+             * get prev index := @filp->f_ra->prev_pos >> PAGE_CACHE_SHIFT
+             * get prev offset := @filp->f_ra->prev_pos & (PAGE_CACHE_SIZE - 1)
+             *
+             * get last index := (*@ppos + @desc->count + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT
+             * # the last index of page which should holding the request data
+             */
+            enter a infinite for-cycle {
+                    check kernel preempt
+                    find_page:
+                      get the target cached page trough find_get_page()
+
+                      if no such page,then invoke page_cache_sync_readahead() and find_get_page() again,
+                      if it is still not exist,goto label "no_cached_page".
+                      /* page_cacyhe_sync_readahead() is defined in <mm/readahead.c>,it do force readahead
+                       * or ondemand readahead
+                       */
+
+                      check if the page is readahead page - PG_reclaim is set,then invoke page_cache_async_readahead().
+                      /* if no such cached page,we do synchronous readahead,otherwise,do asynchronous readahead */
+
+                      next check whether the page is not up to date - PG_uptodate is cleared,if it is the case,then check
+                        > @i_blkbits is equal to PAGE_CACHE_SHIFT OR @a_ops->is_partially_iptodate is implemented,
+                          goto label "page_not_up_to_date"
+                        > try lock the page failed,then goto "page_not_up_to_date"
+                        > if @a_ops->is_partially_uptodate() returned FALSE,goto "page_not_up_to_date"
+                        otherwise,unlock the page and get into "page_ok"
+                      
+                    /* the main procedure to prepare reading */
+                    "page_ok" : the page is cached and ready for reading
+                      if inode size is zero OR the page index is greater than end index,then we can not read the
+                      cache /* end index - (inode size - 1) >> PAGE_CACHE_SHIFT */,release this page and goto
+                      "out".
+
+                      if the page index is end index,then set the size @nr(default is PAGE_CACHE_SIZE) to
+                      "(inode size - 1) & ~PAGE_CACHE_MASK + 1,it is the maximum number of bytes to copy from this
+                      cached page.
+                      of course,if @nr is less than or equal to page offset,that means no more data can be readed,then
+                      release the cached page and goto label "out".
+
+                      after checking accomplished,update @nr to @nr - offset,the length of remaining data in the page
+                      starting from the offset.
+
+                      next,check mapping_writably_mapped(),if it resulted in TRUE,invoke flush_dcache_page() on the
+                      page before reading the page on the kernel side.
+                      /* users can be writing to this page using arbitrary virtual addresses */
+
+                      mark_page_accessed(),if we are not progress on previous readahead index. 
+                      /* mark the page as accessed only at the first time */
+                      /* prev index != current index OR prev offset != current offset */
+
+                      update previous index to this page's index. /* prev index */
+
+                      invoke @actor() to read data,if @count is not decreased to _zero_,then we must get into next
+                      for-cycle iteration to read remaining data,so,update offset and index - we will read this page
+                      at next iteration,release current page and continue.
+                      /* prev offset is reset to the updated offset == offset + return value from @actor() */
+                      if @count is _zero_ OR returned value by @actor is not equal to @nr - failed to read the data
+                      has expected length,then goto label "out".
+
+                    /**
+                     * lock_page_killable() - <linux/pagemap.h>
+                     *   try to lock the page,if failed,wait in page_waitqueue(@page) until PG_locked clear
+                     *   process enter TASK_KILLABLE,the action is sync_page_killable()
+                     */
+
+                    page_not_up_to_date:
+                      try lock_page_killable() on current page,goto readpage_error label if lock failed.
+                      otherwise,proceed "page_not_up_to_date_locked"
+                    page_not_up_to_date_locked:
+                      skip NULL mapping page - the page is not cached
+                      check PageUptodate() on current page,may be other kernel control path have updated it,it is
+                      the case,unlock the page and goto "page_ok".
+                      otherwise,proceed "readpage".
+                    readpage:
+                      clear page error flags
+                      invoke @a_ops->readpage(),goto "readpage_error" if any error was encountered
+                      if the page is still have not up to date,then lock_page_killable(),goto "readpage_error"
+                      if failed on locking.
+                      check up to date again,if it still have not up to date,then
+                        check its mapping,if it is NULL,unlock the page,release it,and goto "find_page" - routine
+                        invalidate_mapping_pages() got it /* invalidate all the unlocked pages of one inode */
+                      otherwise,unlock the page,invoke shrink_readahead_size_eio(),set error code to -EIO,goto
+                      label "readpage_error".
+                      if we succeed to readahead the page,goto "page_ok" to process reading.
+                    readpage_error:
+                      set @desc->error to the error code
+                      release the page
+                      goto out
+                    
+                    no_cached_page: the page has not cached
+                      alloc a new cold page for the mapping,if failed,the return error code is -ENOMEM,goto out.
+                      invoke add_to_page_cache_lru() to the mapping,if failed,then
+                        release the page
+                        failed because -EEXIST,goto "find_page"
+                        otherwise,set @desc->error to error code,goto out
+                      if we succeed to add the page cache,goto "readpage" - it is a new page,no valid data in it,
+                      have to fill it from disk file.    
+            }
+
+            out:
+              update members of @filp->f_ra to record last readahead info.
+              /**
+               * updating :
+               *   @prev_pos := (prev index << PAGE_CACHE_SHIFT) | prev offset
+               *   # do the reverse
+               */
+              update *@ppos,this parameter is @ki_pos,and finally,the file's position will be updated by use @ki_pos.
+              invoke file_accessed() on @filp to update atime,if necessary.
+             
