@@ -23779,10 +23779,24 @@ Chapter 12 : The Virtual Filesystem
               *   # kiocb => kernel I/O control block for synchronous/asynchronous I/O
               *   call to @file->f_op->aio_read() in a infinite for-cycle,call to wait_on_retry_sync_kiocb()
               *   at the end of each iteration for synchronization.
+              *   # void wait_on_retry_sync_kiocb(*kiocb) - defined in the same file
+              *       > set @current to TASK_UNINTERRUPTIBLE
+              *       > if the kiocb descriptor is not kicked,then invoke schedule()
+              *         else,invoke kiocbClearKicked() to kick this kiocb
+              *       > finally,restore @current to TASK_RUNNING
               *   break the cycle if return value is not -EIOCBRETRY.
-              *   call to wait_on_sync_kiocb() if -EIOCBQUEUED is returned,the routine set current task to
-              *   TASK_UNINTERRUPTIBLE until the I/O event is completed.
-              *   finally,returns the number of bytes been readed.
+              *   outside to the cycle,call to wait_on_sync_kiocb() if -EIOCBQUEUED is returned,the routine
+              *   set current task to TASK_UNINTERRUPTIBLE until the I/O event is completed.
+              *   # ssize_t wait_on_sync_kiocb(*kiocb) - defined in <fs/aio.c>
+              *     - waits on the given sync kiocb complete
+              *       make use of a while-cycle until @ki_users become 0
+              *       do
+              *               set @current to TASK_UNINTERRUPTIBLE
+              *               if @ki_users is _zero_,break cycle
+              *               otherwise,invoke io_schedule()
+              *       done
+              *       set @current to TASK_RUNNING,return @ki_user_data
+              *   finally,use kiocb.@ki_pos to update *@ppos,returns the number of bytes have readed.
               */
 
            /**
