@@ -23774,7 +23774,7 @@ Chapter 12 : The Virtual Filesystem
               *
               *   it is defined in the same file.
               *   this function will creates a iovec structure for reading,and a structure kiocb for
-              *   I/O control in the function frame(local variables).
+              *   I/O control in the function frame(as local variables).
               *   # kiocb object is initialized by macro function init_sync_kiocb()
               *   # kiocb => kernel I/O control block for synchronous/asynchronous I/O
               *   call to @file->f_op->aio_read() in a infinite for-cycle,call to wait_on_retry_sync_kiocb()
@@ -29755,7 +29755,7 @@ Chapter 15 : The Page Cache
 
         /**
          * address_space - object used to group and manage pages in the page cache
-         * @host:          owner of the page cache,inode or block_device
+         * @host:          owner of the page cache,inode or block device inode in bdev
          * @page_tree:     radix tree of all pages
          * @tree_lock:     lock protecting @page_tree
          * @i_mmap_writable:
@@ -32874,6 +32874,8 @@ Chapter 16 : Accessing Files
            * @iov:                   io vector array
            * @nr_segs:               number of segments
            * @pos:                   file offset
+           * return:                 size of data have copied to buffer => succeed
+           *                         error code => failed
            */
           ssize_t generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
                                         unsigned long nr_segs, loff_t pos);
@@ -32902,12 +32904,14 @@ Chapter 16 : Accessing Files
                     /* skip zero length vector */
                     invoke do_generic_file_read(),the read method is file_read_actor()
                     updating readed bytes
-                    check if any error was encountered,or @count of @desc is greater than 0,
-                    this means the remaining data of @filp is less than the length of current
-                    vector,break cycle
+                    check if any error was encountered,set return value to error code,break cycle
+                          OR @count of @desc is greater than 0,this means the remaining
+                             data of @filp is not enough to fulfill current vector,break cycle
+                                           /* no more data */
             }
 
             if anything is OK,return the number readed bytes,otherwise,return error code.
+
 
             /**
              * <linux/fs.h>
@@ -32915,9 +32919,9 @@ Chapter 16 : Accessing Files
              *           size_t written;  /* number of bytes has written into buffer */
              *           size_t count;    /* number of bytes expect to be readed */
              *           union {
-             *                   char __user *buf;  /* buffer from user space */
+             *                   char __user *buf;  /* buffer from userspace */
              *                   void *data;        /* data buffer in kernel space,
-             *                                       * copied to @buf
+             *                                       * for special purpose,such TCP tss
              *                                       */
              *           } arg;
              *           int error;                 /* record error code */
@@ -32936,6 +32940,11 @@ Chapter 16 : Accessing Files
                                            read_descriptor_t *desc, read_actor_t actor);
 
           description for do_generic_file_read() :
+            get mapping of @filp,the @f_mapping.
+            get host of the mapping,that is @filp->f_mapping->host.
+            /* if the file is a block device file,then @host is the inode in bdev filesystem,
+             * rather than the inode pointed to by @filp->f_dentry->d_inode
+             */
             convert *@ppos to the index of cached page of @filp through "*@ppos >> PAGE_CACHE_SHIFT",
             then get page offset through "*@ppos & ~PAGE_CACHE_MASK".
             get the record about last read() on page cache,that is stored in @filp->f_ra.
@@ -32971,7 +32980,7 @@ Chapter 16 : Accessing Files
                     "page_ok" : the page is cached and ready for reading
                       if inode size is zero OR the page index is greater than end index,then we can not read the
                       cache /* end index - (inode size - 1) >> PAGE_CACHE_SHIFT */,release this page and goto
-                      "out".
+                      "out". /* maybe truncated by other */
 
                       if the page index is end index,then set the size @nr(default is PAGE_CACHE_SIZE) to
                       "(inode size - 1) & ~PAGE_CACHE_MASK + 1,it is the maximum number of bytes to copy from this
@@ -32989,6 +32998,7 @@ Chapter 16 : Accessing Files
                       mark_page_accessed(),if we are not progress on previous readahead index. 
                       /* mark the page as accessed only at the first time */
                       /* prev index != current index OR prev offset != current offset */
+                      /* PG_referenced | PG_active,the page is using,should not be swapped out */
 
                       update previous index to this page's index. /* prev index */
 
@@ -33000,29 +33010,37 @@ Chapter 16 : Accessing Files
                       - we will read this page at next iteration,release current page and continue.
                       /* prev offset is reset to the updated offset == offset + return value from @actor() */
 
-                      otherwise, @count is _zero_ - all wanted data have readed OR return value of @actor is not
-                      equal to @nr - failed to read the data has expected length,then goto label "out".
+                      otherwise,@count is _zero_ - all wanted data have readed,goto "out"(no more data have to be readed)
+                             OR return value of @actor is not equal to @nr - failed to read the data has expected length,
+                                goto label "out".(@count is not _zero_ AND return value is not equal to @nr)
 
                     /**
                      * lock_page_killable() - <linux/pagemap.h>
                      *   try to lock the page,if failed,wait in page_waitqueue(@page) until PG_locked clear
                      *   process enter TASK_KILLABLE,the action is sync_page_killable()
+                     * # some routine such readpage() would clear PG_locked before return to caller.
                      */
 
                     page_not_up_to_date:
                       try lock_page_killable() on current page,goto readpage_error label if lock failed.
                       otherwise,proceed "page_not_up_to_date_locked"
                     page_not_up_to_date_locked:
-                      skip NULL mapping page - the page is not cached
-                      check PageUptodate() on current page,may be other kernel control path have updated it,it is
+                      continue to next iteration if current page's mapping is NULL
+                      /* the page is not cached,maybe is has removed by another kernel control
+                       * path when we waiting for PG_locked cleared.
+                       * in the next iteration,we will operate on the page has same index.
+                       */
+                      check PageUptodate() on current page,may be another kernel control path have updated it,it is
                       the case,unlock the page and goto "page_ok".
                       otherwise,proceed "readpage".
                     readpage:
                       clear page error flags
-                      invoke @a_ops->readpage(),goto "readpage_error" if any error was encountered
+                      invoke @a_ops->readpage(),goto "readpage_error" if any error except AOP_TRUNCATED_PAGE was encountered.
+                      /* for AOP_TRUNCATED_PAGE,release page cache,goto find_page label and try again */
                       if the page is still have not up to date,then lock_page_killable(),goto "readpage_error"
                       if failed on locking.
-                      check up to date again,if it still have not up to date,then
+                      check up to date again /* we have waited a while for I/O transfer */,if it still have not up to date,
+                      then
                         check its mapping,if it is NULL,unlock the page,release it,and goto "find_page" - routine
                         invalidate_mapping_pages() got it /* invalidate all the unlocked pages of one inode */
                       otherwise,unlock the page,invoke shrink_readahead_size_eio(),set error code to -EIO,goto
@@ -33051,6 +33069,9 @@ Chapter 16 : Accessing Files
                *   # do the reverse
                */
               update *@ppos,this parameter is @ki_pos,and finally,the file's position will be updated by use @ki_pos.
+              /* *@ppos may remain unchanged if we breaked cycle before we start @actor(),this is because
+               * file has truncated,or readpage error,etc.
+               */
               invoke file_accessed() on @filp to update atime,if necessary.
 
             image >
