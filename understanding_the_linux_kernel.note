@@ -30545,7 +30545,7 @@ Chapter 15 : The Page Cache
            *               # each buffer page has a buffer_head descriptor
            * @b_page:      the page this bh is mapped to
            *               # that the buffer page holding this block
-           * @b_blocknr:   start block number
+           * @b_blocknr:   start block number of data of this buffer
            *               # logical block number
            * @b_size:      size of mapping
            * @b_data:      pointer to data within the page
@@ -33166,3 +33166,39 @@ Chapter 16 : Accessing Files
              *   @written += @size
              *   @buf += @size => step buffer position for next reading
              */
+
+        The "readpage" method for regular files :
+          function do_generic_file_read() invoke the method readpage() of address space of the inode to
+          read the page of the file from disk to page cache.
+          for ext2 filesystem,readpage() method of its @ext2_aops is set to mpage_readpage(),ext2 pass
+          it the parameters @page that need to be filled,and a function ext2_get_block().
+          function mpage_readpage() is a common interface to read page from disk and add it into page cache.
+
+          <fs/mpage.c>
+            - contains functions related to preparing and submitting BIOs which contain multiple pagecache
+              pages
+
+            /**
+             * mpage_readpage - common interface to read a page from disk to page cache
+             * @page:           the page have to be filled
+             * @get_block:      filesystem-dependent block mapper function,
+             *                  used to translate the block in file to the logical block in disk
+             *                  # block in file : get through page index 
+             *                  # logical block in disk : the logical block relative to
+             *                  #                         position of the block in the disk partion
+             * return:          always 0
+             * # EXPORT_SYMBOL
+             * # this function create a buffer_head object named @map_bh,set its @b_state and @b_size
+             *   to _zero_,pass it to the _main_ routine do_mpage_readpage().the arguments are -
+             *     NULL, @page, 1, address of local variable @last_block_in_bio, &@map_bh,
+             *     address of local variable @first_logical_block, @get_block
+             *   @last_block_in_bio is type of sector_t,initialized to 0
+             *   @first_logical_block is type of unsigned long,initialized to 0
+             *   if do_mpage_readpage() returned a valid pointer points to a bio object,then invoke
+             *   mpage_bio_submit() for submit block i/o operation READ on the bio
+             *   finally,return 0 to caller
+             * # if the first parameter @bio of do_mpage_readpage() is NULL,then it must invoke
+             *   mpage_alloc() to allocate a new bio object,return NULL if allocating failed
+             */
+            int mpage_readpage(struct page *page, get_block_t get_block);
+
