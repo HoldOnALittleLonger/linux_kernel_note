@@ -1044,6 +1044,7 @@ Chapter 2 : Memory Addressing
            specifies the length in bits of the Offset field;
            this macro is used by PAGE_SIZE to return the size of the page,finally,
            the PAGE_MASK macro yields the value 0xfffff000 and is used to mask all the bits of the Offset field.
+           /* usually is defined to 12 */
 
          PMD_SHIFT
            the total length in bits of the Offset and Table fields of a linear address;
@@ -21511,6 +21512,10 @@ Chapter 12 : The Virtual Filesystem
           * @i_rdev:    real device identifier,used for device file,contains the
           *             major number and minor number of the device
           * @i_blkbits: block size in number of bits
+          *             # block is filesystem specific data unit,thus a page might
+          *               contains several blocks,the number of blocks in a page
+          *               is able to be calculated through "page size >> @i_blkbits"
+          *               that is - "page size / (2^@i_blkbits)"
           * @i_version: version number,automatically increased after each use
           * @i_size:    inode size in bytes
           * @i_size_seqcount:    sequence counter used in SMP systems to get
@@ -27129,7 +27134,8 @@ Chapter 14 : Block Device Drivers
            * bio_vec - data vector of bio,that is the segment
            * @bv_page: data page frame
            * @bv_len:  data length
-           * @bv_offset:    starting offset from the head of page frame
+           * @bv_offset:
+           *           starting offset from the head of page frame
            */
           struct bio_vec {
                   struct page *bv_page;
@@ -27152,11 +27158,14 @@ Chapter 14 : Block Device Drivers
            *                transferred,if the block device driver cannot
            *                perform the  whole data transfer with one
            *                scatter-gather DMA operation
-           * @bi_phys_segments:    number of segments in this bio after
-           *                       physical address coalescing is performed
+           * @bi_phys_segments:
+           *                number of segments in this bio after
+           *                physical address coalescing is performed
            * @bi_size:      residual I/O count
-           * @bi_seg_front_size:    first mergeable segments in this bio
-           * @bi_seg_back_size:     last mergeable segments in this bio
+           * @bi_seg_front_size:
+           *                first mergeable segments in this bio
+           * @bi_seg_back_size:
+           *                last mergeable segments in this bio
            * @bi_max_vecs:  max bvl_vecs this bio can hold
            * @bi_comp_cpu:  completion CPU
            * @bi_cnt:       pin count
@@ -27170,10 +27179,12 @@ Chapter 14 : Block Device Drivers
            * @bi_private:   pointer useed by the generic block layer and the I/O
            *                completion method of the block device driver
            * @bi_integrity: data integrity
-           * @bi_destructor:    destructor of this bio
-           *                      typedef void (bio_destructor_t)(struct bio *)
-           * @bi_inline_vecs:   one element array of struct bio_vec,used to avoid
-           *                    double allocations for a small number of bio_vecs
+           * @bi_destructor:
+           *                destructor of this bio
+           *                typedef void (bio_destructor_t)(struct bio *)
+           * @bi_inline_vecs:
+           *                one element array of struct bio_vec,used to avoid
+           *                double allocations for a small number of bio_vecs
            */
           struct bio {
                   sector_t bi_sector;
@@ -27299,7 +27310,7 @@ Chapter 14 : Block Device Drivers
            * # EXPORT_SYMBOL
            * # this routine actually call to bio_alloc_bioset(),and which allocate memory
            *   through the method mempool_alloc() in @fs_bio_set->bio_pool,@fs_bio_set is
-           *   type of struct bio_set *,member @bio_pool is type of mempool_t *
+           *   type of struct bio_set *,member @bio_pool is type of mempool_t
            * # @fs_bio_set is defined in <fs/bio.c>,it is allocated in init function init_bio()
            *   through bioset_create(),memory pool size is BIO_POOL_SIZE 2 defined in <linux/bio.h>.
            *   if necessary,new slab for bioset will be created
@@ -33093,7 +33104,7 @@ Chapter 16 : Accessing Files
               if @len spanned two or more pages,the for-cycle must get continue into next iteration for read more
               data,except the file is end or other error was happend.
 
-              if @pgindex falled into "un-cached" zone,must process readahead some contents of the file on disk to
+              if @pgindex falled inside "un-cached" zone,must process readahead some contents of the file on disk to
               fill several pages and add them into page cache of the inode.
               /* depends on readahead strategy */
 
@@ -33201,4 +33212,268 @@ Chapter 16 : Accessing Files
              *   mpage_alloc() to allocate a new bio object,return NULL if allocating failed
              */
             int mpage_readpage(struct page *page, get_block_t get_block);
+
+            /**
+             * do_mpage_readpage - do mpage_readpage
+             * @bio:               make use this bio to submit bio,if it is NULL,allocate a new one
+             * @page:              the page have to be filled
+             * @nr_pages:          number of pages,if this function is called from mpage_readpage(),
+             *                     this parameter should be 1
+             * @last_block_in_bio: the last logical block number in the bio,if @bio is NULL,this parameter
+             *                     should be 0
+             * @map_bh:            buffer head,represents a the buffer will be used to map the block
+             * @first_logical_block:
+             *                     the first logical block number
+             * @get_block:         filesystem-dependent function used to get the block
+             * return:             NULL OR newly allocated bio OR @bio
+             */
+            static struct bio *do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
+                                                 sector_t *last_block_in_bio, struct buffer_head *map_bh,
+                                                 unsigned long *first_logical_block, get_block_t get_block);
+
+            what do_mpage_readpage() does :
+              1> get inode object through @page->mapping->host.
+                 get block bits from the inode's @i_blkbits.
+                 get number blocks for per-page through "PAGE_CACHE_SIZE >> block bits".
+                 /* PAGE_CACHE_SIZE usually is PAGE_SIZE */
+                 the block size is "1 << block bits" == 2^block-bits
+                 set local variable @first_hole to @blocks_per_page,the value is PAGE_CACHE_SIZE / block size.
+                 set local variable @fully_mapped to 1.
+                 decalre an array is type of sector_t named @blocks,the size is MAX_BUF_PER_PAGE,it usually
+                 is PAGE_CACHE_SIZE / 512(sector size).
+                 /* the array @blocks will storing the logical block numbers that we deal with */
+              2> invoke page_has_buffers() on @page,if @page has PG_private,then goto label "confused".
+              3> calculate block in file,this is the reverse that did in __find_get_block_slow().
+                 the block in file is "@page->index << (PAGE_CACHE_SHIFT - blkbits)".
+                 /* PAGE_CACHE_SHIFT usually is PAGE_SHIFT */
+                 we can consider the file is composed by many pages.
+                 [ page0 | page1 | page2 | ... | pageN ] => file A
+                 the number of blocks in the file A is (N + 1) * blocks-per-page.
+                 @page->index * 2^(PAGE_CACHE_SHIFT - block bits)
+                 => @page->index * 2^PAGE_CACHE_SHIFT / 2^block-bits
+                 => current block number
+                 /* @page->index * 2^PAGE_CACHE_SHIFT can get the length of mapping before current position,
+                  * the result divide the size of a block can get current block number.
+                  */
+              4> calculate last block,it is "block-in-file + @nr_pages * blocks-per-page".
+                 calculate last block in file,it is the last block at the file's end.result is
+                 "(i_size_read(inode) + block-size - 1) >> block-bits"
+                 /* if at the end of file,data length is not sufficient to fill a block,the disk stay
+                  * transfer a sector of data,thus we count it as a block
+                  */
+                 check,if the last-block is greater than last-block-in-file,reset it to last-block-in-file,
+                 we can not read other sectors they are not belong to the file.
+                 set counter @page_block to _zero_.
+              5> check,if buffer_mapped() @map_bh AND block-in-file is greater than *@first_logical_block AND
+                 block-in-file is less than (*@first_logical_block + nblocks(: @map_bh->b_size >> block-bits))
+                 then                                               /* number of blocks in the mapping */
+                         /* buffer_mapped() => BH_Mapped is set,if the buffer has been mapped,
+                          * current block-in-file must greater than *@first_logical_block,and
+                          * less than maximum allowed block number in file
+                          */
+                         set local variable @map_offset to block-in-file - *@first_logical_block
+                         /* current offset in mapping */
+                         set local variable @last to @nblocks - @map_offset
+                         /* the end position in mapping */
+
+
+                         /* fill @blocks */
+                         enter a for-cycle,it would be breaked if some conditions have satisfied :
+                           iterator started from _zero_,and increase before next iteration
+                             if @i is equal to @last,then clear_buffer_mapped() for @map_bh,and break.
+                             /* we have iterated all blocks in the mapping */
+                             if @page_block is equal to blocks-per-page,then break.
+                             /* the maximum number of traversable blocks has reached */
+            
+                             fille @blocks[@page_block] to @map_bh->b_blocknr + @map_offset + @i
+                             ++@page_block
+                             ++@block_in_file
+
+                         set local variable @bdev to @map_bh->b_bdev
+
+                         !! if do_mpage_readpage() is called from mpage_readpage(),then @b_bdev and
+                            @b_blocknr of @map_bh must be _zero_.
+              6> set @map_bh->b_page to @page,the mapping resided on @page.
+                 make use of a while-cycle,the stop condition is @page_block is greater than or equal to
+                 blocks-per-page.
+                 while {
+                         /* if we processed the branch at step 5>,then @page_block might increased.
+                          * if @page_block is not reach blocks-per-page,then we have to determine whether
+                          * need to do more get_blocks calls until we are done with this page.
+                          * if we did not process the branch,then @page_block must be _zero_,thus we must
+                          * get blocks.
+                          * # @map_bh is not BH_mapped OR block-in-file is not valid
+                          * # if this function is called from mpage_readpage(),then its @b_size and @b_state
+                          *   is _zero_,thus the branch at step 5> would not be processed.
+                          */
+
+                          set @map_bh->b_state to 0,set @map_bh->b_size to 0.
+                          if block-in-file is less than last-block
+                          then
+                                  /* in most case,this branch would be processed,so @get_block() will be called */
+                                  set @map_bh->b_size to (last-block - block-in-file) << block-bits
+                                  /* we need many blocks to fill the buffer,and the size of buffer will passed to
+                                   * filesystem to let it get appropriate number of blocks from disk.
+                                   * the logical block number of each block get through filesystem API will be
+                                   * stored in @blocks.
+                                   * at there,we attempt to get blocks they covered full buffer,if failed,block-in-file
+                                   * will be updated later,thus we can skip the failed block to get the remain blocks
+                                   * they covered the remain buffer,size is "(last-block - block-in-file) << block-bits".
+                                   */
+
+                                  invoke @get_block() with arguments -
+                                    inode, block-in-file, @map_bh, 0
+                                  if @get_block() returne TRUE,goto label "confused".
+                                  /* for ext2,@get_block return _zero_ if succeed,otherwise,return a negative error code */
+                                  /* for ext2,the function is ext2_get_block(),which invoke ext2_get_blocks(),
+                                   * parameters is -
+                                   *   @inode:      inode
+                                   *   @iblock:     the starting logical block number
+                                   *   @max_blocks: defined the range blocks [@iblock, @iblock + @max_blocks)
+                                   *   @map_result: result of buffer mapping
+                                   *   @create:     if it is _zero_ OR error code is -EIO,do not allocate new block
+                                   */
+
+                                  set *@first_logical_block to block-in-file,it is the first block that we succeed to
+                                  get block.
+
+                          check if @map_bh is still unmapped
+                          then
+                                  /* if filesystem succeed to get block,it will invoke map_bh() to set the buffer.
+                                   * map_bh() is defined in <linux/buffer_head.h>
+                                   * - set BH_Mapped
+                                   *   set @b_bdev # super block object's @s_bdev
+                                   *   set @b_blocknr
+                                   *   set @b_size # super block object's @s_blocksize
+                                   * thus,@map_bh is still unmapped,that means filesystem failed to get block,ot
+                                   * it failed on plain lookup.
+                                   */
+                                  set @fully_mapped to _zero_ /* we failed on get a specific block,so it is not
+                                                               * fully mapped.
+                                                               */
+                                  if @first_hole is equal to blocks-per-page,then set @first_hole to @page_block
+                                  ++@page_block
+                                  ++block-in-file
+                                  continue to next iteration
+
+                          check if @map_bh is up-to-date -- BH_Uptodate,then
+                                  invoke map_buffer_to_page() with arguments - @page,@map_bh,@page_block
+                                  /* the filesystem supplied @get_block might return an up to date buffer,
+                                   * this is used to map that buffer into the page,which allows readpage to
+                                   * avoid triggering a duplicate call to @get_block.
+                                   * for ext2,if succeed to get block,it will set BH_New,but without BH_Uptodate.
+                                   *
+                                   * if @page is not have buffers -- PG_private is cleared
+                                   * then
+                                   *         if @inode->i_blkbits == PAGE_CACHE_SHIFT AND @map_bh has BH_Uptodate
+                                   *         then we can just set @page PG_uptodate and return.
+                                   *         else,invoke create_empty_buffers() to create buffers on @page,the block
+                                   *         size is 1 << @inode->i_blkbits,state is 0.
+                                   *         # a proper number of buffers will be created to cover the whole page.
+                                   * if @page have buffers -- PG_private is set
+                                   * then
+                                   *         traverse the buffer heads in @page
+                                   *         for the buffer which corresponding to @page_block,set it -
+                                   *           @b_state   = @map_bh->b_state
+                                   *           @b_bdev    = @map_bh->b_bdev
+                                   *           @b_blocknr = @map_bh->b_blocknr
+                                   *           # let the anonymous buffer to represent @map_bh  
+                                   */
+
+                          check,if @first_hole is not equal to blocks-per-page,then goto "confused".
+                          /* hole.
+                           * if we did not encounter block hole,then @first_hole must be equal to blocks-per-page,
+                           * otherwise,it must recorded the first block hole that detected in the branch
+                           * checking for BH_Mapped,in this case,the cycle will be breaked
+                           * !! hole - some blocks are not adjacent on disk
+                           *           some blocks fall inside a "file hole"
+                           */
+
+                          if @page_block is not _zero_ AND @blocks[@page_block - 1] != @map_bh->@b_blocknr - 1
+                          then,goto "confused" /* contiguous blocks ? */
+
+                          set @nblocks to @map_bh->b_size >> block-bits
+                          
+                          /* similar to the  cycle in step 5>,we make use @blocks to record the logical block numbers
+                           * we are working on
+                           */
+                          enter a for-cycle,iterator @i started from _zero_,increase before next iteration {
+                                  if @i == @nblocks
+                                          clear buffer mapped on @map_bh,break
+                                  else if @page_block == blocks-per-page,break
+                                  set @blocks[@page_block] to @map_bh->b_blocknr + @i
+                                  ++@page_block
+                                  ++block-in-file
+                          }
+
+                          set local variable @bdev to @map_bh->b_bdev
+                 }
+              7> if @first_hole is not equal to blocks-per-page /* has hole */
+                 then
+                         zero_user_segment() to fill the hole by _zero_,the range is -
+                           [kaddr of @page + "@first_hole << block-bits", PAGE_CACHE_SIZE - 1]
+                         next,check if @first_hole is 0,then set PG_uptodate,unlock @page,goto "out".
+                 else if @fully_mapped is TRUE
+                 then
+                         set PG_mappedtodisk for @page
+              8> if @bio is valid AND *@last_block_in_bio != @blocks[0] - 1
+                 then invoke mpage_bio_submit() for READ operation on @bio.
+                 /* this page will go to BIO,and we need to send this BIO off at first */
+              alloc_new:
+              9> if @bio is NULL,then invoke mpage_alloc() to allocate a new bio.
+                 its first sector is @blocks[0] << (block-bits - 9),number of sectors is
+                 the minimum value in "@nr_pages, bio_get_nr_vecs(@bdev)".
+                 if failed on allocating,goto label "confused".
+             10> set local variable @length to @first_hole << block-bits
+                 invoke bio_add_page() on the newly allocated bio,attempt to add @page to it,length
+                 is @length,offset is _zero_.
+                 if succeed,then invoke mpage_bio_submit() for READ operation,and goto "alloc_new".
+                 /* mpage_bio_submit() always return NULL,it invoke submit_bio() with @rw operation. */
+             11> set local variable @relative_block(this variable exactly is @i in the cycles for fill @blocks)
+                 to block-in-file - *@first_logical_block.
+                 set @nblocks to @map_bh->b_size >> block-bits.
+                 check,if (@map_bh has set BH_Boundary AND @relative_block is equal to @nblocks) OR
+                 @first_hole is not equal to blocks-per-page
+                 then
+                         invoke mpage_bio_submit() for READ operation on @bio
+                 else
+                 then
+                         set *@last_block_in_bio to @blocks[blocks-per-page - 1] /* the last logical block number
+                                                                                  * we have dealt with
+                                                                                  */
+             out:
+             12> return @bio.
+             confused:
+             13> if @bio is not NULL,set @bio to mpage_bio_submit() for READ operation,the result must be NULL.
+                 if no PG_uptodate has set,invoke block_read_full_page() on @page,the method is @get_block.
+                 else,unlock @page.
+                 /* block_read_full_page() -
+                  *   we have known that,the while-cycle attempt to get blocks they covered all required
+                  *   pages.but if we found hole,then must each get block in a fixed size of the page.
+                  *   that is what block_read_full_page() does.
+                  *   it invoke @get_block with a result buffer head has @b_size "2^@i_blkbits".
+                  *   the procedure would stopped when the traversing to buffer head list has accomplished.
+                  *   finally,for each no BH_Uptodate buffer,invoke submit_bh() on it to submit BIO.
+                  *   ! @get_block only be called if current block number is less than the last block number,
+                  *     and current block number would be updated at the end of this iteration.
+                  */
+
+                 goto "out".
+
+            !! [ buffer0 | buffer1 | ... | buffer(MAX_BUF_PER_PAGE - 1) ] => a page in page cache
+                 |
+                 +--> block number of buffer0 := page->index << (PAGE_CACHE_SIZE - i_blkbits)
+                      block number of buffer1 := block number of buffer0 + 1
+                      ...
+               once do_mpage_readpage(),will create MAX_BUF_PER_PAGE buffers on the page,and get block
+               for each of them.
+               thus,block-in-file must be multiple of MAX_BUF_PER_PAGE.
+
+               [ block0 | block1 | <hole> ] the last page of file on disk
+               last block number in file is -
+                 number of block0 + MAX_BUF_PER_PAGE
+
+
+    
+
 
