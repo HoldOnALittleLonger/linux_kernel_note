@@ -33312,15 +33312,13 @@ Chapter 16 : Accessing Files
                           then
                                   /* in most case,this branch would be processed,so @get_block() will be called */
                                   set @map_bh->b_size to (last-block - block-in-file) << block-bits
-                                  /* we need many blocks to fill the buffer,and the size of buffer will passed to
-                                   * filesystem to let it get appropriate number of blocks from disk.
-                                   * the logical block number of each block get through filesystem API will be
-                                   * stored in @blocks.
-                                   * at there,we attempt to get blocks they covered full buffer,if failed,block-in-file
-                                   * will be updated later,thus we can skip the failed block to get the remain blocks
-                                   * they covered the remain buffer,size is "(last-block - block-in-file) << block-bits".
-                                   */
 
+                                  /**
+                                   * we attempt to get a chunk of blocks they covered all pages at once.
+                                   * if succeed,@get_block() will set BH_Mapped,we will split them to individual
+                                   * blocks later.
+                                   */
+                
                                   invoke @get_block() with arguments -
                                     inode, block-in-file, @map_bh, 0
                                   if @get_block() returne TRUE,goto label "confused".
@@ -33329,7 +33327,7 @@ Chapter 16 : Accessing Files
                                    * parameters is -
                                    *   @inode:      inode
                                    *   @iblock:     the starting logical block number
-                                   *   @max_blocks: defined the range blocks [@iblock, @iblock + @max_blocks)
+                                   *   @max_blocks: defined the range block numbers [@iblock, @iblock + @max_blocks)
                                    *   @map_result: result of buffer mapping
                                    *   @create:     if it is _zero_ OR error code is -EIO,do not allocate new block
                                    */
@@ -33391,16 +33389,20 @@ Chapter 16 : Accessing Files
 
                           if @page_block is not _zero_ AND @blocks[@page_block - 1] != @map_bh->@b_blocknr - 1
                           then,goto "confused" /* contiguous blocks ? */
+                                               /* blocks are not adjacent on disk */
 
                           set @nblocks to @map_bh->b_size >> block-bits
                           
                           /* similar to the  cycle in step 5>,we make use @blocks to record the logical block numbers
-                           * we are working on
+                           * of the blocks has size "PAGE_CACHE_SIZE / MAX_BUF_PER_PAGE".
                            */
                           enter a for-cycle,iterator @i started from _zero_,increase before next iteration {
                                   if @i == @nblocks
                                           clear buffer mapped on @map_bh,break
-                                  else if @page_block == blocks-per-page,break
+                                          /* we must clear BH_Mapped,because the buffer @b_size spanned all pages. */
+                                  else if @page_block == blocks-per-page,break /* reached maximum blocks in a page */
+
+                                  /* record each block number */
                                   set @blocks[@page_block] to @map_bh->b_blocknr + @i
                                   ++@page_block
                                   ++block-in-file
@@ -33412,6 +33414,15 @@ Chapter 16 : Accessing Files
                  then
                          zero_user_segment() to fill the hole by _zero_,the range is -
                            [kaddr of @page + "@first_hole << block-bits", PAGE_CACHE_SIZE - 1]
+                         /*
+                          *                                          |<-- file hole -->|
+                          * for case > [ block | block | ... | block | <hole> | <hole> ] => a page
+                          *                                          |<-- fill to 0 -->|
+                          * BH_Mapped is set by filesystem interface,and the chunk of blocks has been
+                          * splited to several individual blocks.
+                          * while-cycle is stopped at the beginning of next iteration -- @page_block == blocks-per-page
+                          */
+
                          next,check if @first_hole is 0,then set PG_uptodate,unlock @page,goto "out".
                  else if @fully_mapped is TRUE
                  then
@@ -33466,8 +33477,8 @@ Chapter 16 : Accessing Files
                       block number of buffer1 := block number of buffer0 + 1
                       ...
                once do_mpage_readpage(),will create MAX_BUF_PER_PAGE buffers on the page,and get block
-               for each of them.
-               thus,block-in-file must be multiple of MAX_BUF_PER_PAGE.
+               for each of them.if any holes are detected at the tail,fill them with _zero_.
+               thus,block-in-file must be a multiple of MAX_BUF_PER_PAGE.
 
                [ block0 | block1 | <hole> ] the last page of file on disk
                last block number in file is -
