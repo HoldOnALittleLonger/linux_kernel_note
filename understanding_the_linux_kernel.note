@@ -30845,13 +30845,14 @@ Chapter 15 : The Page Cache
           /**
            * __bforget - forget a buffer
            *             clear buffer dirty
-           *             delete and int @b_assoc_buffers if @b_assoc_map is not NULL,and set
+           *             delete and init @b_assoc_buffers if @b_assoc_map is not NULL,and set
            *             @b_assoc_map to NULL
            *             __brelse() @bh
            * # EXPORT_SYMBOL
            * # by marks the buffer as clean to forcing the kernel to forget any change
            *   in the buffer that has yet to be written to disk
-           * # wrapper : bforger() in <linux/buffer_head.h>
+           * # wrapper : bforget() in <linux/buffer_head.h>
+           * # this routine invoke __brelse() on @bh at the end
            */
           void __bforget(struct buffer_head *bh);
             
@@ -33368,6 +33369,9 @@ Chapter 16 : Accessing Files
                                    *         else,invoke create_empty_buffers() to create buffers on @page,the block
                                    *         size is 1 << @inode->i_blkbits,state is 0.
                                    *         # a proper number of buffers will be created to cover the whole page.
+                                   *           and,if the page is PG_uptodate or PG_dirty,then it will traverse
+                                   *           buffers again;for each buffer,if page is dirty,set BH_Dirty for it,
+                                   *           if page is uptodate,set BH_Uptodate for it
                                    * if @page have buffers -- PG_private is set
                                    * then
                                    *         traverse the buffer heads in @page
@@ -33454,7 +33458,7 @@ Chapter 16 : Accessing Files
                                                                                   */
              out:
              12> return @bio.
-             confused:
+             confused: /* confused cases */
              13> if @bio is not NULL,set @bio to mpage_bio_submit() for READ operation,the result must be NULL.
                  if no PG_uptodate has set,invoke block_read_full_page() on @page,the method is @get_block.
                  else,unlock @page.
@@ -33466,7 +33470,7 @@ Chapter 16 : Accessing Files
                   *   the procedure would stopped when the traversing to buffer head list has accomplished.
                   *   finally,for each no BH_Uptodate buffer,invoke submit_bh() on it to submit BIO.
                   *   ! @get_block only be called if current block number is less than the last block number,
-                  *     and current block number would be updated at the end of this iteration.
+                  *     and current block number would be updated everytime at the end of iteration.
                   */
 
                  goto "out".
@@ -33483,6 +33487,128 @@ Chapter 16 : Accessing Files
                [ block0 | block1 | <hole> ] the last page of file on disk
                last block number in file is -
                  number of block0 + MAX_BUF_PER_PAGE
+
+        The "readpage" method for block device files :
+          the default address space operations for a block device is @def_blk_aops,which is defined in
+          <fs/block_dev.c>.
+
+          <fs/block_dev.c>
+            static const struct address_space_operations def_blk_aops = {
+                    .readpage = blkdev_readpage,
+                    .writepate = blkdev_writepage,
+                    .sync_page = block_sync_page,
+                    .write_begin = blkdev_write_begin,
+                    .write_end = blkdev_write_end,
+                    .writepages = generic_writepages,
+                    .releasepage = blkdev_releasepage,
+                    .direct_IO = blkdev_direct_IO,
+            };
+
+            /**
+             * blkdev_readpage - readpage method for block device files on page cache
+             * @file:            file descriptor
+             * @page:            the page have to be filled
+             * return:           always return 0
+             * # this routine actually invoke block_read_full_page() with @get_block := blkbdev_get_block()
+             */
+            static int blkdev_readpage(struct file *file, struct page *page);
+
+          <fs/buffer.c>
+            /**
+             * block_read_full_page - generic readpage function for block devices that have the
+             *                        normal get_block functionality
+             * @page:                 the page have to be filled
+             * @get_block:            get_block method
+             * return:                always 0
+             * # EXPORT_SYMBOL
+             * # read the page asynchronously
+             *   the unlock_buffer() and set/clear_buffer_uptodate() functions propagate buffer state
+             *   into the page struct once I/O has completed
+             */
+            int block_read_full_page(struct page *page, get_block_t *get_block);
+
+            description for block_read_full_page() :
+              the function do_mpage_readpage() attempts to get a chunk of blocks,if it failed on that,
+              then this routine would be called.
+              
+              first,do BUG checking,the page must be PG_locked,otherwise,it is a BUG.
+              get block-size through "1 << @page->mapping->host->i_blkbits".
+              if @page has no buffers,then invoke create_empty_buffers() on it,size is the block-size,
+              state is 0.
+              let local variable @head points to @page->private,the head buffer of this page.
+              calculate starting block number,it is same as block-in-file in do_mpage_readpage(),
+              the last-block is also same as last-block in do_mpage_readpage().
+              make use of a do-while cycle,it would stopped when we have traversed each buffer of @page.
+              do-while {
+                      if current buffer has set BH_Uptodate,we will skip it and get into next iteration.
+                                                /* contains valid data */    
+
+                      check BH_Mapped for current buffer
+                      F =>
+                              set local variable @fully_mapped to 0,it plays the same role in do_mpage_readpage().
+                              print warning if @b_size of current buffer is not equal to block-size.
+                              /* the total number of buffers of the page might different from us expected */
+
+                              invoke @get_block(),at there,this method would not get a chunk of blocks,the size
+                              of block is block-size,which is set in buffer head.
+                              set PG_error if @get_block() returned an error code.
+                              
+                              because we have known filesystem-dependent @get_block migth set BH_Mapped for the buffer,
+                              if the buffer stay unmapped,must use _zero_ to fill the hole,and set BH_Uptodate for it
+                              if and only if @get_block() did not return an error code;then continue.
+
+                              if the buffer been mapped,then check if @get_block have updated it synchronously,if it
+                              is the case,continue to next iteration.
+
+                      BH_Mapped is set but has not uptodate,so we record it in @arr,the local array of buffer_head
+                      objects,size is MAX_BUF_PER_PAGE. /* ++array_index */
+              } (++index, ++current-block-number)
+                /* @index is used to calculate page offset for zero filling */
+
+              if the page is fully mapped disk image,then set PG_mappedtodisk for it. /* @fully_mapped is TRUE */
+              if @array_index is _zero_,that means all buffers are uptodate.we can set PG_uptodate for @page,if no
+              PG_error /* maybe @get_block() returned error code */;then unlock @page,return 0.
+              /* @array_index is not _zero_,that means there are some buffers has not updated */
+
+                                                 /* BH_Lock,for async READ */
+              for each buffer it has not updated,lock it,and invoke mark_buffer_async_read() on it.
+                                                                    /* set @b_end_io to end_buffer_async_read()
+                                                                     * set BH_Async_Read
+                                                                     */
+
+                                                                   /* underlying blockdev brought it uptodate */
+              for each buffer it has not updated,check BH_Uptodate,if it has set,then invoke end_buffer_async_read() on it
+              with @uptodate := 1;otherwise,invoke submit_bh() to submit a READ operation for it.
+
+              finally,return 0.
+
+              /**
+               * statid void end_buffer_async_read(@bh, @uptodate); # defined in <fs/buffer.c>
+               *   it is a BUG if @bh has not set BH_Async_Read.
+               *   if @uptodate is TRUE,set BH_Uptodate for @bh;otherwise,clear BH_Uptodate,if no BH_Quiet has set,
+               *   invoke buffer_io_error() to printk kernel message.set PG_error.
+               *   store local interrupt state,disable local interrupt.
+               *   wait on BH_Uptodate_Lock(bit spinlock) of the first buffer of the page. # get from @bh->b_page
+               *   after acquired spinlock,clear "BH_Async_Read" for @bh,unlock @bh.
+               *                                 # because we are end buffer async read on @bh
+               *   next,use a do-while cycle to traverse each buffer starting from @bh.(doubly linked list)
+               *           # there stay some not updated buffers,so we can not set PG_uptodate for the page.
+               *           if current buffer has not set BH_Uptodate,set local variable @page_uptodate to _zero_.
+               *                                                                        # default value is 1
+               *           # except @bh,if there at least one buffer is in async READ -- still busy
+               *           if BH_Async_Read is set for current buffer,then do BUG checking,it is a BUG if no BH_Lock,
+               *           and goto label "still_busy" -- the I/O is in progressing.
+               *   release spinlock,restore local interrupt.
+               *   if @page_uptodate is TRUE AND no PG_error,set PG_uptodate for the page.
+               *   unlock the page,return to caller.
+               *
+               *   "still_busy" :
+               *     the asynchronous READ operations in progess.just release the spinlock,restore local interrupt,
+               *     return to caller.
+               *     # do not check page errors AND page uptodate,of course,would not set PG_uptodate.
+               */
+
+
 
 
     
