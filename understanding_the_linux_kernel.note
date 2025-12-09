@@ -33513,6 +33513,47 @@ Chapter 16 : Accessing Files
              */
             static int blkdev_readpage(struct file *file, struct page *page);
 
+            /**
+             * blkdev_get_block - common get_block method for block device files
+             * @inode:            device file inode
+             * @iblock:           block number
+             * @bh:               buffer used to mapping the block
+             * @create:           used to indicate whether allow to allocate new block,
+             *                    for this function,it usually is _zero_
+             * return:            0 OR -EIO
+             */
+            static int blkdev_get_block(struct inode *inode, sector_t iblock,
+                                        struct buffer_head *bh, int create);
+            
+            brief description for blkdev_get_block() :
+              block device file play the role that handle communication between user and block device driver.
+              thus,it has no disk image,hence no block and sector.
+              nevertheless,the function stay works on blocks.
+              first,invoke max_block() to get the maximum number of blocks of the device,pass it the argument
+              I_BDEV(@inode). /* bdev_inode->bdev */
+              /**
+               * max_block() is defined in the same file.it requires a block device descriptor,return the value
+               * is type of sector_t.
+               * the value would be returned has two cases :
+               *   1> i_size_read() on @bdev->bd_inode returned _zero_,the return value would be ~((sector_t)0)
+               *   2> i_size_read() on @bdev->bd_inode returned a non _zero_ value,retrieve block-size in the
+               *      block device through block_size(),and calculate the block-size-bits through blksize_bits(),
+               *      finally,return the value "size-of-inode >> block-size-bits"
+               */
+              if @iblock is greater than or equal to the max-block,just return 0 to caller as well.
+                                                                   /* if @create is TRUE,return -EIO.
+                                                                    * we might need to create a new block
+                                                                    * for WRITE operation.
+                                                                    */
+              otherwise,set @bh->b_bdev to the block device descriptor that is got through I_BDEV(inode),
+              set @bh->b_blocknr to @iblock,set BH_Mapped for @bh,return _zero_ to caller.
+              /**
+               * no BH_Uptodate is set,block_read_full_page() have to update buffers by itself.
+               * if @iblock exceeded max-block,kernel can still try to dispatch a read request for
+               * the last data of a block device,and the corresponding buffer page is only partially mapped.
+               * # this is why return 0 to caller for READ operation even exceeded max-block.
+               */
+
           <fs/buffer.c>
             /**
              * block_read_full_page - generic readpage function for block devices that have the
@@ -33558,7 +33599,7 @@ Chapter 16 : Accessing Files
                               if and only if @get_block() did not return an error code;then continue.
 
                               if the buffer been mapped,then check if @get_block have updated it synchronously,if it
-                              is the case,continue to next iteration.
+                              is the case,continue to next iteration.                 /* BH_Uptodate */
 
                       BH_Mapped is set but has not uptodate,so we record it in @arr,the local array of buffer_head
                       objects,size is MAX_BUF_PER_PAGE. /* ++array_index */
@@ -33566,13 +33607,14 @@ Chapter 16 : Accessing Files
                 /* @index is used to calculate page offset for zero filling */
 
               if the page is fully mapped disk image,then set PG_mappedtodisk for it. /* @fully_mapped is TRUE */
+                                                                                      /* no hole */
               if @array_index is _zero_,that means all buffers are uptodate.we can set PG_uptodate for @page,if no
               PG_error /* maybe @get_block() returned error code */;then unlock @page,return 0.
               /* @array_index is not _zero_,that means there are some buffers has not updated */
 
                                                  /* BH_Lock,for async READ */
               for each buffer it has not updated,lock it,and invoke mark_buffer_async_read() on it.
-                                                                    /* set @b_end_io to end_buffer_async_read()
+                                                 /* might sleep */  /* set @b_end_io to end_buffer_async_read()
                                                                      * set BH_Async_Read
                                                                      */
 
@@ -33586,7 +33628,7 @@ Chapter 16 : Accessing Files
                * statid void end_buffer_async_read(@bh, @uptodate); # defined in <fs/buffer.c>
                *   it is a BUG if @bh has not set BH_Async_Read.
                *   if @uptodate is TRUE,set BH_Uptodate for @bh;otherwise,clear BH_Uptodate,if no BH_Quiet has set,
-               *   invoke buffer_io_error() to printk kernel message.set PG_error.
+               *   invoke buffer_io_error() to printk kernel message.set PG_error because @uptodate is FALSE.
                *   store local interrupt state,disable local interrupt.
                *   wait on BH_Uptodate_Lock(bit spinlock) of the first buffer of the page. # get from @bh->b_page
                *   after acquired spinlock,clear "BH_Async_Read" for @bh,unlock @bh.
