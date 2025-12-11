@@ -16708,7 +16708,7 @@ Chapter 9 : Process Address Space
               not be contained in a process address space,this is worst case,so have to return -ENOMEM.
               there are two methods may be invoked by this wrapper :
                 1> @file->f_op->get_unmmaped_area
-                   /* if all components of the calling chain are TRUE */
+                   /* if all components of the member-accessing chain are TRUE */
                 2> @current->mm->get_unmapped_area
                    /* this is the default behavior */
               @file->f_op->get_unmapped_area is called only for file memory mapping.
@@ -17032,8 +17032,8 @@ Chapter 9 : Process Address Space
             next,check mlock,if @vm_flags enabled VM_LOCKED,then compare rlimit(RLIMIT_MEMLOCK) with the
             new locked memory pages,if exceeded limit and no capable to CAP_IPC_LOCK,then returns -EAGAIN.
 
-            if we are playing file mapping,then retrieve inode of the file,and process MAP_SHARED file mapping
-            or MAP_PRIVATE file mapping.
+            if we are in file mapping that @file is not NULL,then retrieve inode of the file,and process
+            MAP_SHARED file mapping or MAP_PRIVATE file mapping.
               file mapping MAP_SHARED {
                       return -EACCESS if PROT_WRITE is TRUE but @file deny write
                       return -EACCESS if inode IS_APPEND() but @file permit write
@@ -17049,7 +17049,7 @@ Chapter 9 : Process Address Space
                       return -ENODEV if @file operations undefined(mmap() undefined)
               }
 
-            if we are not playing file mapping,then everything is simple.
+            if we are not in file mapping,then everything is simple.
               non-file-mapping MAP_SHARED {
                       ignore @pgoff
                       /* @pgoff is only for file mapping */
@@ -21701,11 +21701,17 @@ Chapter 12 : The Virtual Filesystem
          /**
           * file_ra_state - track a single file's readahead state
           * @start:         where readahead started
-          * @size:          size of readahead pages
+          *                 # index of first page in the current window
+          * @size:          size of readahead pages in the current window
           * @async_size:    size of asynchronous readahead pages
           * @ra_pages:      maximum readahead window
           * @mmap_miss:     cache miss stat for mmap accesses
+          *                 # Read-Ahead miss counter,used for memory mapped files
           * @prev_pos:      cache last read() position
+          *                 # index of the last page requested by the process
+          * # this structure usually is initialized by routine file_ra_state_init(),
+          *   the routine is defined in <mm/readahead.c> and invoked when opening the file,
+          *   it is called by __dentry_open()
           */
          struct file_ra_state {
                  pgoff_t start;
@@ -23702,8 +23708,12 @@ Chapter 12 : The Virtual Filesystem
              /* the returned pointer is saved in @flip the local variable */
              do_last() use @nd.last_type to update its @path member,if the file is not exist,then create
              it when O_CREAT is speficied.finally,it convert the namei data to file object and returns
-             the pointer to caller,that is the do_filp_open().the converting will done by nameidata_to_filp(),
+             the pointer to caller,that is the do_filp_open().the converting will be done by nameidata_to_filp(),
              because we have set @nd.intent.open.file to the empty @filp,so @filp will represents the opened file.
+             /* do_last() may directly invoke nameidata_to_filp() when need to create file;otherwise,the function
+              * should be called by finish_open(),do_last() pass to it the nameidata,open flag,and access mode.
+              */
+
              if @filp is NULL,that means the last component may be a symlink,so we have to follow the link
              and call do_last() again.
              at the end of this function,path_put() @nd.root if necessary,and returns @filp to caller.
@@ -33650,9 +33660,88 @@ Chapter 16 : Accessing Files
                *     # do not check page errors AND page uptodate,of course,would not set PG_uptodate.
                */
 
+      Read-Ahead of Files :
+        usually,regular files are stored on disk in large groups of adjacent sectors,so that they can be retrieved
+        quickly with few moves of the disk heads.
+        Read-Ahead consists of reading several adjacent pages of data of a regular file or block device file before
+        they are actually requested.
+        Read-Ahead can enchances disk performance,improve system responsiveness;but Read-Ahead is useless when a process
+        random accesses to file.
+        kernel reduces or stops Read-Ahead when it determines that the most recently issued I/O access is not sequential
+        to the previous one.
 
+        reasons for sophisticated algorithm needed by Read-Ahead :
+          1> because data is read page by page,the read-ahead algorithm does not have to consider the offsets
+             inside the page,but only the positions of the accessed pages inside the file.
+          2> read-ahead may be gradually increased as long as the process keeps accessing the file sequentially.
+          3> read-ahead must be scaled down or even disabled when the current access is not sequential with respect
+             to the previous one(random access).
+          4> read-ahead should be stopped when a process keeps accessing the same pages over and over again,or when
+             almost all pages of the file are already in the page cache.
+          5> the low-level I/O device driver should be activated at the proper time,so that the future pages will
+             have been transferred when the process needs them.
 
+        ! kernel considers a file access as sequential with respect to the previous file access if the first page requested
+          is the page following the last page requested in the previous access.
 
-    
+        current window :
+          consits of pages requested by the process or read in advance by the kernel and included in the page cache.
+          /* a page in current window is not necessarily up-to-date,because its I/O data transfer could be still in progress */
+          contains both the last pages sequentially accessed by the process and possibly some of the pages that have been read
+          in advance by the kernel but that have not yet been requested by the process.
 
+        ahead window :
+          consists of pages following the ones in the current window that are being currently being read in advance by the kernel.
+          /* kernel assumes these pages would be requested by the process.
+           * when the kernel recognizes a sequential access and the initial page belongs to the current window,it attempts to
+           * setup(creates a new ahead window,triggers READ operations) ahead window if the window has not been set up
+           */
+          when the process needs the pages included in ahead window,the ahead window becomes the new current window.
+          /* similar to GPU Double Buffering */
 
+        ! Read-Ahead mechanism make use of these two windows to implement the purpose.
+        ! kernel use the structure named "file_ra_state" to keep track a single file's readahead state,
+          and the Read-Ahead information about the file is stored in its file object,member name is @f_ra.
+
+        The file_ra_state_init() routine :
+          <mm/readahead.c>
+            /**
+             * file_ra_state_init - initialize file's readahead state
+             * @ra:                 pointer to file_ra_state object of the file
+             * @mapping:            page cache
+             * # EXPORT_SYMBOL
+             * # this routine set @ra->ra_pages to @mapping->backing_dev_info->ra_pages,and
+             *   set @ra->prev_pos to -1;the other fields should been initialized to zero by
+             *   kmem_zalloc() in get_empty_filp()
+             * # __dentry_open() call to this routine by pass it the file's @f_ra and the file's
+             *   @f_mapping->host->i_mapping
+             *   (for device files,the mapping should be the mapping of their master inode)
+             *   ! if the inode associated with a regular file,the backing_dev_info usually is
+             *     @default_backing_dev_info;if the super block provide bdev,then the client inode
+             *     make use the backing device info of the bdev(these are setup in init_inode_always())
+             */
+            void file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping);
+
+            ! POSIX.1 interface posix_fadvise() is able to give a file data advise to kernel.
+              the command POSIX_FADV_NORMAL is used to set maximum read-ahead to default size(usually 32),
+              command POSIX_FADV_SEQUENTAL is used to set maximum read-ahead size to two times of the default size,
+              command POSIX_FADV_RANDOM is used to disable read-ahead -- set maximum read-ahead size to 0.
+
+          !! about file_ra_state :
+               STRUCTURE file_ra_state IN LINUX 2.6.34.1 HAS NO MEMBER @flags,THUS NO MACRO DEFINITIONS
+               RA_FLAG_MISS AND RA_FLAG_INCACHE.
+               RA_FLAG_MISS : SET WHEN A PAGE THAT HAS BEEN READ IN ADVANCE IS NOT FOUND IN THE PAGE CACHE
+                              (BECAUSE KERNEL MEMORY FREE)
+                              THE SIZE OF THE NEXT AHEAD WINDOW TO BE CREATED IS SOMEWHAT REDUCED
+               RA_FLAG_INCACHE : SET WHEN THE KERNEL DETERMINES THAT THE LAST 256 PAGES REQUESTED BY THE PROCESS
+                                 HAVE ALL BEEN FOUND IN THE PAGE CACHE
+                                 READ-AHEAD IS TURNED OFF BECAUSE THE KERNEL ASSUMES THAT ALL THE PAGES REQUIRED
+                                 BY THE PROCESS ARE ALREADY IN THE CACHE
+
+        The time Read-Ahead algorithm is execute :
+          1> when the kernel handles a User Mode request to read pages of file data.
+             /* page_cache_sync_readahead() and page_cache_async_readahead() in do_generic_file_read() */
+          2> when the kernel allocates a page for a file memory mapping.
+          3> when a User Mode process executes posix_fadvise() system call with the POSIX_FADV_NOREUSE or
+             POSIX_FADV_WILLNEED commands.
+          4> when a User Mode process executes the madvise() system call with the MADV_WILLNEED command.
