@@ -33745,3 +33745,121 @@ Chapter 16 : Accessing Files
           3> when a User Mode process executes posix_fadvise() system call with the POSIX_FADV_NOREUSE or
              POSIX_FADV_WILLNEED commands.
           4> when a User Mode process executes the madvise() system call with the MADV_WILLNEED command.
+
+        The Read-Ahead routines :
+          !! LINUX 2.6.34.1 NO FUNCTION NAMED page_cache_readahead() IS EXIST.
+
+          <mm/readahead.c>
+            /**
+             * page_cache_sync_readahead - generic file readahead in synchronization
+             * @mapping:                   page cache
+             * @ra:                        file readahead state
+             * @filp:                      file object
+             * @offset:                    start offset into @mapping,in pagecache page-sized units
+             * @req_size:                  total size of the read which the caller is performing in
+             *                             pagecache pages
+             * # EXPORT_SYMBOL_GPL
+             * # this routine just perform some checkings and then invoke helper functions
+             *   if NULL @ra->ra_pages - ReadAhead disabled,just return to caller
+             *   if @filp is TRUE AND FMODE_RANDOM is set,invoke force_page_cache_readahead()
+             *                        # not sequental
+             *   else,invoke ondemand_readahead()
+             */
+            void page_cache_sync_readahead(struct address_space *mapping, struct file_ra_state *ra,
+                                           struct file *filp, pgoff_t offset, unsigned long req_size);
+
+            /**
+             * force_page_cache_readahead - readahead routine for non-sequental(random access) READ requests
+             * @mapping:                    page cache
+             * @filp:                       file object
+             * @offset:                     page offset in page cache
+             * @nr_to_read:                 number of pages have to read
+             * return:                      number of readahead pages OR error code
+             * # this routine chunk the readahead into 2MB units
+             */
+            int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
+                                           pgoff_t offset, unsigned long nr_to_read);
+
+            brief description for force_page_cache_readahead() :
+              first test @a_ops->readpage AND @a_ops->readpages,if these routine are not implemented,
+              return -EINVAL to caller. /* we need a way to read page */
+              adjust @nr_to_read,this is done by call to max_sane_readahead().the function get the
+              minimum number between
+                [@nr_to_read, (node_page_state(numa_node_id(), NR_INACTIVE_FILE) +
+                               node_page_state(numa_node_id(), NR_FREE_PAGES)) / 2]
+              next,make use of a while-cycle,it would stopped when @nr_to_read is FALSE {
+                      once iteration,we do page cache readahead with size is 2MB,if @nr_to_read is
+                      less than 2MB,then the size is @nr_to_read * PAGE_CACHE_SIZE.
+            
+                      the routine handle readahead is named __do_page_cache_readahead(),we pass it
+                      @mapping,@filp,@offset,this_chunk == 2MB / PAGE_CACHE_SIZE or @nr_to_read,0.
+
+                      if error happened,break cycle;otherwise,update @offset += this_chunk,and
+                      @nr_to_read -= this_chunk,then get into next iteration.
+              }
+              finally,return the number of readahead pages.
+
+            /**
+             * __do_page_cache_readahead - actually read a chunk of disk
+             * @mapping:                   page cache
+             * @filp:                      file object
+             * @offset:                    page offset
+             * @nr_to_read:                number of pages to readahead
+             * @lookahead_size:            lookahead size
+             * return:                     number of pages requested,OR the maximum amount of I/O allowed
+             * # this routine allocates all the page first in the page cache,then submit them all
+             *   for I/O,this avoid the very bad behaviour which would occur if page allocations are
+             *   causing VM writeback(prevent intermingle)
+             */
+            static int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+                                                 pgoff_t offset, unsigned long nr_to_read,
+                                                 unsigned long lookahead_size);
+
+            brief description for __do_page_cache_readahead() :
+              get @isize from i_size_read() on the inode @mapping->host,for zero size inode,return 0 to caller.
+              get end index of page of the inode (@isize - 1) >> PAGE_CACHE_SHIFT.
+              make use of a for-cycle to allocates all pages in page cache,the condition is
+              page index < @nr_to_read.
+              for-cycle {
+                      page index started from _zero_,by add @offset,we can get the real page index.
+                      if current page index is greater than end index,break cycle.(exceeded)
+                      
+                      invoke rcu_read_lock() for radix tree lookup,release it after lookup finished.
+                      try to find current page in page cache through radix_tree_lookup(),if it been in
+                      page cache,we must skip it.
+
+                      current page is not in page cache,invoke page_cache_alloc_cold() to allocate it,
+                      break cycle if failed on allocation. /* just alloc,do not add into page cache */
+                      set the new page's index,link it into local list_head @page_pool through its @lru member.
+                
+                      check,if current page index is equal to @nr_to_read - @lookahead_size,then set PG_readahead
+                      for it.
+
+                      update pages number recorder.
+              }
+              now,allocation have accomplished,if pages number recorder is not _zero_,then we must submit the pages
+              newly allocated for I/O.so,invoke read_pages() on @page_pool,number is the pages number recorder.
+              ! this is a BUG,if @page_pool is not empty after read_pages() finished.
+
+              finally,return the number of pages.(pages number recorder)
+
+              /**
+               * read_pages() is defined in the same file.
+               *
+               * if @mapping->a_ops->readpages have implemented,then invoke it with pages in the list,and empty the list.
+               * # empty the list by invoke put_pages_list(),this function is defined in <mm/swap.c>,for each page in the
+               *   list,remove it from list,invoke page_cache_release() for it.
+               * return the value returned by readpages().
+               *
+               * if no such method have implemented,then we must traverse each page in the list,retrieve it from the list,
+               * invoke add_to_page_cache_lru() to add it into page cache,call to readpage() method of the @a_ops if and
+               * only if add_to_page_cache_lru() succeed.page_cache_release() current page and handle the next page.
+               * finally,return 0 to caller.
+               * # the page would be removed from the list after we have retrieved it.but if add to page cache failed,
+               *   the page's ref count must be 1(because it is not in page cache),thus page_cache_release() will destroy
+               *   it.                          !! add_to_page_cache_locked() invoke page_cache_get() -- get_page() on it.
+               * # pages traversing is started from the tail.
+               */
+
+
+
