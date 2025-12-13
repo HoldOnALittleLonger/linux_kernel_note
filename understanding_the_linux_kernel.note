@@ -33861,5 +33861,167 @@ Chapter 16 : Accessing Files
                * # pages traversing is started from the tail.
                */
 
+            /**
+             * ondemand_readahead - readahead ondemand
+             * @mapping:            page cache
+             * @ra:                 readahead state
+             * @filp:               file object
+             * @hit_readahead_marker:
+             *                      whether merge windows
+             * @offset:             page index offset into page cache
+             * @req_size:           number of request pages
+             * return:              number of requested pages,OR maximum amount of I/O allowed
+             * # ondemand - do not wait until the application consumed all readahead pages and stalled on
+             *              the missing page at readahead index;instead,submit an asynchronous readahead
+             *              I/O as soon as there are only @async_size pages left in the readahead window
+             */
+            static unsigned long ondemand_readahead(struct address_space *mapping, struct file_ra_state *ra,
+                                                    struct file *filp, bool hit_readahead_marker, pgoff_t offset,
+                                                    unsigned long req_size);
+
+            description for ondemand_readahead() :
+              first,get the maximum readahead size through max_sane_readahead() on @ra->ra_pages.
+              if @offset is _zero_,that means we are at the start of file,then goto label "initial_readahead".
+              otherwise,check @offset whether at the PG_readahead marked page,then ramp up size,and push forward
+              the readahead window.
+              that is,@offset == @ra->start + @ra->size - @ra->async_size OR @offset == @ra->start + @ra->size
+              /**
+               *                  |<------ async_size -----|
+               * |----------------- size ----------------->|
+               * |================#========================|
+               * ^start           ^PG_readahead page
+               */
+              /**
+               * get_next_ra_size(@ra, @max) -
+               *   get the previous window size,ramp it up,and return it as the new window size.
+               *   # never exceed @max
+               *   # current size in @ra->size
+               */
+
+              if it is the PG_readahead marked page,then
+                      let @ra->start += @ra->size /* go to the end */
+                      set @ra->size to get_next_ra_size(@ra, maximum ra size)
+                      set @ra->async_size to @ra->size
+
+                                                   |<-------------- async size ------------|
+                      |--------- old size -------->|---------------- size ---------------->|==> next ra size
+                      |==========#=================|=======================================|
+                                 ^PG_readahead     ^start
+
+                      goto label "readit"
+
+              in another case,we are neither at PG_readahead marked page,nor the initial case,then
+                      check @hit_readahead_marker
+                      if it is TRUE {
+                              lock RCU read
+                              invoke radix_tree_next_hole() from @offset + 1 to maximum ra pages(max scanning),
+                              this routine will attempt to find the next hole which is no entry present.
+                              its return value is page offset in page cache.
+                              release RCU read                 /*  [@offset + 1, @offset + 1 + max scanning) */
+
+                              if radix_tree_next_hole() returned _zero_,that means wrap-around happened,
+                              so we have to return 0,because no hole is found.
+                              if the returned index ihole - @offset is greater than maximum ra size,
+                              we also have to return 0,because it is outside of the set specified.
+
+                              a valid index is returned
+                                      set @ra->start to the ihole
+                                      let @ra->size = ihole - @offset
+                                      let @ra->size += @req_size
+                                      set @ra->size to get_next_ra_size(@ra, maximum ra size)
+                                      set @ra->async_size to @ra->size
+                                      goto label "readit"
+                                                                
+                                                                         |<---------- async size ------|
+                                                                         |------------> size --------->|
+                                                                         |ih - off | @req_size|........|
+                                      |=====#==============@============= =============================|
+                                            ^PG_readahead  ^@offset      ^next hole(start)
+                                                                          # ihole
+                      }
+
+                      @hit_readahead_marker is FALSE
+                              check if @req_size is greater than max ra size,if it is the case,that means
+                              oversize read,goto label "initial_readahead"
+                            
+                                |------------ size -------------->|
+                                |============#====================|.......@......
+                                ^start       ^PG_readahead                ^@offset
+
+                              if @offset - last read operation index <= 1UL -- underflow
+                              @offset < last read operation index,that means sequential cache miss,goto
+                              "initial_readahead".
+                              /* @offset in range (..., last read index + 1] */
+                                        
+                                |======@=========P@==============#=====================================|
+                                ^start ^@offset   ^@offset       ^PG_readahead
+
+
+                              query the page cache and look for the traces(cached history pages) that a
+                              sequential stream would leave behind,invoke try_context_readahead(),if returned
+                              TRUE,goto label "readit".
+                              /**
+                               * static int try_context_readahead(@mapping, @ra, @offset, @req_size, @max)
+                               * - invoke count_history_pages(),if no history pages,return 0 to caller.
+                               *   if size of history pages is greater than or equal to @offset,let size *= 2.
+                               *   # starts from begining of file
+                               *
+                               *   set @ra->start to @offset
+                               *   set @ra->size to get_init_ra_size(size + @req_size, @max)
+                               *   set @ra->async_size to @ra->size
+                               *   return 1
+                               *
+                               * static pgoff_t count_history_pages(@mapping, @ra, @offset, @max)
+                               * - lock RCU and invoke radix_tree_prev_hole() from @offset - 1 to @max
+                               *   return @offset - 1 - the returned index
+                               *   # may occur undeflow,in this case,we are starting from begining of file
+                               *   ! do traverse to radix_tree_next_hole().
+                               *              |-- history size -->|
+                               *     |======== ===================@       # (@offset - 1 - max scanning, @offset - 1]
+                               *              ^hole               ^offset
+                               * # init ra size : initial window size,round to next power of 2 and square for small size,
+                               *   x4 for medium,and x2 for large for 128k(32 pages) max ra
+                               *   1--8 page = 32k initial, > 8 page = 128k initial
+                               */
+
+                              the last,standalone,small random read,invoke __do_page_cache_readahead() and
+                              return the value what it would returns.
+
+              "initial_readahead":
+                set @ra->start to @offset /* offset is 0,starts from beginning of file */
+                set @ra->size to get_init_ra_size(@req_size, max ra size)
+                set @async_size to @ra->size - @req_size if @ra->size > @req_size,or @ra->size if @ra->size <= @req_size
+                /**
+                 * reset readahead window.
+                 */
+                                            +--> size - @req_size
+                                            |
+                                  |<------- async size ----------|
+                 |--------------- size(initial ra size) -------->|
+                 |================[==============================|
+                 ^start(@offset)  ^async starting position
+
+              "readit":
+                if @offset is equal to @ra->start AND @ra->size is equal to @ra->async_size
+                then
+                        /* makeup async window */
+                        set @ra->async_size to get_next_ra_size(@ra, max ra size)
+                        let @ra->size += @ra->async_size
+
+                                                 +--> next ra size
+                                                 |
+                                        |<------ async size --------|
+                        |------------------> size ----------------->|
+                        |===============[===========================|
+                        ^start(@offset) ^async starting position
+                                         (readahead indicator)
+
+
+                return ra_sumit(@ra, @mapping, @filp)
+
+            ! obviously,by walk-through ondemand_readahead(),we have known that,the page marked PG_readahead
+              is as an indicator to indicates where ahead window is starting,and the member @start of
+              file_ra_state is used to indicate where current window is starting.
+
 
 
