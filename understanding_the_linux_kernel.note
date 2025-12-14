@@ -30102,7 +30102,7 @@ Chapter 15 : The Page Cache
            * # for block device,the default value of method @sync_page is block_sync_page() in <fs/buffer.c>,
            *   which will call to blk_run_backing_dev() defined in <linux/backing-dev.h> if this page is in
            *   page cache(@mapping of the page is not NULL),finally,method unplug_io_fn() is invoked if
-           *   it is exist.
+           *   it is exist.                                                # unplug method of this bdi
            */
 
           /**
@@ -33751,7 +33751,7 @@ Chapter 16 : Accessing Files
 
           <mm/readahead.c>
             /**
-             * page_cache_sync_readahead - generic file readahead in synchronization
+             * page_cache_sync_readahead - generic file readahead for cache pages not in async zone
              * @mapping:                   page cache
              * @ra:                        file readahead state
              * @filp:                      file object
@@ -33829,7 +33829,7 @@ Chapter 16 : Accessing Files
                       page cache,we must skip it.
 
                       current page is not in page cache,invoke page_cache_alloc_cold() to allocate it,
-                      break cycle if failed on allocation. /* just alloc,do not add into page cache */
+                      break cycle if failed on allocation.     /* just alloc,do not add into page cache */
                       set the new page's index,link it into local list_head @page_pool through its @lru member.
                 
                       check,if current page index is equal to @nr_to_read - @lookahead_size,then set PG_readahead
@@ -33886,7 +33886,7 @@ Chapter 16 : Accessing Files
               the readahead window.
               that is,@offset == @ra->start + @ra->size - @ra->async_size OR @offset == @ra->start + @ra->size
               /**
-               *                  |<------ async_size -----|
+               * |-- cur window --|<------ async_size -----|
                * |----------------- size ----------------->|
                * |================#========================|
                * ^start           ^PG_readahead page
@@ -33948,15 +33948,15 @@ Chapter 16 : Accessing Files
                                 |============#====================|.......@......
                                 ^start       ^PG_readahead                ^@offset
 
-                              if @offset - last read operation index <= 1UL -- underflow
+                              if @offset - last read operation index <= 1UL --> @offset <= @ra->prev_pos + 1 
                               @offset < last read operation index,that means sequential cache miss,goto
                               "initial_readahead".
-                              /* @offset in range (..., last read index + 1] */
-                                        
-                                |======@=========P@==============#=====================================|
-                                ^start ^@offset   ^@offset       ^PG_readahead
-
-
+                              /* @offset in range (..., last read index + 1],the minimum offset is 0(beginning) */
+                                                 
+                                |======@=========L@==============#=====================================|
+                                ^start ^@offset   ^next seq pos  ^PG_readahead
+                                                   (@offset)
+                                                 
                               query the page cache and look for the traces(cached history pages) that a
                               sequential stream would leave behind,invoke try_context_readahead(),if returned
                               TRUE,goto label "readit".
@@ -33976,16 +33976,20 @@ Chapter 16 : Accessing Files
                                *   return @offset - 1 - the returned index
                                *   # may occur undeflow,in this case,we are starting from begining of file
                                *   ! do traverse to radix_tree_next_hole().
-                               *              |-- history size -->|
-                               *     |======== ===================@       # (@offset - 1 - max scanning, @offset - 1]
+                               *              |-- history size -->|        # minimum index is _zero_
+                               *     |======== ===================@      # (@offset - 1 - max scanning, @offset - 1]
                                *              ^hole               ^offset
+                               *
                                * # init ra size : initial window size,round to next power of 2 and square for small size,
                                *   x4 for medium,and x2 for large for 128k(32 pages) max ra
                                *   1--8 page = 32k initial, > 8 page = 128k initial
                                */
 
                               the last,standalone,small random read,invoke __do_page_cache_readahead() and
-                              return the value what it would returns.
+                              return the value what it would returns.      /* lookahead size is 0
+                                                                            * offset is @offset
+                                                                            * @nr_to_read is @req_size
+                                                                            */
 
               "initial_readahead":
                 set @ra->start to @offset /* offset is 0,starts from beginning of file */
@@ -34006,7 +34010,7 @@ Chapter 16 : Accessing Files
                 then
                         /* makeup async window */
                         set @ra->async_size to get_next_ra_size(@ra, max ra size)
-                        let @ra->size += @ra->async_size
+                        let @ra->size += @ra->async_size    
 
                                                  +--> next ra size
                                                  |
@@ -34018,10 +34022,55 @@ Chapter 16 : Accessing Files
 
 
                 return ra_sumit(@ra, @mapping, @filp)
+                       /**
+                        * invoke __do_page_cache_readahead() with lookahead size is @ra->async_size.
+                        * # this will mark PG_readahead of the first page in async zone,
+                        *   and in this case the parameter @nr_to_read of that function is @ra->size,
+                        *   the parameter @offset of that function is @ra->start.
+                        * 
+                        *   |<---------- read pages ---------->| => expected case
+                        *   |<---------- allocate pages ------>| => expected case
+                        *   |=============#====================|
+                        *   ^start        ^PG_readahead
+                        */
 
             ! obviously,by walk-through ondemand_readahead(),we have known that,the page marked PG_readahead
               is as an indicator to indicates where ahead window is starting,and the member @start of
               file_ra_state is used to indicate where current window is starting.
+
+            /**
+             * page_cache_async_readahead - file readahead for marked pages
+             * @mapping:                    page cache
+             * @ra:                         file readahead state
+             * @filp:                       file object
+             * @page:                       the page at @offset which has the PG_readahead flag set
+             * @offset:                     start offset into @mapping,in page cache page-sized units
+             * @req_size:                   total size of the read which the caller is performing in
+             *                              page cache pages
+             * # EXPORT_SYMBOL_GPL
+             * # page_cache_async_ondemand() should be called when a page is used which has the
+             *   PG_readahead flag,this is a marker to suggest that the application has used up
+             *   enough of the readahead window that we should start pulling in more pages
+             */
+            void page_cache_async_readahead(struct address_space *mapping, struct file_ra_state *ra,
+                                            struct file *filp, struct page *page, pgoff_t offset,
+                                            unsigned long req_size);
+
+            brief description for page_cache_async_readahead() :
+              check @ra->ra_pages at first,if it is _zero_,that means ReadAhead is disabled,return to caller.
+              clear PG_readahead of @page.
+              check,if BDI(@mapping->backing_dev_info) is READ congested,then return to caller,this will defer
+              asynchronous read-ahead.
+              invoke ondemand_readahead().
+              #ifdef CONFIG_BLOCK
+                normally the current page is not uptodate and lock_page() will be immediately called to
+                implicitly unplug the device.however this is not always true for RAID configurations,
+                where data arrives not strictly in their submission order.in this case we need to 
+                explicitly kick off the I/O.
+                thus,if @page has PG_uptodate set,invoke blk_run_backing_dev() with arguments @mapping's bdi
+                and a NULL pointer.
+              #endif
+
 
 
 
