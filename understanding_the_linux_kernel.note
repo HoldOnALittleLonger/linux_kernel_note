@@ -27296,7 +27296,7 @@ Chapter 14 : Block Device Drivers
                    |                      |    |    |  +--> @start_idx
                    |                      |    |    +--> @i
                    |                      |    +--> @bio
-                   |                      +--> @bvl
+                   |                      +--> @bvl => type is struct bio_vec *
                    |               +--> &(bio->bi_iovec[@index])
                    |               |
                    +--> for (bvl = bio_iovec_idx((bio), (start_idx)), i = (start_idx);
@@ -33881,7 +33881,7 @@ Chapter 16 : Accessing Files
 
             description for ondemand_readahead() :
               first,get the maximum readahead size through max_sane_readahead() on @ra->ra_pages.
-              if @offset is _zero_,that means we are at the start of file,then goto label "initial_readahead".
+              if @offset is _zero_,that means we are at the starting of file,then goto label "initial_readahead".
               otherwise,check @offset whether at the PG_readahead marked page,then ramp up size,and push forward
               the readahead window.
               that is,@offset == @ra->start + @ra->size - @ra->async_size OR @offset == @ra->start + @ra->size
@@ -34058,6 +34058,7 @@ Chapter 16 : Accessing Files
 
             brief description for page_cache_async_readahead() :
               check @ra->ra_pages at first,if it is _zero_,that means ReadAhead is disabled,return to caller.
+              if the @page is in PG_writeback,then we must return to caller.
               clear PG_readahead of @page.
               check,if BDI(@mapping->backing_dev_info) is READ congested,then return to caller,this will defer
               asynchronous read-ahead.
