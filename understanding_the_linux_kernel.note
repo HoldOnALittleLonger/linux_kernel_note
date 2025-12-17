@@ -18003,7 +18003,7 @@ Chapter 9 : Process Address Space
                                   pte_t *page_table, pmd_t *pmd, spinlock_t *ptl, pte_t orig_pte);
 
             description for do_wp_page() :
-              an local variable named @old_page(struct page *) would be retrieve through vm_normal_page(),
+              a local variable named @old_page(struct page *) would be retrieve through vm_normal_page(),
               it would the page frame that corresponding to @orig_pte.
               if there is no such page exsiting,there would be two cases.
               first> @vm_flags enabled VM_WRITE | VM_SHARED,jump to reuse label.
@@ -19019,6 +19019,8 @@ Chapter 10 : System Calls
            * # depending on architecture,this function probably just checks that the
            *   pointer is in the user space range,after calling this routine,memory
            *   access functions may still return -EFAULT
+           * # VERIFY_WRITE is a superset of VERIFY_READ - if it is safe to write to a block,
+           *   it is always safe to read from it
            */
           #define access_ok(type, addr, size) (likely(__range_not_ok(addr, size) == 0))
 
@@ -34071,6 +34073,149 @@ Chapter 16 : Accessing Files
                 thus,if @page has PG_uptodate set,invoke blk_run_backing_dev() with arguments @mapping's bdi
                 and a NULL pointer.
               #endif
+
+      Writing to a File :
+        the write system call invoke vfs_write(),then it is the write method of that file object.for many
+        disk-based filesystems,the method is set to do_sync_write(),and do_sync_write() is similar to
+        do_sync_read(),which processes many aio_write() in an infinite for-cycle,break until write operation
+        completed.
+        function aio_write() of the file object usually is generic_file_aio_write().
+
+        <fs/read_write.c>
+          /**
+           * do_sync_write - do synchronous write operation
+           * @filp:          file object
+           * @buf:           data buffer from userspace
+           * @len:           data length in @buf
+           * @ppos:          write starting position
+           *                 # sys_write() retrieve file write position by invoke
+           *                   file_pos_read(),and pass it to vfs_write(),then it is
+           *                   this routine
+           * return:         return the value returned by aio_write() method of @filp
+           *                 OR
+           *                 return kiocb.ki_user_data
+           * # EXPORT_SYMBOL
+           * # this routine is similar to do_sync_read(),it initialize a local kiocb object and
+           *   initialize a local iovec object from @buf and @len
+           *   use @ppos,@len to set @ki_pos,@ki_left,@ki_nbytes
+           *   invoke aio_write() of @filp in an infinite for-cycle,break cycle if return value of
+           *   aio_write() is not -EIOCBRETRY,otherwise,invoke wait_on_retry_sync_kiocb() and get
+           *   into next iteration
+           *   when cycle stopped,check return value of aio_write(),if it is -EIOCBQUEUED,then
+           *   invoke wait_on_sync_kiocb() to wait the kiocb,reset return value to the result from
+           *   wait_on_sync_kiocb() # @ki_user_data
+           *   use @ki_pos to update @ppos,return the return value to caller
+           */
+          ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos);
+
+        <mm/filemap.c>
+          /**
+           * generic_file_aio_write - write data to a file
+           * @iocb:                   kiocb
+           * @iov:                    io vector(s)
+           * @nr_segs:                number of io vector(s)
+           * @pos:                    operation starting position
+           * return:                  return the value returned by __generic_file_aio_write()
+           *                          return error code if error happened
+           * # EXPORT_SYMBOL
+           * # if this routine is called from do_sync_write(),then @nr_segs is 1
+           */
+          ssize_t generic_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
+                                         unsigned long nr_segs, loff_t pos);
+
+          brief description for generic_file_aio_write() :
+            this routine is a wrapper around __generic_file_aio_write() to be used by most filesystems.
+            at the beginning,get @ki_filp,and get page cache host from the file's @f_mapping member.
+            if @ki_pos is not equal to @pos,then it is a BUG.
+            acquire the inode's @i_mutex,because this routine have to take care of O_SYNC mode.
+            /* only one process can write into this file at the same time */
+            invoke __generic_file_aio_write(),and then release @i_mutex.
+
+            if result from the function is greater than _zero_ OR equal to -EIOCBQUEUED(pending)
+            then,invoke generic_write_sync() to sync writing on the file at position @pos,the data length
+            is returned by __generic_file_aio_write();if generic_write_sync() returned an error code AND
+            the length of data been written is greater than _zero_,that means we have encountered an error,
+            return the error code to caller.
+
+            else,just return the length of data been written to caller.
+
+          /**
+           * __generic_file_aio_write - do generic asynchronous I/O for write data to a file
+           * @iocb:                     kiocb
+           * @iov:                      io vector(s)
+           * @nr_segs:                  number of io vector(s)
+           * @ppos:                     starting position,usually is @iocb.ki_pos
+           * return:                    number of data have written OR error code
+           * # EXPORT_SYMBOL
+           * # this routine handle O_DIRECT mode,but do not take care of O_SYNC write,caller
+           *   have to handle this
+           */
+          ssize_t __generic_file_aio_write(struct kiocb *iocb, const struct iovec *iov,
+                                           unsigned long nr_segs, loff_t *ppos);
+
+          description for __generic_file_aio_write() :
+            first,invoke generic_segment_checks() with permission VERIFY_READ,this routine check
+            each segment in iovec array;the routine also adjust the length of data will be written,
+            caller pass it a pointer as the third parameter,and the adjusted length is stored in the
+            object. /* this routine might return -EINVAL or -EFAULT,no problem,_zero_ will be returned.
+                     * even _zero_ is returned the length might stay adjusted because there is some
+                     * segmens are no good
+                     * it also update number of segments for give up to writing no good segments.
+                     * # the remain segments are give up even they are good segments
+                     */
+                    /* the local variable @ocount is passed as the third parameter to this function,
+                     * __generic_file_aio_write() use @ocount to reset @count a local vairable used
+                     * to record data length.
+                     */
+            if error is detected,return error to caller;otherwise,make use of the adjusted length.
+            invoke vfs_check_frozen() on the inode's super block,the event is @s_wait_unfrozen,level
+            is SB_FREEZE_WRITE. /* if vfs have frozen write,the we must wait until it unfrozen */
+                                /* the macro is defined in <linux/fs.h>,which invoke wait_event()
+                                 * wait until @s_frozen < SB_FREEZE_WRITE
+                                 */
+            reset @current's backing_dev_info to the mapping's backing_dev_info of that inode.
+            invoke generic_write_checks(). /* this routine can adjust writing position or amount of
+                                            * bytes to write.return 0 if passed checkings,or error code
+                                            * if failed
+                                            * arguments :
+                                            *   @ki_filp, &@pos, &@write_length, S_ISBLK(@inode->i_mode)
+                                            *                    ^adjusted by generic_segment_checks()
+                                            *                     stored in @count
+                                            * checkings include -
+                                            *   rlimit file size, O_APPEND position, filesystem LFS rule,
+                                            *   filesystem block size limit, block device inode checking
+                                            */
+            goto label "out" if error happened OR length is set to _zero_(by generic_write_checks()).
+            call to file_remove_suid() on @ki_filp/* file permission SUID */,goto "out" if returned error.
+            invoke file_update_time() to update access time.
+
+            check O_DIRECT,for direct IO and buffered IO,this routine make use of different ways.
+            O_DIRECT mode :
+              first,try generic_file_direct_write(),result is stored in @written.
+              /* this routine will invoke to direct_IO() method of the page cache with op WRITE */
+              if happened error(@written < 0) or have written everything,then goto "out".
+              if only a part have written,then must make use of buffered write for the rest.
+              update @pos += @written.
+              update @count(the length of adjusted data length) -= @written.
+              invoke generic_file_buffered_write() with the arguments :
+                @iocb, @iov, @nr_segs, @pos, @ppos, @count, @written
+                                       ^/* local variable used to record write position
+                                         * generic_write_checks() may adjust the position
+                                         */
+              if an error is returned,then goto "out".
+              otherwise,call to filemap_write_and_wait_range() to ensure that the page cache pages
+              are written to disk. /* range : [@pos, @pos + @written_buffered - @written - 1]
+              if it exactly is the case,reset @written to @written_buffered,and invoke function
+              invalidate_mapping_pages() on the mapping of that inode to invalidate all the unlocked
+              pages of the inode. /* same range as filemap_write_and_wait_range() */
+              else,filemap_write_and_wait_range() returned a non-zero value,then goto "out".
+
+            not O_DIRECT :
+              just invoke generic_file_buffered_write() to process buffered write on all segments.
+
+            "out":
+              reset @current's backing_dev_info to NULL
+              return @written to caller if @written is TRUE,otherwise,return error code to caller.
 
 
 
