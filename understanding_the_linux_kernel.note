@@ -32545,8 +32545,8 @@ Chapter 15 : The Page Cache
                * parameter @datasync will as an argument pass to @fops->fsync().
                */
 
-            !! filemap_write_and_wait() => filemap_fdatawrite() => __filemap_fdatawrite_range() =>
-                                        do_writepages()                      /* 0 -- LLONG_MAX */
+            !! filemap_write_and_wait() => filemap_fdatawrite() => __filemap_fdatawrite_range() => do_writepages()
+                                                                            /* 0 -- LLONG_MAX */
     
                                         if filemap_fdatawrite() succeeed => filemap_fdatawait()
 
@@ -34162,8 +34162,8 @@ Chapter 16 : Accessing Files
                      * segmens are no good
                      * it also update number of segments for give up to writing no good segments.
                      * # the remain segments are give up even they are good segments
-                     */
-                    /* the local variable @ocount is passed as the third parameter to this function,
+                     *
+                     * the local variable @ocount is passed as the third parameter to this function,
                      * __generic_file_aio_write() use @ocount to reset @count a local vairable used
                      * to record data length.
                      */
@@ -34205,6 +34205,8 @@ Chapter 16 : Accessing Files
               if an error is returned,then goto "out".
               otherwise,call to filemap_write_and_wait_range() to ensure that the page cache pages
               are written to disk. /* range : [@pos, @pos + @written_buffered - @written - 1]
+                                    * the range about buffered writing,not the direct I/O
+                                    */          
               if it exactly is the case,reset @written to @written_buffered,and invoke function
               invalidate_mapping_pages() on the mapping of that inode to invalidate all the unlocked
               pages of the inode. /* same range as filemap_write_and_wait_range() */
@@ -34217,6 +34219,174 @@ Chapter 16 : Accessing Files
               reset @current's backing_dev_info to NULL
               return @written to caller if @written is TRUE,otherwise,return error code to caller.
 
+          /**
+           * generic_file_direct_write - do generic direct I/O write on a file
+           * @iocb:                      kiocb
+           * @iov:                       io vector(s)
+           * @nr_segs:                   number of io vector(s)
+           * @pos:                       writing start position - adjusted
+           * @ppos:                      original writing start position - file I/O position
+           * @count:                     total length of data will to be written
+           *                             # might be adjusted by generic_write_checks()
+           * @ocount:                    total length of data in segments
+           *                             # might be adjusted by generic_segment_checks()
+           * return:                     number of bytes of data been written
+           * # EXPORT_SYMBOL
+           */
+          ssize_t generic_file_direct_write(struct kiocb *iocb, const struct iovec *iov, unsigned long *nr_segs,
+                                            loff_t pos, loff_t **ppos, size_t count, size_t ocount);
 
+          brief description for generic_file_direct_write() :
+            if @count is not equal to @ocount,invoke iov_shorten() to short io vector(s),modify @nr_segs.
+            the @write_len is get through function iov_length(),@nr_segs might be have adjusted.
+            and the @end boundary is calculated from "(@pos + @write_len - 1) >> PAGE_CACHE_SHIFT".
+                    /* page index */
+            invoke filemap_write_and_wait_range(),this routine as result,would invoke do_writepages() to
+            write data in range [@pos, @pos + @write_len - 1] to disk,the corresponding pages should been cached.
+                                /* file position */
+            /* if succeed,filemap_write_and_wait_range() should return 0 */
+            if an error code is returned,then return it to caller.
+            next,check the mapping's @nrpages,if there is some page been cached,then
+                    invoke invalidate_inode_pages2_range() to invalidate pages of the inode's mapping 
+                    in range [@pos >> PAGE_CACHE_SHIFT, @end] /* page index */
+                    /* for each page,wait for writeback completed,if page_mapped() is TRUE,unmap the page */
+                                                                     /* @page->_mapcount >= 0 ? */
+                    this function should return 0,when no error encountered.
+                    if an error code has returned,it is not -EBUSY,return the error code to caller;otherwise,
+                    return 0 to caller because it is busy.
+            invoke direct_IO() method of the mapping,the number of bytes have written should be returned by
+            the method.
+            try again invalidate_inode_pages2_range() on the same range if @nrpages of the mapping is not _zero_.
+            /* clean pages which migth have been cached by non-direct readahead,or faulted in by get_user_pages()
+             * if the source of the write was an mmap'ed region of the file we are writing.
+             */
+            if direct_IO() method returned a positive value,calculate the next write position,check whether current
+            inode's size have not updated AND the inode is not block device file inode,set the new size for this inode,
+            call mark_inode_dirty() to mark it is a dirty inode,set *@ppos to @pos + @written(returned by direct_IO()).
+                                                                /* this pointer usually points to @iocb.ki_pos,
+                                                                 * do_sync_write() will use this member to update
+                                                                 * the pointer passed by sys_write(),and finally,
+                                                                 * the file position would be updated through file_pos_write()
+                                                                 */
+            finally,return the bytes of data been written.
+
+          /**
+           * generic_file_buffered_write - do generic buffered file write
+           * @iocb:                        kiocb
+           * @iov:                         io vector(s)
+           * @nr_segs:                     number of io vector(s)
+           * @pos:                         write position
+           * @ppos:                        original write position
+           * @count:                       data length in bytes
+           * @written:                     length in bytes of data been written through other ways
+           * return:                       number of data in bytes have written
+           *                               error code if failed
+           * # EXPORT_SYMBOL
+           * # this routine is very simple,it initialize an iterator of io vector(s),the position is
+           *   determined by @nr_segs,@count,and @written
+           *   invoke generic_perform_write() with arguments @iocb->ki_filp,@the_iterator,@pos
+           *   if no error happened,let @written += return_value_of_genrric_perform_write(),update
+           *   *@ppos by let *@ppos += return_value_of_generic_perform_write()
+           *   if @written is TRUE,return it,otherwise,return the value returned from generic_perform_write()
+           *   ! because @written might be _zero_ is set when call to this routine
+           */
+          ssize_t generic_file_buffered_write(struct kiocb *iocb, const struct iovec *iov, unsigned long nr_segs,
+                                              loff_t pos, loff_t *ppos, size_t count, ssize_t written);
+
+          /**
+           * <linux/fs.h>
+           *   struct iov_iter {
+           *           const struct iovec *iov; /* io vector(s),used to point current io vector */
+           *           unsigned long nr_segs;   /* number of io vector(s) */
+           *           size_t iov_offset;       /* offset into current io vector */
+           *           size_t count;            /* total length of data remained in the io vector(s) */
+           *   };
+           * static inline void iov_iter_init(struct iov_iter @i, const struct iovec *iov, unsigned nr_segs,
+           *                                  size_t count, size_t written);
+           * - *@i = struct iov_iter{
+           *           @iov,
+           *           @nr_segs,
+           *           0,
+           *           @count + @written
+           *   };
+           *   iov_iter_advance(@i, @written)
+           *   - step to the io vector,the io vectors before it have spanned the data with length @written.
+           */
+
+          /**
+           * generic_perform_write - buffered write,copy data from io vector(s) to pages in page cache
+           * @file:                  file object
+           * @i:                     io vector iterator
+           * @pos:                   write position
+           * return:                 number of bytes been written
+           *                         error code if failed
+           */
+          static ssize_t generic_perform_write(struct file *file, struct iov_iter *i, loff_t pos);
+
+          brief description for generic_perform_write() :
+            the main concept is copy the data from userspace,the addresses are recorded in io vector(s).
+            first,do segment check,if get_fs() is equal to KERNEL_DS,then let local variable
+            @flags |= AOP_FLAG_UNINTERRUPTIBLE (@flags default value is _zero_)
+                      /* address space operation flag */
+            make use of a do-while cycle,would stopped until @i points to the end /* @i->count is _zero_ */ {
+                    calculate offset into a page for @pos the file position /* @pos & (PAGE_CACHE_SIZE - 1) */
+                    calculate page index in page cache for the @pos /* @pos >> PAGE_CACHE_SHIFT */
+                    calculate bytes of data have to be copied through min(PAGE_CACHE_SIZE - @offset, iov_iter_count(@i))
+                                                                      /* value type is unsigned long
+                                                                       * iov_iter_count() get the @count member of
+                                                                       * this iov_iter
+                                                                       */
+                    check whether iov_iter_fault_in_readable() is TRUE,in this case,we can not read the region
+                    of data,return -EFAULT to caller.
+                    /* fault_in_pages_readable(userspace address, current io vector length - current io vector offset) */
+                    
+                    invoke @a_ops->write_begin(),pass it @file,@file->f_mapping,@pos,@bytes,@flags,&@page,&@fsdata
+                    /* @page is a local pointer,write_begin() method might allocate new cache page
+                     * @fsdata is used to store filesystem-dependent data
+                     */
+                    the return value is stored in local variable @status,if no error happened,_zero_ should be returned;
+                    otherwise,break cycle.
+
+                    check,if @file->f_mapping is mapping writably mapped - @i_mmap_writable != 0,then invoke
+                    flush_dcache_page() on @page to flush dcache for this page.
+
+                    disable Page Fault.
+                    call iov_iter_copy_from_user_atomic() to copy the data in userspace to the @page start at specified
+                    @offset with specified @bytes.
+                    enable Page Fault.
+                    invoke flush_dcache_page() on @page.
+                    mark_page_accessed() to @page.
+
+                    invoke @a_ops->write_end(),pass it @file,@file->f_mapping,@pos,@bytes,@length_of_copied_data,@page,@fsdata
+                    the return value still stored in @status.
+                    if @status is less than _zero_,break cycle,that means we have encountered an error.
+
+                    use @status to reset local variable @copied(used to store the value returned by iov_iter_copy_from_user_atomic()).
+                    check kernel preempt through cond_resched().
+
+                    advance iov iterator @i,@copied record how many data in bytes been copied into the page,so we can use it
+                    to update iterator @i.
+
+                    check,if @copied is equal to 0,that means we copied nothing into the @page,thus,we must adjust @bytes
+                    to min(PAGE_CACHE_SIZE - @offset, iov_iter_single_seg_count(@i)),and try again.
+                                                                                         /* restart from iov_iter_fault_in_readable() */
+                       /**
+                        * iov_iter_single_seg_count() - 
+                        *   if @i->nr_segs == 1,return @i->count
+                        *   else,return min(@i->count, @i->iov->iov_len - @i->iov_offset)
+                        */
+
+                    if @copied is not equal to 0,we let @pos += @copied,@written += @copied.
+                                                        /* file pos */  /* local vairable used to record
+                                                                         * length in bytes of data have
+                                                                         * written(default value is 0)
+                                                                         */
+                    invoke balance_dirty_pages_ratelimited() on @file->f_mapping,this routine look at the number of dirty pages
+                    in the machine and will force the caller to perform writeback if the system is over "vm_dirty_ratio".
+            }
+
+            finally,if @written is TRUE,return it;otherwise,return @status.
+            
+            
 
 
