@@ -30633,7 +30633,7 @@ Chapter 15 : The Page Cache
                   BH_Write_EIO,     /* I/O error on write */
                   BH_Ordered,       /* ordered write */
                   BH_Eopnotsupp,    /* unsupport operation(barrier) */
-                  BH_Unwritten,     /* buffer is allocated on disk but not writtent */
+                  BH_Unwritten,     /* buffer is allocated on disk but not written */
                   BH_Quiet,         /* buffer error prinks to be quiet */
                   BH_PrivateStart,  /* not a state bit,but the first bit avaiable
                                      * for private allocation by other entities
@@ -34417,6 +34417,200 @@ Chapter 16 : Accessing Files
              *   generic_write_end() -> block_write_end() -> __block_commit_write()
              */
             
+        The write_begin() and write_end() method of address_space_operations :
+          the these two methods are set by filesystem,but the common interfaces are block_write_begin() and generic_write_end(),
+          respectively;filesystem let its <fs>_write_begin() call to block_write_begin(),and let its <fs>_write_end() call to
+          generic_write_end(),such ext2 filesystem.
+
+          <fs/buffer.c>
+            /**
+             * block_write_begin - write begin for address_space_operations,bh version
+             * @file:              file object
+             * @mapping:           page cache
+             * @pos:               file position
+             * @len:               data length
+             * @flags:             behaviour control
+             * @pagep:             page pointer's pointer
+             *                     # if *@pagep is NULL,this function will allocate a new page
+             * @fsdata:            filesystem private data pointer's pointer
+             * @get_block:         get_block method
+             * return:             0 OR error code
+             * # EXPORT_SYMBOL
+             */
+            int block_write_begin(struct file *file, struct address_space *mapping, loff_t pos, unsigned len,
+                                  unsigned flags, struct page **pagep, void **fsdata, get_block_t *get_block);
+
+            brief description for block_write_begin() :
+              this routine just take care of the basic task of block allocation and bringing partial write
+              blocks uptodate first.
+              it get page index,offset into page, end boundary through @pos and @len.
+              if *@pagep is NULL,invoke grab_cache_page_write_begin() at the specified page index.
+              /**
+               * grab_cache_page_write_begin() is defined in <mm/filemap.c>.
+               * it attempts to find out a cached page in page cache at specified index,if it is exist,
+               * return it;otherwise,invoke __page_cache_alloc() to allocate a new page.if AOP_FLAG_NOFS
+               * is enabled in @flags,then the GFP flag used for allocation will disable __GFP_FS.
+               * after succeed to allocate a new page,invoke add_to_page_cache_lru(),add the page to
+               * page cache,GFP flag is "GFP_KERNEL & ~__GFP_FS".
+               * finally,return the page;in other cases,return NULL to caller.
+               */
+              if get page failed,return -ENOMEM to caller.
+              if *@pagep is not NULL,*@pagep must been locked,otherwise,it is a BUG.
+              invoke __block_prepare_write(),this helper do the main works.
+              if __block_prepare_write() returned an error code,clear PG_uptodate on *@pagep or on the
+              allocated page;if the page is allocated by this function,page_cache_release() it,then
+              check whether "@pos + @len" is greater than the inode's @i_size,it is,then vmtruncate()
+              the inode with @i_size. /* prepare_write() may have instantiated a few blocks outside @i_size */
+              finally,return to caller the value returned by __block_prepare_write().
+
+            /**
+             * __block_prepare_write - do the main work of prepare block write
+             * @inode:                 the file's inode
+             * @page:                  cached page to write
+             * @from:                  starting offset into the page
+             * @end:                   ending offset into the page
+             * @get_block:             filesystem-dependent method
+             * return:                 0 OR error code
+             * # create buffers,get blocks,zero segments or zero all buffers
+             */
+            static int __block_prepare_write(struct inode *inode, struct page *page, unsigned from, unsigned to,
+                                             get_block_t *get_block);
+
+            description for __block_prepare_write() :
+              get block-size through "1 << @inode->i_blkbits".
+              if @page has no buffers,invoke create_empty_buffers() to create buffers on it,each buffer correspond
+              to a block has size block-size.
+              calculate block number through "@page->index << (PAGE_CACHE_SHIFT - @inode->i_blkbits)".
+              make use of a for-cycle to traverse each buffers on @page {
+                      let the logical block-start pos to 0,let the logical block-end pos to start + block-size.
+                      /* buffer corresponds to a block
+                       * |<-- blk size -->|
+                       * |================| => a buffer in a page
+                       * ^block-start     ^block-end
+                       */
+                       /* block-start is update to block-end before next iteration */
+
+                      if block-end <= @from OR block-start >= @to,that means the block is not our target,skip it.
+                      of course,if the @page has PG_uptodate but current buffer has not BH_Uptodate,set BH_Uptodate
+                      for it.
+
+                      clear current buffer's BH_New if BH_New is set,if @page has no buffers at the beginning,the
+                      buffers on it should are newly created.
+
+                                              /* no a disk block it associated */
+                      check current buffer if it is not mapping,in this case,we must get_block for it.
+                              get_block() for it,if no such block,let filesystem create it,the block number has
+                              calculated previously.
+                              @b_size should equal to block-size,if the buffer is newly created,otherwise,print
+                              warning.
+                              break cycle if get_block() returned an error code.
+                              if current buffer has BH_New set by get_block()
+                                      invoke unmap_underlying_metadata() for current buffer
+                                      /* find out the old bh,clear dirty state,wait until BH_Lock is cleared
+                                       * clear BH_Req,__brelse() the old buffer
+                                       * finding rely on __find_get_block_slow(),block number is current buffer's
+                                       * @b_blocknr.
+                                       */
+                                      if @page has PG_Uptodate,clear BH_New of current buffer,set BH_Uptodate for it,
+                                      mark it dirty,and continue to next iteration.
+
+                                      otherwise,check if block-end > @to OR block-start < @from,the buffer contains
+                                      our target,then call zero_user_segments() to zero a region has range [@from, @to]
+                                      in current buffer.
+
+                                      continue to next iteration.
+
+                      the current buffer is mapped
+                              check PG_Uptodate for @page,if it is the case,check BH_Uptodate for current buffer,
+                              if no BH_Uptodate,set the flag for it.continue to next iteration.
+
+                                                           /* no uptodate */      /* been allocated on disk */
+                              the last case,current buffer has no BH_Uptodate AND has no BH_Delay AND has no BH_Unwritten
+                              AND (block-start < @from OR block-end > @to)                            /* unwritten */
+                                      invoke ll_rw_block() the low-level r/w block routine for a READ operation on
+                                      current buffer,record current buffer in a local array is type of struct buffer_head *,
+                                      the maximum size of this array is 2.      /* named @wait_bh */
+              }
+
+              traverse @wait_bh,the buffers we have submit it to Generic Block Layer previously.
+              wait_on_buffer() for each buffer in the collection,if it stay has no BH_Uptodate,return -EIO to caller.
+
+                                                                                       /* might span several buffers */
+              finally,check whether get_block() returned an error code,if it is,invoke page_zero_new_buffers() to zero
+              out the buffers on @page related to range [@from, @to],return the error code to caller;otherwise,return
+              0 to caller.                                                            ! only zero out buffer has BH_New.
+
+            /**
+             * generic_write_end - generic write end for address space operations
+             * @file:              file object
+             * @mapping:           page cache
+             * @pos:               file position
+             * @len:               data length
+             * @copied:            data length copied from somewhere
+             * @page:              cached page contains the copied data
+             * @fsdata:            filesystem private data
+             * return:             number of bytes been written
+             * # EXPORT_SYMBOL
+             * # the main work is hand over to block_write_end()
+             * # this routine invoke block_write_end(),pass it all its parameters as arguments to that function,
+             *   store return value in @copied
+             *   if @pos + @copied is greater than current inode's @i_size,write new size @pos + @copied for it
+             *   unlock @page,page_cache_release() @page
+             *   if inode's size is changed,mark the inode dirty
+             *   return @copied to caller
+             */
+            int generic_write_end(struct file *file, struct address_space *mapping, loff_t pos, unsigned len,
+                                  unsigned copied, struct page *page, void *fsdata);
+
+            /**
+             * block_write_end - the routine wrapping around __block_commit_write()
+             * @file:            file object
+             * @mapping:         page cache
+             * @pos:             file position
+             * @len:             data length
+             * @copied:          data length copied from somewhere
+             * @page:            the page contains copied data
+             * @fsdata:          filesystem private data
+             * return:           number of bytes been written
+             * # EXPORT_SYMBOL
+             * # this routine hand over the main work to __block_commit_write()
+             * # at first,calculate the start-offset into @page from @pos
+             *   if @copied is less than @len,page_zero_new_buffers() to zero out the rest region of the page,
+             *   if @page has no PG_uptodate,set @copied to _zero_,that means zero out the region from start-offset
+             *   to start-offset + @len
+             *   flush_dcache_page() for @page
+             *   invoke __block_commit_write() to commit writing transaction,range [start-offset, start-offset + @copied)
+             *   return @copied to caller
+             */
+            int block_write_end(struct file *file, struct address_space *mapping, loff_t pos, unsigned len,
+                                unsigned copied, struct page *page, void *fsdata);
+
+            /**
+             * __block_commit_write - routine used to mark some special buffers dirty,and them would be write back later
+             * @inode:                file's inode
+             * @page:                 cached page contains data
+             * @from:                 start-offset into @page
+             * @to:                   end-offset into @page
+             * return:                always 0
+             * # traverse each buffer on @page,block-start initialize to 0 (block-start is update to block-end before next iteration)
+             *           let block-end = block-start + block-size
+             *           check,if block-end <= @from OR block-start >= @to,check if it has no BH_Uptodate for current buffer,
+             *           set local recorder @partial to 1  --  current buffer is not our target
+             *                                           | buffer |
+             *                            |from       end|
+             *                   | buffer |
+             *           if current buffer is our target,set BH_Uptodate for it,mark it dirty
+             *           clear BH_New for current buffer,get into next iteration
+             *   if all buffers are uptodate -- @partial is FALSE,set PG_uptodate for @page
+             *   return 0
+             */
+            static int __block_commit_write(struct inode *inode, struct page *page, unsigned from, unsigned to);
+
+        
+            !! by walking-through write_begin() and write_end(),we can know that the data copying is accomplished
+               in generic_perform_write().write_begin() is used to allocate new page if necessary,get blocks,setup buffers;
+               write_end() is used to change buffers' state and the page's state,the data inside buffers of the page
+               would be written back by BDI later.
             
 
 
