@@ -34421,6 +34421,7 @@ Chapter 16 : Accessing Files
           the these two methods are set by filesystem,but the common interfaces are block_write_begin() and generic_write_end(),
           respectively;filesystem let its <fs>_write_begin() call to block_write_begin(),and let its <fs>_write_end() call to
           generic_write_end(),such ext2 filesystem.
+          both the functions are invoked once for every page of the file that is affected by the write operation.
 
           <fs/buffer.c>
             /**
@@ -34479,14 +34480,15 @@ Chapter 16 : Accessing Files
             description for __block_prepare_write() :
               get block-size through "1 << @inode->i_blkbits".
               if @page has no buffers,invoke create_empty_buffers() to create buffers on it,each buffer correspond
-              to a block has size block-size.
+              to a block has size block-size. /* PG_private is not set */
               calculate block number through "@page->index << (PAGE_CACHE_SHIFT - @inode->i_blkbits)".
               make use of a for-cycle to traverse each buffers on @page {
                       let the logical block-start pos to 0,let the logical block-end pos to start + block-size.
                       /* buffer corresponds to a block
-                       * |<-- blk size -->|
+                       * |<-- blk size -->| => 512 bytes
                        * |================| => a buffer in a page
                        * ^block-start     ^block-end
+                       * |================|================|================|================|...| => a page,4096 bytes
                        */
                        /* block-start is update to block-end before next iteration */
 
@@ -34498,7 +34500,7 @@ Chapter 16 : Accessing Files
                       buffers on it should are newly created.
 
                                               /* no a disk block it associated */
-                      check current buffer if it is not mapping,in this case,we must get_block for it.
+                      check current buffer if it is not mapping a disk logical block,in this case,we must get_block for it.
                               get_block() for it,if no such block,let filesystem create it,the block number has
                               calculated previously.
                               @b_size should equal to block-size,if the buffer is newly created,otherwise,print
@@ -34511,17 +34513,18 @@ Chapter 16 : Accessing Files
                                        * finding rely on __find_get_block_slow(),block number is current buffer's
                                        * @b_blocknr.
                                        */
-                                      if @page has PG_Uptodate,clear BH_New of current buffer,set BH_Uptodate for it,
+                                      if @page has PG_uptodate,clear BH_New of current buffer,set BH_Uptodate for it,
                                       mark it dirty,and continue to next iteration.
 
                                       otherwise,check if block-end > @to OR block-start < @from,the buffer contains
-                                      our target,then call zero_user_segments() to zero a region has range [@from, @to]
-                                      in current buffer.
+                                      our target,then call zero_user_segments() to zero regions with ranges
+                                      [@to, block-end) and [block-start, @from] in current buffer.
+                                      /* range [@from, @to) is included in this block */
 
                                       continue to next iteration.
 
                       the current buffer is mapped
-                              check PG_Uptodate for @page,if it is the case,check BH_Uptodate for current buffer,
+                              check PG_uptodate for @page,if it is the case,check BH_Uptodate for current buffer,
                               if no BH_Uptodate,set the flag for it.continue to next iteration.
 
                                                            /* no uptodate */      /* been allocated on disk */
@@ -34596,8 +34599,8 @@ Chapter 16 : Accessing Files
              *           let block-end = block-start + block-size
              *           check,if block-end <= @from OR block-start >= @to,check if it has no BH_Uptodate for current buffer,
              *           set local recorder @partial to 1  --  current buffer is not our target
-             *                                           | buffer |
-             *                            |from       end|
+             *                                          | buffer |
+             *                            |from       to|
              *                   | buffer |
              *           if current buffer is our target,set BH_Uptodate for it,mark it dirty
              *           clear BH_New for current buffer,get into next iteration
@@ -34607,10 +34610,35 @@ Chapter 16 : Accessing Files
             static int __block_commit_write(struct inode *inode, struct page *page, unsigned from, unsigned to);
 
         
-            !! by walking-through write_begin() and write_end(),we can know that the data copying is accomplished
-               in generic_perform_write().write_begin() is used to allocate new page if necessary,get blocks,setup buffers;
-               write_end() is used to change buffers' state and the page's state,the data inside buffers of the page
-               would be written back by BDI later.
+          !! by walking-through write_begin() and write_end(),we can know that the data copying is accomplished
+             in generic_perform_write().write_begin() is used to allocate new page if necessary,get blocks,setup buffers;
+             write_end() is used to change buffers' state and the page's state,the data inside buffers of the page
+             would be written back by BDI later.
+
+          !! for block device file -
+               the aops of block device usually is @def_blk_aops,method write_begin() is implemented by blkdev_write_begin(),
+               and method write_end() is implemented by blkdev_write_end().
+
+               routine blkdev_write_begin() is defined in <fs/block_dev.c>
+                 static int blkdev_write_begin(struct file *file, struct address_space *mapping, loff_t pos,
+                                               unsigned len, unsigned flags, struct page **pagep, void **fsdata);
+                 - set *@pagep to NULL
+                   invoke block_write_begin(),the get_block method is blkdev_get_block()
+                   return to caller the value returned by block_write_begin()
+                
+                   ! by set *@pagep to NULL,block_write_begin() will create a new page in the mapping of the
+                     master block inode file.
+
+               routine blkdev_write_end() is defined in <fs/block_dev.c>
+                 static int blkdev_write_end(struct file *file, struct address_space *mapping, loff_t pos,
+                                             unsigned len, unsigned copied, struct page *page, void *fsdata);
+                 - invoke block_write_end()
+                   unlock @page
+                   page_cache_release() @page
+                   return to caller the value returned by block_write_end().
+
+
+
             
 
 
