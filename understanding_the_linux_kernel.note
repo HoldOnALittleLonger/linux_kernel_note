@@ -30629,7 +30629,11 @@ Chapter 15 : The Page Cache
                   BH_Async_Read,    /* under end_buffer_async_read I/O */
                   BH_Async_Write,   /* under end_buffer_async_write I/O */
                   BH_Delay,         /* buffer is not yet allocated on disk */
-                  BH_Boundary,      /* block is followed by a discontiguity */
+                  BH_Boundary,      /* block is followed by a discontiguity
+                                     * this means,the addressing for next block(the followed block)
+                                     * is indirectly,thus at the next operation,disk
+                                     * must move its head
+                                     */
                   BH_Write_EIO,     /* I/O error on write */
                   BH_Ordered,       /* ordered write */
                   BH_Eopnotsupp,    /* unsupport operation(barrier) */
@@ -34637,6 +34641,204 @@ Chapter 16 : Accessing Files
                    page_cache_release() @page
                    return to caller the value returned by block_write_end().
 
+      Writing Dirty Pages to Disk :
+        when kernel need to write dirty pages into disk,it have to invoke the filesystem-dependent interface that
+        is included in the address_space_operations object of that inode.for ext2 filesystem,writepage() method
+        is ends up call to __block_write_full_page(),and which submit_bh() buffers on the page to Generic Block Layer.
+        if the address_space_operations did not implement writepages() method,function generic_writepages() will be
+        invoked,then it is write_cache_pages().
+        if the method is implemented,just invoke the method as well.for ext2 filesystem,it usually is ext2_writepages(),
+        which is a wrapper of mpage_writepages().
+
+        <fs/mpage.c> /* the same header that included mpage_readpage() routine */
+          /**
+           * mpage_writepages - walk the list of dirty pages of the given address space AND writepage() all of them
+           * @mapping:          page cache
+           * @wbc:              writeback control
+           * @get_block:        get_block method
+           * return:            0 OR error code
+           * # EXPORT_SYMBOL
+           * # this routine just process one of two branches
+           *   if @get_block is not provided,invoke generic_writepages(),in this case,the writepage() method is
+           *   __writepage() which is defined in <mm/page-writeback.c>,it call to writepage() method of the page cache
+           *   else
+           *           construct a local variable named @mpd is type of struct mpage_data
+           *           initialize it { .bio = NULL, .last_block_in_bio = 0, .get_block = @get_bloc, .use_writepage = 1 }
+           *           invoke write_cache_pages(),the writepage() method would be __mpage_writepage(),parameter @data
+           *           of write_cache_pages() is @mpd
+           *           after write_cache_pages() returned,if @mpd.bio is not NULL,invoke mpage_bio_submit() to submit
+           *           the bio for WRITE
+           */
+          int mpage_writepages(struct address_space *mapping, struct writeback_control *wbc, get_block_t get_block);
+
+          /**
+           * if the page has no buffers,then the page is mapped here
+           * if all blocks are found to be contiguous,then the page can go into the BIO
+           * otherwise,fall back to the mapping's writepage()
+           * ! only support pages which are fully mapped-and-dirty,with a special case for
+           *   pages which are unmapped at the end: EOF
+           */
+          struct mpage_data {
+                  struct bio *bio;              /* the bio */
+                  sector_t last_block_in_bio;   /* last block number in bio */
+                  get_block_t *get_block;       /* get_block() method */
+                  unsigned use_writepage;       /* whether use writepage() method */
+          };
+
+          /**
+           * __mpage_write - writepage() method for generic case
+           * @page:          the page have to be written into disk
+           * @wbc:           writeback control
+           * @data:          usually is data object type of struct mpage_data
+           * return:         0 OR error code
+           */
+          static int __mpage_write(struct page *page, struct writeback_control *wbc, void *data);
+
+          what __mpage_writepage() does :
+            1> get page cache,and get the host of that page cache.
+               calculate blocks-per-page through "PAGE_CACHE_SIZE >> block-bits".
+                                                 /* inode's @i_blkbits */
+               initialize local variable @first_unmapped to blocks-per-page,@i_size the size of inode.
+               an array of sector_t elements named @blocks,size is MAX_BUF_PER_PAGE.
+            2> if @page has buffers,that PG_private is set
+               then
+                       traverse each buffer on @page,use a variable @page_block = 0
+
+                         if current buffer is locked,that is a BUG
+
+                         if current buffer is not mapped a block,but it is dirty,then goto label "confused".
+                         if it is not mapped a block,and it is not dirty,set @first_unmapped to this block
+                         if and only if @first_unmapped == blocks-per-page.
+                         continue to next buffer.
+
+                         if @first_unmapped is not equal to blocks-per-page,that means we encountered a
+                         unmapped buffer,goto label "confused",because it is not fully mapped.
+
+                         if current buffer is not dirty OR it is not BH_Uptodate,also goto "confused".
+                         /* the buffer is not dirty,OR it is not containing valid data */
+
+                         if @page_block is not _zero_,that means we have stored the mapped and dirty buffer
+                         into @blocks,so check whether current buffer's @b_blocknr is not equal to @blocks[@page_block - 1] + 1,
+                         if it is the case,that means the mapping is not contiguous,goto label "confused".
+
+                         store current buffer's @b_blocknr to @blocks[@page_block++]
+
+                         get current buffer's BH_Boundary flag,if it is TRUE,that means a discontiguity is followed
+                         this buffer,we record the boundary current buffer's @b_blocknr and @b_bdev into local variables
+                         named @boundary_block and @boundary_bdev,respectively.
+                         use local variable @boundary to record the state of BH_Boundary flag of current buffer.
+
+                         set local variable @bdev to current buffer's @b_bdev
+                         /* we will work on this BDI */
+
+
+                       traversing ended,check @first_unmapped,if it is TRUE,goto label "page_is_mapped",otherwise,goto
+                       confused.        /* because @first_unmapped is set to @page_block if it is the time have to reset it,
+                                         * then the control path may jump to "confused" at next iteration if the next buffer
+                                         * is mapped.
+                                         * if traversing is ended,that means no jumping,so @first_unmapped should equal to
+                                         * blocks-per-page
+                                         */
+                       /* goto confused - page has buffers,but they are all unmapped,the page was created by pagein or
+                        * read over a hole which was handled by block_read_full_page().if this @mapping is also using
+                        * mpage_readpages(),then this can rarely happen.
+                        */
+            3> the @page has not PG_private,in this case,we have to "map it to disk".
+               it is a BUG if PG_uptodate is set /* no buffers but contains valid data in page cache */
+               set local variable @block_in_file to "@page->index << (PAGE_CACHE_SHIFT - block-bits)".
+               /* we have seen this in do_mpage_readpage(),type is sector_t */
+               set local variable @last_block to "inode size - 1 >> block-bits".
+               set local variable @map_bh's @b_page to current @page /* type of @map_bh is struct buffer_head */
+            4> make use of a for-cycle,iterator is @page_block,initialized to 0,stopped when @page_block >= blocks-paer_page.
+               {
+                       /* we have to map the page to disk,@map_bh is used to map block in iteration */
+                       set members of @map_bh,@b_state to 0,set @b_size to block-size /* 1 << block-bits */
+                       invoke get_block() method in @mpd to ask filesystem return the block this buffer will mapped.
+                       if failed,goto label "confused".
+
+                       if BH_New of @map_bh is set by filesystem,invoke unmap_underlying_metadata() to unmap the older
+                       block in page cache if it is exist.
+
+                       if @map_bh is set BH_Boundary,then record its @b_blocknr in @boundary_block,its @b_bdev in @boundary_bdev.
+
+                       next,check the contiguous,if current block is discontiguous to the previous block,goto "confused".
+
+                       store its @b_blocknr in @blocks,index is @page_block,@page_block increase.
+                       store the state of BH_Boundary flag of current buffer in a local variable @boundary.
+                       store its @b_bdev in @bdev.
+                
+                       if @block_in_file is equal to @last_block,that means we reached EOF,break cycle.
+                       otherwise,increase @block_in_file.
+            5> it is a BUG if @page_block is equal to 0.if the cycle is ended normally,this variable must not be _zero_.
+               set @first_unmapped to @page_block -- the next block is not in current page,or EOF.
+            page_is_mapped:
+            6> calculate end-index from "inode size >> PAGE_CACHE_SHIFT".
+               if @page->index is greater than or equal to end-index,that means this page straddles the inode's size,
+               thus it must be zeroed out on each and every writepage() invocation because it may be mapped.
+               /* a file is mapped in multiples of the page size.
+                * for a file that is not a multiple of the page size,the remaining memory is zeroed when mapped,
+                * and writes to that region are not written out to the file.
+                */
+               calculate the end offset into a page from inode'size. /* inode size & (PAGE_CACHE_SIZE - 1) */
+               if @page->index greater than end-index OR @offset is _zero_,goto confused.
+               otherwise,zero_user_segment() from @offset to then end of this @page.
+            7> /* this page will go to BIO */
+               check local variable @bio,its default value is @mpd->bio.
+               if @bio is not NULL AND @mpd->last_block_info is not equal to "@blocks[0] - 1",
+               then we must invoke mpage_bio_submit() on it for submit it to a WRITE operation.
+               /* @blocks[0] contains the logical block number that first buffer of @page mapped to */
+            alloc_new:
+            8> @bio is NULL,invoke mpage_alloc() to allocate a new one,arguments are
+                 @bdev, @blocks[0] << (block-bits - 9), bio_get_nr_vecs(@bdev), GFP_NOFS | __GFP_HIGH
+                 /* bdev, first_sector, number of vectors, gfp flags
+                  * @bdev is the bdev of the buffers on @page
+                  * we construct a new bio through buffers,then we will no longer need these buffer heads.
+                  */
+               if allocation is failed,goto "confused".
+               
+               calculate @length of first unmapped block,at there,the variable should equal to blocks-per-page,
+               thus we can know the total length of buffers on @page.
+               invoke bio_add_page() to add @page to @bio,offset is _zero_.
+               if the returned value from bio_add_page() is less than @length,mpage_bio_submit() @bio,and goto
+               label "alloc_new" retry again,because the length is less than we have expected length.
+            9> if @page has PG_private,then we clear BH_Dirty for each buffer on it,and,if the total number of
+               buffer heads have overed system limit AND PG_uptodate is set,invoke try_to_free_buffers() on @page.
+               /* we might need to free buffer heads,but this @page should been added into BIO at step 8 */
+           10> if @page is in PG_writeback,that means it is a BUG,because we have not submit it.
+               set PG_writeback for @page,because we are going to submit it for writeback.
+               unlock @page.
+               if @boundary is TRUE /* a buffer is set BH_Boundary */
+               OR @first_unmapped is not equal to blocks-per-page /* page is not fully mapped */
+               then
+                       invoke mpage_bio_submit() to submit this @bio for WRITE.
+                       check,if @boundary_block is TRUE /* the @b_blocknr of that boundary buffer */
+                               invoke write_boundary_block(),bdev is @boundary_bdev,size is block size,
+                               logical block number is @boundary_block;this function __find_get_block()
+                               to get the buffer head that corresponding to @boundary_block + 1,
+                               if succeed to get it and it is dirty,invoke ll_rw_block() process WRITE
+                               operation on it,then put it.
+                               /**
+                                * for addressing the next block - @boundary_block + 1,disk must move
+                                * its head.for reduce IO cost,we can submit the block for WRITE together
+                                * with the bio,this will let disk move its head at this time.after this
+                                * block I/O accomplished,its head been at the right position and ready to
+                                * get the following blocks.
+                                */
+               otherwise,set @mpd->last_block_in_bio to @blocks[blocks-per-page - 1],the @b_blocknr of
+               the last buffer on @page.
+
+               goto out.
+            confused:
+           11: if @bio is not NULL,invoke mpage_bio_submit() to submit it for WRITE.
+               next,check if @mpd->use_writepage is TRUE,invoke @a_ops->writepage() on @page with @wbc,
+               return value is stored in ret;otherwise,set @ret to -EAGAIN,goto "out".
+               invoke mapping_set_error(),if @ret is not an error code,then no error would be set on the
+               mapping.
+            out:
+           12: set @mpd->bio = @bio
+               return @ret
+
+        
 
 
             
