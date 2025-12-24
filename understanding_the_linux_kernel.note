@@ -34658,10 +34658,13 @@ Chapter 16 : Accessing Files
              *                                          | buffer |
              *                            |from       to|
              *                   | buffer |
-             *           if current buffer is our target,set BH_Uptodate for it,mark it dirty
+             *           if current buffer is our target,set BH_Uptodate for it,mark it dirty through mark_buffer_dirty(),
              *           clear BH_New for current buffer,get into next iteration
              *   if all buffers are uptodate -- @partial is FALSE,set PG_uptodate for @page
              *   return 0
+             *   ! mark_buffer_dirty() is defined in <fs/buffer.c>
+             *     if the buffer been dirty,then we do not touch it
+             *     otherwise,set BH_Dirty for it,and set PG_dirty for its @b_page if and only if the page is cached
              */
             static int __block_commit_write(struct inode *inode, struct page *page, unsigned from, unsigned to);
 
@@ -34701,6 +34704,10 @@ Chapter 16 : Accessing Files
         invoked,then it is write_cache_pages().
         if the method is implemented,just invoke the method as well.for ext2 filesystem,it usually is ext2_writepages(),
         which is a wrapper of mpage_writepages().
+        /* ! __block_write_full_page() will set BH_Async_Write for the dirty buffers,that is submit it for asynchronous
+         *   write,end routine is end_buffer_async_write().
+         *   the vector of is the internal vector @bi_inline_vecs of that bio.
+         */
 
         <fs/mpage.c> /* the same header that included mpage_readpage() routine */
           /**
@@ -34821,6 +34828,12 @@ Chapter 16 : Accessing Files
                 
                        if @block_in_file is equal to @last_block,that means we reached EOF,break cycle.
                        otherwise,increase @block_in_file.
+               }
+               /* even after mapping,the page stay no PG_private,if we will switch to writepage() method later,
+                * create_empty_buffers() is called for create buffers,state is BH_Dirty | BH_Uptodate.
+                * because @page is not mapped on disk,thus we must write the full page into disk for
+                * keep data consistency.
+                */
             5> it is a BUG if @page_block is equal to 0.if the cycle is ended normally,this variable must not be _zero_.
                set @first_unmapped to @page_block -- the next block that is not in current page,or EOF.
             page_is_mapped:
@@ -34849,7 +34862,10 @@ Chapter 16 : Accessing Files
                if allocation is failed,goto "confused".
                
                calculate @length of first unmapped block,at there,the variable should equal to blocks-per-page,
-               thus we can know the total length of buffers on @page.
+               thus we can know the total length of buffers on @page. /* because if there is some block discontiguous,
+                                                                       * the control path should been jump to
+                                                                       * label "confused".
+                                                                       */
                invoke bio_add_page() to add @page to @bio,offset is _zero_.
                if the returned value from bio_add_page() is less than @length,mpage_bio_submit() @bio,and goto
                label "alloc_new" retry again,because the length is less than we have expected length.
@@ -34882,9 +34898,9 @@ Chapter 16 : Accessing Files
                goto out. /* no boundary,and fully mapped,in this case,submit bio is hand over to the caller */
             confused:
            11: if @bio is not NULL,invoke mpage_bio_submit() to submit it for WRITE.
+                                                                /* not all blocks contiguous on the disk */
                next,check if @mpd->use_writepage is TRUE,invoke @a_ops->writepage() on @page with @wbc,
                return value is stored in ret;otherwise,set @ret to -EAGAIN,goto "out".
-               /* we might did not allocate new bio,because current writeback blocks is too few */
 
                invoke mapping_set_error(),if @ret is not an error code,then no error would be set on the
                mapping.
