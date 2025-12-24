@@ -30540,6 +30540,8 @@ Chapter 15 : The Page Cache
          *   the function is similar to radix_tree_gang_lookup_slot() but is only fill
          *   the array that slots match the given @tag;function radix_tree_gang_lookup_slot()
          *   rely on __lookup(),function radix_tree_gang_lookup_tag_slot() rely on __lookup_tag()
+         * # this routine might update @index to the index of page which next to the page we
+         *   last found,this is happens we exactly found out some pages
          */
         unsigned find_get_pages_tag(struct address_space *mapping, pgoff_t *index, int tag,
                                     unsigned int nr_pages, struct page **pages);
@@ -32234,17 +32236,67 @@ Chapter 15 : The Page Cache
                   * otherwise,invoke either @a_ops->writepages() or generic_writepages(),return the value
                   *                  # routine has implemented
                   * returned by the called routine.
+                  *
                   * # generic_writepages() invoke write_cache_pages() with write page back routine
                   *   __writepage(),and write_cache_pages() invoke this routine for each dirty page.
                   *   __writepage() exactly invoke @a_ops->writepage().
                   *   for ext2 filesystem,the implementation is ext2_writepage(),which call to
                   *   block_write_full_page(),then __block_write_full_page() is called,finally,
-                  *   submit_bh() is called for convert buffer page into bio and submit it.
+                  *   submit_bh() is called for convert the buffer page into bio and submit it.
+                  *
                   * # write_cache_pages() will construct a vector for dirty pages of the mapping,
                   *   thus it call to pagevec_lookup_tag(),this function is defined in <mm/swap.c>,
                   *   then find_get_pages_tag() is invoked to retrieve all dirty pages in the
                   *   mapping,and pagevec_lookup_tag() return the number of pages in the vector to
                   *   write_cache_pages().(tag is PAGECACHE_TAG_DIRTY)
+                  *   if @wbc->range_cyclic is TRUE,then writeback index is starting from
+                  *   @mapping->writeback_index,so the find_get_pages_tag() will starts at there,end
+                  *   index is -1;otherwise,the index is "@wbc->range_start >> PAGE_CACHE_SHIFT",end
+                  *   index is "@wbc->range_end >> PAGE_CACHE_SHIFT".
+                  *
+                  *   |...|===========...|              |===========...|
+                  *       ^index         ^end index -1  ^index 0       ^end index -1
+                  *        writeback_index               writeback_index
+                  *   
+                  *   |==============#===|              |===========...|
+                  *   ^index         ^end index         ^index         ^end index
+                  *    range_start    range_end          range_start 0  range_end LLONG_MAX
+                  *
+                  *   ! end index is used vertify the page's validity,if exceeded end index,the page
+                  *     and the rest would not be considered.
+                  *   ! after writeback accomplished,write_cache_pages() might update the @writeback_index
+                  *     member of that mapping.
+                  *
+                  *     it use a local variable named @done as indicator to indicates whether the writeback
+                  *     is done,and use a local variable named @done_index(default is the index) to record
+                  *     index of page that is unwritten.
+                  *
+                  *     when @wbc->range_cyclic is TRUE,and index is starting from 0,that means index
+                  *     cycled,thus,set local variable @cycled to 1,else set to 0.
+                  *     # if @range_cyclic is FLASE,@cycled is set to 0.
+                  *
+                  *     after writeback done,if not @cycled AND not @done,it will set @cycled to 1,set 
+                  *     @index to 0,end index to @writeback_index - 1,then retry writeback again.
+                  *     retry                      the first time
+                  *     |<-- wb -->|               |<---- wb ---->|
+                  *     |==========#=====|         |===========...|
+                  *     ^index     ^end index      ^index         ^end index
+                  *      0          wb-index - 1    0              -1
+                  *
+                  *     if we did not retry again,and @no_nrwrite_index_update of @wbc is FALSE,
+                  *     then update @mapping->writeback_index with @done_index if @range_cyclic is TRUE
+                  *     OR (@range_whole is TRUE AND number to write is greater than 0),then update
+                  *     @nr_to_write of @wbc to the remained number of pages have to be written,it
+                  *     maybe 0 if we have written all @wbc->nr_to_write pages.
+                  *     # local variable @range_whole,if @wbc->range_start is _zero_ AND @wbc->range_end
+                  *       is LLONG_MAX,this variable is set to 1;otherwise,set to 0.
+                  *     # @nr_to_write greater than 0 --> remained something
+                  *     
+                  *   ! function make use two cycles,the second is nested inside the first.
+                  *     the first cycle,stop condition is @done is TRUE OR page index > end-index.
+                  *     it invoke pagevec_lookup_tag() in the first cycle,and handle the tagged pages
+                  *     in second cycle.
+                  *     if no pages are found,cycle just stop.
                   */
               6> if we are in WB_SYNC_ALL mode,process filemap_fdatawait() on the mapping.
                  /* make sure to wait on the data before writing out the meta data.
@@ -34663,7 +34715,7 @@ Chapter 16 : Accessing Files
            *   __writepage() which is defined in <mm/page-writeback.c>,it call to writepage() method of the page cache
            *   else
            *           construct a local variable named @mpd is type of struct mpage_data
-           *           initialize it { .bio = NULL, .last_block_in_bio = 0, .get_block = @get_bloc, .use_writepage = 1 }
+           *           initialize it { .bio = NULL, .last_block_in_bio = 0, .get_block = @get_block, .use_writepage = 1 }
            *           invoke write_cache_pages(),the writepage() method would be __mpage_writepage(),parameter @data
            *           of write_cache_pages() is @mpd
            *           after write_cache_pages() returned,if @mpd.bio is not NULL,invoke mpage_bio_submit() to submit
@@ -34770,7 +34822,7 @@ Chapter 16 : Accessing Files
                        if @block_in_file is equal to @last_block,that means we reached EOF,break cycle.
                        otherwise,increase @block_in_file.
             5> it is a BUG if @page_block is equal to 0.if the cycle is ended normally,this variable must not be _zero_.
-               set @first_unmapped to @page_block -- the next block is not in current page,or EOF.
+               set @first_unmapped to @page_block -- the next block that is not in current page,or EOF.
             page_is_mapped:
             6> calculate end-index from "inode size >> PAGE_CACHE_SHIFT".
                if @page->index is greater than or equal to end-index,that means this page straddles the inode's size,
@@ -34804,7 +34856,7 @@ Chapter 16 : Accessing Files
             9> if @page has PG_private,then we clear BH_Dirty for each buffer on it,and,if the total number of
                buffer heads have overed system limit AND PG_uptodate is set,invoke try_to_free_buffers() on @page.
                /* we might need to free buffer heads,but this @page should been added into BIO at step 8 */
-           10> if @page is in PG_writeback,that means it is a BUG,because we have not submit it.
+           10> if @page is in PG_writeback,that means it is a BUG,because we have not submit it for writeback.
                set PG_writeback for @page,because we are going to submit it for writeback.
                unlock @page.
                if @boundary is TRUE /* a buffer is set BH_Boundary */
@@ -34827,16 +34879,25 @@ Chapter 16 : Accessing Files
                otherwise,set @mpd->last_block_in_bio to @blocks[blocks-per-page - 1],the @b_blocknr of
                the last buffer on @page.
 
-               goto out.
+               goto out. /* no boundary,and fully mapped,in this case,submit bio is hand over to the caller */
             confused:
            11: if @bio is not NULL,invoke mpage_bio_submit() to submit it for WRITE.
                next,check if @mpd->use_writepage is TRUE,invoke @a_ops->writepage() on @page with @wbc,
                return value is stored in ret;otherwise,set @ret to -EAGAIN,goto "out".
+               /* we might did not allocate new bio,because current writeback blocks is too few */
+
                invoke mapping_set_error(),if @ret is not an error code,then no error would be set on the
                mapping.
             out:
            12: set @mpd->bio = @bio
                return @ret
+
+           /* mpage_end_io_write() : set by mpage_submi_io() if data direction is WRITE,it complete
+            *                        each vector in the bio,and then destroy the bio.
+            *                        for each vector,if block I/O on it is completed,invoke end_page_writeback()
+            *                        on the page,this will clear PG_writeback,and wake up processes that waiting
+            *                        PG_writeback cleared on this page.
+            */
 
         
 
