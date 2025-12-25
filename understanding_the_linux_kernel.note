@@ -16249,10 +16249,13 @@ Chapter 9 : Process Address Space
            * @vm_ops:         methods of the memory region
            * @vm_pgoff:       offset in PAGE_SIZE units
            * @vm_file:        the file this memory region map to(can be NULL)
-           * @vm_private_data: VMA private data,it was vm_pte(shared mm)
-           * @vm_truncate_count: used when releasing a linear address interval in a 
-           *                     non-linear file memory mapping
-           *                     # truncate_count or restart_addr
+           *                  # can be regular file or block device file
+           * @vm_private_data:
+           *                  VMA private data,it was vm_pte(shared mm)
+           * @vm_truncate_count:
+           *                  used when releasing a linear address interval in a 
+           *                  non-linear file memory mapping
+           *                  # truncate_count or restart_addr
            * @vm_region:      NOMMU mapping region
            *                  # CONFIG_MMU did not selected
            * @vm_policy:      NUMA policy for the VMA
@@ -17621,60 +17624,60 @@ Chapter 9 : Process Address Space
                use reserved memory.                                             /* it delegate a user process */
                so,call to pgtable_bad().
             9> notify perfermance swtich event about PERF_COUNT_SW_PAGE_FAULTS.
-            10> if we are in an interrupt,have no user context or are running in an atomic region then we must
-                not take the fault.
-                so,if in_atomic() OR !@mm,then call to bad_area_nosemaphore() and return to caller.
-                /* interrupt handler never use of memory descriptor,thus it must be NULL @mm */
-            11> down_read_trylock() on the memory semaphore.
-                if we failed,then we can know there is another kernel path is holding it now.
-                next,check if the fault is not from userspace AND check @regs->ip is not in well defined areas
-                of code,then call to bad_area_nosemaphore() and return to caller.
-                !! PF_USER closed => fault from kernel
-                   @ip is not in well defined areas => the kernel validly references user space in a bad area
+           10> if we are in an interrupt,have no user context or are running in an atomic region then we must
+               not take the fault.
+               so,if in_atomic() OR !@mm,then call to bad_area_nosemaphore() and return to caller.
+               /* interrupt handler never use of memory descriptor,thus it must be NULL @mm */
+           11> down_read_trylock() on the memory semaphore.
+               if we failed,then we can know there is another kernel path is holding it now.
+               next,check if the fault is not from userspace AND check @regs->ip is not in well defined areas
+               of code,then call to bad_area_nosemaphore() and return to caller.
+               !! PF_USER closed => fault from kernel
+                  @ip is not in well defined areas => the kernel validly references user space in a bad area
 
-                otherwise,call to down_read() wait for the semaphore until another kernel control path release it.
+               otherwise,call to down_read() wait for the semaphore until another kernel control path release it.
                 
-                if we succeed to try down read semaphore,then call to might_sleep(),because in this case,we will
-                have missed might_sleep() from down_read().
-            12> find out the VMA from @mm by @address.
-                if unfound,call to bad_area() and return.
-                that is the linear address is outside to this process's address space.
-            13> if @vm_start <= @address,goto good_area.
-            14> /* did not goto good_area. */
-                if @vm_flags disabled VM_GROWSDOWN
-                then call to bad_area() and return.
-                /**
-                 * because @address < @vm_start,and the VMA does not mapping to a stack,thus we can not to
-                 * grows it to include the fault @address
-                 * # stack growing
-                 */
-            15> if the fault come from userspace
-                then
-                        check if @address + 65536 + 32 * sizeof(unsigned long) < @regs->sp
-                        then call to bad_area() and return.
-                        /**
-                         * accessing the stack below %sp is always a bug.
-                         * the large cushion allows instructions like "enter" and "pusha" to work.
-                         */
-            16> do_page_fault() attempt to expands stack through expand_stack(VMA, @address).
-                if failed,then call to bad_area() and return.
-                /* the case that @address is permitted only when the stack is allowed to be expanded to include it */
-            good_area:
-            17> set local variable @write to (@error_code & PF_WRITE).
-                if the VMA is not allowed to be written
-                then call to bad_area_access_error() and return.
-                /* permission deny */
-            18> call to handle_mm_fault(),which handles this page fault.
-                /* which function had defined in <mm/memory.c> */
-                if it resulted in VM_FAULT_ERROR,then call to mm_fault_error() and return,we can not handles this
-                Page Fault.
-            19> if handle_mm_fault() is resulted in VM_FAULT_MAJOR
-                then increase @maj_flt in task struct and notify perfermance sw event about PERF_COUNT_SW_PAGE_FAULTS_MAJ.
-                otherwise,increase @min_flt in task struct and notify perfermance sw event about PERF_COUNT_SW_PAGE_FAULTS_MIN.
-            20> call to function check_v8086_mode(),if the @address hit the DOS screen memory VA from vm86 mode,
-                and "(@address - 0xA0000) >> PAGE_SHIFT" is less than 32,have to enable the bit "1 << bit" in @screen_bitmap of
-                @thread member in task struct.
-            21> up_read() to release memory semaphore.
+               if we succeed to try down read semaphore,then call to might_sleep(),because in this case,we will
+               have missed might_sleep() from down_read().
+           12> find out the VMA from @mm by @address.
+               if unfound,call to bad_area() and return.
+               that is the linear address is outside to this process's address space.
+           13> if @vm_start <= @address,goto good_area.
+           14> /* did not goto good_area. */
+               if @vm_flags disabled VM_GROWSDOWN
+               then call to bad_area() and return.
+               /**
+                * because @address < @vm_start,and the VMA does not mapping to a stack,thus we can not to
+                * grows it to include the fault @address
+                * # stack growing
+                */
+           15> if the fault come from userspace
+               then
+                       check if @address + 65536 + 32 * sizeof(unsigned long) < @regs->sp
+                       then call to bad_area() and return.
+                       /**
+                        * accessing the stack below %sp is always a bug.
+                        * the large cushion allows instructions like "enter" and "pusha" to work.
+                        */
+           16> do_page_fault() attempt to expands stack through expand_stack(VMA, @address).
+               if failed,then call to bad_area() and return.
+               /* the case that @address is permitted only when the stack is allowed to be expanded to include it */
+           good_area:
+           17> set local variable @write to (@error_code & PF_WRITE).
+               if the VMA is not allowed to be written
+               then call to bad_area_access_error() and return.
+               /* permission deny */
+           18> call to handle_mm_fault(),which handles this page fault.
+               /* which function had defined in <mm/memory.c> */
+               if it resulted in VM_FAULT_ERROR,then call to mm_fault_error() and return,we can not handles this
+               Page Fault.
+           19> if handle_mm_fault() is resulted in VM_FAULT_MAJOR
+               then increase @maj_flt in task struct and notify perfermance sw event about PERF_COUNT_SW_PAGE_FAULTS_MAJ.
+               otherwise,increase @min_flt in task struct and notify perfermance sw event about PERF_COUNT_SW_PAGE_FAULTS_MIN.
+           20> call to function check_v8086_mode(),if the @address hit the DOS screen memory VA from vm86 mode,
+               and "(@address - 0xA0000) >> PAGE_SHIFT" is less than 32,have to enable the bit "1 << bit" in @screen_bitmap of
+               @thread member in task struct.
+           21> up_read() to release memory semaphore.
 
           !! KERNEL NEVER ACCESS TO THE ADDRESS LOWER THAN OR EQUAL TO PAGE_OFFSET,IF IT HAVE ACCESSED TO,THEN THAT MUST BE
              A KERNEL BUG,THUS KERNEL MUST GENERATES AN OOPS.
@@ -17738,7 +17741,7 @@ Chapter 9 : Process Address Space
         new created PTE(with type pte_t).
         if any allocating was failed,VM_FAULT_OOM would be returned to caller by handle_mm_fault().
         if no allocating was failed,function handle_pte_fault() will be called.
-        /**
+        /**                                  ^defained in <mm/memory.c>
          * if PMD is not present,pte_alloc_map() proceed to call __pte_alloc(),a new PTE would be allocated,
          * and set Present for the PMD let PTE populated on it.
          * # if PMD is present,then there must be another PTE is populating on it now,so have to free the
@@ -34915,9 +34918,61 @@ Chapter 16 : Accessing Files
             *                        PG_writeback cleared on this page.
             */
 
-        
+      Memory Mapping :
+        a memory region can be associated with some portion of either a regular file or a block device file,
+        access to a byte within the memory region is translated by kernel into an operation on the corresponding
+        byte of the file,this is called "memory mapping".
+
+        memory mapping types :
+          1> shared
+             each write operation on the pages of the memory region changes the file on disk,that means the
+             changing is visible to all other processes that map the same file.
+          2> private
+             meant to be used when the process creates the mapping just to read the file,not to write it.
+             thus,private mapping is more efficient than shared mapping,but the changing on a privately
+             mapped page will cause it to stop mapping the page in the file,rather than create a copying
+             that is owned by current process. /* Copy-on-Write,page table entry will be reset to the copied page */
+             any modification on the mapping do not change the content of file on disk,nor is the change
+             visible to any other processes that access the same file.
+             ! if there is some process write into file through general methods such sys_write(),the change
+               is visible to all processes they mapped the memory region even it is private mapping.
+
+        system call mmap() is used to establish memory mapping for call process,and system call munmap()
+        is used to eliminate the mapping. /* MAP_SHARED => VM_SHARED, MAP_PRIVATE => ~VM_SHARED */
+
+        Memory Mapping Data Structures :
+          a memory mapping is represented by a combination of the following data structures -
+            > the inode object associated with the mapped file
+            > the address_space object of the mapped file
+            > a file object for each different mapping performed on the file by different processes
+            > a vm_area_struct descriptor for each different mapping on the file
+            > a page descriptor for each page frame assigned to a memory region that maps the file
+
+          vm_area_struct.vm_file  => the file object that this VMA mapped
+          vm_area_struct.vm_pgoff => the file portion offset in PAGE_SIZE
+          vm_area_struct.vm_start -- vm_area_struct.vm_end => the length of file portion
+
+          file.f_mapping          => address_space of the file's inode
+          
+          address_space.host      => the file's inode
+          address_space.i_mmap    => radix priority search tree(PST),it collects the
+                                     memory regions belonging to the address space
+
+          ! pages of shared memory mapping are always included in the page cache,
+            pages of private memory mapping are included in the page cache as long as
+            they are unmodified.
+            the duplicate page replace the original page in page table entry,and it is
+            not included in page cache because it no longer contains valid data representing
+            the file on disk.
+          ! the newly established memory mapping is a memory region that does not include
+            any page;as the process references an address inside the region,a Page Fault occurs
+            and the handler checks whether @fault method of the memory region is defined,if
+            undefined,the memory region does not map a file on disk;otherwise,it does,and the
+            method takes care of reading the page by accessing the block device.
+            /* almost all disk-based filesystems and block device files implemente the
+             * @fault method by means of the filemap_fault() function,which is defined in
+             * <mm/filemap.c>                ^called by __do_fault() from do_nonlinear_fault()
+             */
 
 
-            
-
-
+         
