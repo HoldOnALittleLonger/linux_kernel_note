@@ -17028,19 +17028,27 @@ Chapter 9 : Process Address Space
             for create a new memory region,it needs a free(unmapped) linear address interval,this
             is handled by get_unmapped_area().
             but might an invalid address is returned by get_unmapped_area(),in this case,propagate it
-            to caller.
+            to caller. /* if @file defined get_unmapped_area(),then invoke the method
+                        * otherwise,invoke the get_unmapped_area() that specified by memory descriptor
+                        */
             calculate virtual memory region flags through @prot,@flags by the routines calc_vm_prot_bits(),
             and calc_vm_flag_bits() respectively.
-            just these is not enough,have to bitor @mm->def_flags,VM_MAYREAD,VM_MAYWRITE,VM_MAYEXEC.
+            only these is not enough,have to bitOR @mm->def_flags,VM_MAYREAD,VM_MAYWRITE,VM_MAYEXEC.
             next,check mlock,if @vm_flags enabled VM_LOCKED,then compare rlimit(RLIMIT_MEMLOCK) with the
             new locked memory pages,if exceeded limit and no capable to CAP_IPC_LOCK,then returns -EAGAIN.
+            /* @locked := @len >> PAGE_SHIFT         => calculate how many pages are going to be locked
+             *                                          if @len is less than PAGE_SIZE,the result is 1
+             * @locked += @mm->locked_vm             => total locked pages of @mm
+             * @lock_limit := rlimit(RLIMIT_MEMLOCK) => system limit
+             * @lock_limit >> PAGE_SHIFT             => the limited number pages can be locked
+             */
 
             if we are in file mapping that @file is not NULL,then retrieve inode of the file,and process
             MAP_SHARED file mapping or MAP_PRIVATE file mapping.
               file mapping MAP_SHARED {
                       return -EACCESS if PROT_WRITE is TRUE but @file deny write
                       return -EACCESS if inode IS_APPEND() but @file permit write
-                      return -EAGAIN if there are mandatory locks on the @file
+                      return -EAGAIN  if there are mandatory locks on the @file
                       /* invoke locks_verify_locked() on @file's inode */
                       enable VM_SHARED and VM_MAYSHARE in virtual memory region flags
                       if @file deny write,then have to disable VM_MAYWRITE and VM_SHARED in VMA flags
@@ -17135,7 +17143,7 @@ Chapter 9 : Process Address Space
                        set @correct_wcount to 1.
 
                        VMA->@vm_file := @file
-                       lock @file through get_file()
+                       increase @file's refcount through get_file()
                        invoke @file specified mmap() routine,goto unmap_and_free_vma if failed
                        if enabled VM_EXECUTABLE,add a vma mapping executable /* require @mmap_sem */
 
@@ -33175,7 +33183,13 @@ Chapter 16 : Accessing Files
                * file has truncated,or readpage error,etc.
                */
               invoke file_accessed() on @filp to update atime,if necessary.
-
+                     /* call to touch_atime() with @file->f_path.mnt and @file->f_path.dentry
+                      *                                          ^vfsmount             ^dentry
+                      * update atime of the inode get from @dentry->d_inode
+                      * # __makr_inode_dirty(@inode, I_DIRTY_SYNC),sync inode's access time
+                      * # before set inode's atime,have to invoke mnt_want_write() on @mnt to get
+                      *   write access to the mount,and invoke mnt_drop_write() later
+                      */
             image >
 
               if @len spanned two or more pages,the for-cycle must get continue into next iteration for read more
@@ -34974,5 +34988,47 @@ Chapter 16 : Accessing Files
              * <mm/filemap.c>                ^called by __do_fault() from do_nonlinear_fault()
              */
 
+        Creating a Memory Mapping :
+          system call mmap() can be issued by User Mode process to create a memory mapping.
+          for compatibility reasons,in the 80x86 architecture,kernel reserves two entries in
+          systemm call table for mmap(),one is 90,another is 192.system call number 90 corresponds
+          to the old_mmap(),it is used by older C libraries;system call number 192 corresponds to
+          the sys_mmap2(),it is used by recent C libraries.
+          /* for 64 bit system,only one entry is exist,the number is 9 */
+          sys_old_mmap() is defined in <mm/mmap.c>,it ends up call to sys_mmap_pgoff().
+          the difference between them is :
+            sys_old_mmap() requires one parameter is named @arg type of struct mmap_arg_struct *.
+            but sys_mmap_pgoff() requires six parameters,and the routine invoke do_mmap_pgoff().
+            /**
+             * mmap type : MAP_ANONYMOUS - the mapping is not associated with any disk-based file
+             *                             this type can combined with MAP_SHARED,in this case,
+             *                             the mapping can be used to map the file in tmpfs.
+             */
 
+          function do_mmap_pgof() will invoke mmap_region(),if we are mapping a file,the function
+          would invoke the mmap() method in the @f_op of that file.
+          it usually implemented by generic_file_mmap().
+
+          <mm/filemap.c>
+            /**
+             * generic_file_mmap - mmap() method for general disk-based filesystem
+             * @file:              the file object
+             * @vma;               VMA @file will map to
+             * return:             0 OR -ENOEXEC
+             * # this routine is very simple,because it just take care of the fault()
+             *   method of the VMA
+             *   first,check @a_ops->readpage(),it can not be un-implemented,because
+             *   we need to readpage() from file on disk into memory,if it is the case,
+             *   return -ENOEXEC
+             *   second,invoke file_accessed() on @file,this function update atime of it
+             *   next,use @generic_file_vm_ops to replace the @vm_ops of @vma,and
+             *   enable VM_CAN_NONLINEAR flag in @vm_flags of the @vma
+             * # @generic_file_vm_ops is an object type of const struct vm_operations_struct,
+             *   which is defined in <mm/filemap.c>,the only valid member in which is
+             *   fault() method,it is set to filemap_fault()
+             * # page for mapping is not allocated immediately,just defer this until
+             *   process need to access the linear address in the mapping,so Page Fault
+             *   exception will occurs,and then filemap_fault() is called
+             */
+            int generic_file_mmap(struct file *file, struct vm_area_struct *vma);
          
