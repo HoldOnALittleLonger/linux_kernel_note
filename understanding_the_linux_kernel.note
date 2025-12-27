@@ -35031,4 +35031,150 @@ Chapter 16 : Accessing Files
              *   exception will occurs,and then filemap_fault() is called
              */
             int generic_file_mmap(struct file *file, struct vm_area_struct *vma);
+
+            /**
+             * <linux/mm.h>
+             *   # vm_fault - filled by the Page Fault handler and passed to the vma's
+             *   #            fault() method
+             *   struct vm_fault {
+             *           unsigned int flags;            # FAULT_FLAG_xxx flags
+             *                                          # give details about how the fault was handled
+             *
+             *           pgoff_t pgoff;                 # logical page offset based on vma
+             *                                          # should be used in favour of @virtual_address,
+             *                                          # if possible
+             *                                          # if @pgoff is used,one may set VM_CAN_NONLINEAR
+             *                                          # in @vm_flags of the vma to get nonlinear
+             *                                          # mapping support
+             *
+             *           void __user *virtual_address;  # faulting virtual address
+             *
+             *           struct page *page;             # fault() method should return
+             *                                          # a page here,unless VM_FAULT_NOPAGE
+             *                                          # is set --> VM_FAULT_ERROR implied NOPAGE
+             *   };
+             *   FAULT_FLAG_WRITE 0x01          =>    fault was a write access
+             *   FAULT_FLAG_NONLINEAR 0x02      =>    fault was via a nonlinear mapping
+             *   FAULT_FLAG_MKWRITE 0x04        =>    fault was mkwrite of existing pte
+             */
+
+            /**
+             * filemap_fault - read in file dat for page fault handling
+             * @vma:           vma in which the fault was taken
+             * @vmf:           containing details of the fault
+             * return:         VM_FAULT_LOCKED OR VM_FAULT_MAJOR | VM_FAULT_LOCKED
+             *                 OR error code
+             * # EXPORT_SYMBOL
+             */
+            int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
+
+            description for filemap_fault() :
+              the main task should be handled by this routine is :
+                find out the page that corresponds to the fault linear address.
+                if it has been cached,then commit readahead on it.
+                if it has not been cached,invoke page_cache_read() for allocarte
+                and add it into page cache,then readpage() on it.
+                if it has no PG_uptodate,then we have to update it.
+                /**
+                 * the linear address relative @vma,and @pgoff also is relative @vma.
+                 * we can easily to know that the linear address resided on the page
+                 * in @vma has offset @pgoff.
+                 */
+
+              first,retrieve page offset from @vmf->pgoff,then retrieve size of inode
+              of the file @vma->vm_file.
+              we must convert the size to page offset,then compare it with @vmf->pgoff,
+              if the size is less than or equal to @pgoff,return VM_FAULT_SIGBUS --
+              because the file portion is not existed.
+              next,invoke find_get_page() on the page cache,index is @pgoff.
+                                                            /* VMA use @vm_pgoff to associate
+                                                             * mapping page with the page cache
+                                                             */
+              the page is found {
+                      do_async_mmap_readahead() on it,pass it arguments
+                        @vma, @vma->file->f_ra, @vma->file, the page, @pgoff
+                        /* page_cache_async_readahead() if the page is PG_reclaim,
+                         * macro function is PageReadahead()
+                         * but,if @vma set VM_RandomReadHint,then do not readahead.
+                         * @ra's @mmap_miss will decrease if its value greater than 0.
+                         */
+                      lock the page through lock_page() /* might sleep */
+                                            /* trylock_page() => test_and_set_bit_lock()
+                                             * if PG_locked have been setup,invoke __lock_page()
+                                             * wait on the bit cleared
+                                             */
+                      check whether the page get truncated -- the page's @mapping != @file's @f_mapping
+                      in this case,we must unlock it,and put it,then goto label "no_cached_page".
+                      /* it is no longer cached by the page cache */
+              }
+              the page is not found {
+                      invoke do_sync_mmap_readahead(),pass it arguments
+                        @vma, @vma->vm_file->f_ra, @vma->vm_file, @pgoff
+                      /**
+                       * do_sync_mmap_readahead() is similar to do_async_mmap_readahead().
+                       * if VM_RandomReadHint is set,then we do not readahead.
+                       * if VM_SequentialReadHint is set OR the page we want is next to @ra->prev_pos,
+                       * then invoke page_cache_sync_readahead() and return.
+                       * if @ra->mmap_miss less than INT_MAX,increase it --> mmap miss.
+                       * if @ra->mmap_miss greater than MMAP_LOTSAMISS,return without readahead.
+                       *                   # we have been lost enough
+                       * the last case,we need to update readahead window
+                       *   calculate new @ra_pages through max_sane_readahead()
+                       *   if it is not zero,then set
+                       *     @ra->start := max_t(long, 0, @pgoff - @ra_pages / 2)
+                       *     @ra->size := @ra_pages
+                       *     @ra->async_size := 0
+                       *     invoke ra_submit() to process readahead.
+                       *            # __do_page_cache_readahead()
+                       *   otherwise,return to caller without process readahead.
+                       */
+                      coun_vm_event() PGMAJFAULT
+                      set local variable @ret to VM_FAULT_MAJOR,it is used to store return value.
+
+              retry_find:
+                      try find_lock_page() at @pgoff,if the page still un-cached,goto label "no_cached_page".
+              }
+              at there,we must been got the page descriptor,so check PG_uptodate for it.if it is not uptodated,
+              goto label "page_not_uptodate",we must issue readpage() on it.
+                         # if readahead is succeed,then PG_uptodate should been setup -- by mpage_readpage()
+              we have to recheck again the size of inode,maybe a kernel control path have truncated the file.
+              /* readpage() would release PG_locked when accomplished reading,but kernel preempt can take
+               * place before we invoke lock_page() at previous steps.
+               */
+              if it is the case,we have to unlock the page,page_cache_release() it,return VM_FAULT_SIGBU.
+              /* the file is truncated,thus the data in that page is not consist with the file on disk */
+              it is not the case,we have succeed to get page and read it.
+              update @ra's @prev_pos to @pgoff,of course,in file offset.
+              set @vmf->page to the page we got.
+              return @ret | VM_FAULT_LOCKED. /* @ret's default value is 0
+                                              * if we did async readahead,the return value is VM_FAULT_LOCKED,
+                                              * if it is sync readahead,the value is VM_FAULT_MAJOR | VM_FAULT_LOCKED.
+                                              */ ==> normal path
+
+              no_cached_page: /* no readahead,just read a specified page */
+                the page is not in page cache,invoke page_cache_read() to cache it.this function allocate new
+                page,add it into pagecache,if succeed,call readpage() on it.
+                if page_cache_read() succeed,we jump to "retry_find",then we get into the normal path.
+                otherwise,return VM_FAULT_OOM if the function returned -ENOMEM,return VM_FAULT_SIGBUS for others.
+
+              page_not_uptodate:
+                we got the page,but it has no PG_uptodate.
+                ClearPageError() on the page.
+                invoke readpage() of the @a_ops to read it.
+                if succeed,then wait_on_page_locked,check PG_uptodate,it still no PG_uptodate,record the error -EIO.
+                next,page_cache_release() the page.
+                check error,if it is 0 -- readpage() succeed and has PG_uptodate OR it is AOP_TRUNCATED_PAGE,
+                then we jump to "retry_find" attempt find out it again.
+                otherwise,shrink_readahead_size_eio() for the file's @f_ra,return VM_FAULT_SIGBUS.
+                /* shrink_readahead_size_eio() - @ra->ra_pages /= 4 */
+
+            !! function do_nonlinear_fault() invoke to __do_fault(),and __do_fault() invoke to fault()
+               method of that VMA.
+               if everything is OK,__do_fault() will makeup a new Page Table Entry that corresponds
+               the fault address,the page in Page Table Entry is the page got from fault() method,its address 
+               is recorded in @vmf.page.
+
+              
+
+
          
