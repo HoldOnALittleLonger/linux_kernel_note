@@ -16907,7 +16907,7 @@ Chapter 9 : Process Address Space
               link the file : /* __vma_link_file() */
                 routine __vma_link_file() is used to deal with this.
                 if the @vm_file is not NULL,then retrieve the address space which corresponding
-                to the file,that is the member @f_mapping of struct file.
+                to the file,that is the member @f_mapping of this file.
                 if @vm_flags enabled VM_DENYWRITE,then decrease
                         @file.f_path.dentry->d_inode->@i_writecount /* write deny */
                         /* @dentry member is a directory entry */
@@ -17140,8 +17140,13 @@ Chapter 9 : Process Address Space
                        if enabled VM_GROWSDOWN AND VM_GROWSUP,then goto free_vma,error code is -EINVAL.
                        if enabled VM_DENYWRITE,then invoke deny_write_access() on @file to forbit writing;
                        goto free_vma and returns -ETXTBSY if routine did not return _zero_,otherwise,
-                       set @correct_wcount to 1.
-
+                       set @correct_wcount to 1.           /* deny_wrtie_access() atomaticly decrease 
+                                                            * @i_writecount of the file's inode,if
+                                                            * it is not greater than 0;
+                                                            * if its value is greater than 0,-ETXTBSY
+                                                            * would be returned to caller.
+                                                            * <fs/namei.c>
+                                                            */
                        VMA->@vm_file := @file
                        increase @file's refcount through get_file()
                        invoke @file specified mmap() routine,goto unmap_and_free_vma if failed
@@ -17193,8 +17198,15 @@ Chapter 9 : Process Address Space
 
             12> invoke vma_link()
                 set @file to VMA->@vm_file
-            13> once VMA denies write,undo temporary denial count,
-                that is @correct_wcount > 0 => increase @file's indoe @i_writecount.
+            13> once VMA denies write,undo temporary denial count, /* VM_DENYWRITE is set */
+                that is @correct_wcount is TRUE => increase @file's indoe @i_writecount.
+                /**
+                 * if VM_DENYWRITE is set,vma_link() will decrease @i_writecount,too.so we need to
+                 * undo the temporary denial count.
+                 * actually,the recent kernel version have ignored MAP_DENYWRITE flag.
+                 * long ago-linux 2.0 and earlier-it signaled that attempts to write to the underlying file
+                 * should fail with ETXTBSY,but this was a source of denial-of-service attacks.
+                 */
             out:
             14> raise performance event about memory map on VMA.
             15> @mm->total_vm += @len >> PAGE_SHIFT
@@ -17225,7 +17237,7 @@ Chapter 9 : Process Address Space
         The do_munmap() function :
           <mm/mmap.c>
             /**
-             * do_munmap - routine used by the kernel to delete an linear address interval from
+             * do_munmap - routine used by kernel to delete an linear address interval from
              *             a specified memory address space
              * @mm:        memory descriptor
              * @start:     startup linear address
@@ -17248,7 +17260,7 @@ Chapter 9 : Process Address Space
 
             brief description for do_munmap() :
               this function does these works {
-                find out VMA, split it if necessary, chain previous elements and remainders,
+                find out VMA, split it if necessary,chain previous VMAs and the rest.
                 munlock if necessary, detach VMA from address space, unmap page frames,
                 remove VMA from memory descriptor
               }
@@ -17257,12 +17269,12 @@ Chapter 9 : Process Address Space
               next,try to find out the VMA(@vma) which overlaps the interval,if unfound or no overlapping,
               just return _zero_.      /* find_vma_prev() */
               checks if the VMA have to be split for deleting the interval,if it is,then have to checks
-              @mm->map_cout;because,spliting would creates new memory regions,if reached limit,returns 
+              @mm->map_count;because,spliting would creates new memory regions,if reached limit,returns 
               -ENOMEM.
               help routine __split_vma(@mm, VMA, @start, 0) is invoked for split VMA,return error code
               if any error has encountered.
               after we succeed to split VMA,have to update @prev(a local variable used by find_vma_prev())
-              to VMA.
+              to VMA -- the previous VMA of our target,it has overlapped our target.
               function have to checks it is spliting the last one through find_vma(@mm, @end).
               /* @end := @start + @len */
               if @last includes the interval but which does not match to it,then split @last through
@@ -17288,7 +17300,9 @@ Chapter 9 : Process Address Space
               /* if @mm->locked_vm is TRUE,and for each VMA whose @vm_flags enabled VM_LOCKED */
 
               call to detach_vmas_to_be_unmapped() to detach the VMAs between @prev and @end,these VMAs
-              spanned [@start, @end). /* operates red-black tree and memory regions list */
+              spanned [@start, @end). /* operates red-black tree and memory regions list
+                                       * this routine also splice @prev and the rest
+                                       */
               call to unmap_region() to unmap page frames of the VMAs between @prev and @end,these VMAs
               spanned [@start, @end).
               call to remove_vma_list() to remove the VMA from memory descriptor.
@@ -21512,62 +21526,77 @@ Chapter 12 : The Virtual Filesystem
        <linux/fs.h>
          /**
           * inode - inode object
-          * @i_hash:    inode hash list,used to speed up the inode search when kernel
-          *             have known the inode number and the super block it belongs to
-          * @i_list:    backing dev IO list
-          * @i_sb_list: inode list of the super block,point to the adjacent inode object
-          * @i_dentry:  in-use dentry objects list corresponding to this inode
-          * @i_ino:     inode number
-          * @i_count:   usage counter
-          * @i_nlink:   number of hard links
-          * @i_uid:     inode user ID
-          * @i_gid:     inode group ID
-          * @i_rdev:    real device identifier,used for device file,contains the
-          *             major number and minor number of the device
-          * @i_blkbits: block size in number of bits
-          *             # block is filesystem specific data unit,thus a page might
-          *               contains several blocks,the number of blocks in a page
-          *               is able to be calculated through "page size >> @i_blkbits"
-          *               that is - "page size / (2^@i_blkbits)"
-          * @i_version: version number,automatically increased after each use
-          * @i_size:    inode size in bytes
-          * @i_size_seqcount:    sequence counter used in SMP systems to get
-          *                      consistent values for @i_size
-          * @i_atime:   inode access time stamp
-          * @i_mtime:   inode modify time stamp
-          * @i_ctime:   inode change time stamp
-          * @i_blocks:  number of blocks of the inode
-          * @i_bytes:   number of bytes of the last block
-          * @i_mode:    file mode
-          * @i_lock:    member accessing concurrent protection
-          * @i_mutex:   inode concurrent protection
-          *             this mutex would be locked up by some function such pipe_read()
-          * @i_alloc_sem:    direct I/O concurrent protection
-          * @i_op:      inode operations
-          * @i_fop:     file operations
-          * @i_sb:      the super block this inode belongs to
-          * @i_flock:   file lock supporting
-          * @i_mapping: an address space object used to indicates the range in memory
-          *             where this file is mapped
-          * @i_data:    saved inode mapping address space
-          * @i_dquot:   quota system supporting
-          * @i_devices: list of inodes relate to a device
-          *             # for example,the character device,this member is added into
-          *               the list cdev.list
-          * @i_pipe:    pipe specific
-          * @i_bdev:    block device driver
-          * @i_cdev:    character device driver
-          * @i_generation:    inode version number used by some filesystems
-          * @i_fsnotify_mask:    filesystem notification mechanism
-          * @i_fsnotify_mark_entries:    filesystem notification mechanism
-          * @inotify_watches:    inotify mechanism
-          * @inotify_mutex:    inotify mechanism
-          * @i_state:   inode state flag
-          * @dirtied_when:    jiffies of first dirtying
-          * @i_flags:   inode flag
-          * @i_writecount:    usage counter for writing processes
-          * @i_security:    security specific
-          * @i_private: private data
+          * @i_hash:      inode hash list,used to speed up the inode search when kernel
+          *               have known the inode number and the super block it belongs to
+          * @i_list:      backing dev IO list
+          * @i_sb_list:   inode list of the super block,point to the adjacent inode object
+          * @i_dentry:    in-use dentry objects list corresponding to this inode
+          * @i_ino:       inode number
+          * @i_count:     usage counter
+          * @i_nlink:     number of hard links
+          * @i_uid:       inode user ID
+          * @i_gid:       inode group ID
+          * @i_rdev:      real device identifier,used for device file,contains the
+          *               major number and minor number of the device
+          * @i_blkbits:   block size in number of bits
+          *               # block is filesystem specific data unit,thus a page might
+          *                 contains several blocks,the number of blocks in a page
+          *                 is able to be calculated through "page size >> @i_blkbits"
+          *                 that is - "page size / (2^@i_blkbits)"
+          * @i_version:   nversion number,automatically increased after each use
+          * @i_size:      inode size in bytes
+          * @i_size_seqcount: 
+          *               sequence counter used in SMP systems to get
+          *               consistent values for @i_size
+          * @i_atime:     inode access time stamp
+          * @i_mtime:     inode modify time stamp
+          * @i_ctime:     inode change time stamp
+          * @i_blocks:    number of blocks of the inode
+          * @i_bytes:     number of bytes of the last block
+          * @i_mode:      file mode
+          * @i_lock:      member accessing concurrent protection
+          * @i_mutex:     inode concurrent protection
+          *               this mutex would be locked up by some function such pipe_read()
+          * @i_alloc_sem: direct I/O concurrent protection
+          * @i_op:        inode operations
+          * @i_fop:       file operations
+          * @i_sb:        the super block this inode belongs to
+          * @i_flock:     file lock supporting
+          * @i_mapping:   an address space object used to indicates the range in memory
+          *               where this file is mapped
+          * @i_data:      saved inode mapping address space
+          * @i_dquot:     quota system supporting
+          * @i_devices:   list of inodes relate to a device
+          *               # for example,the character device,this member is added into
+          *                 the list cdev.list
+          * @i_pipe:      pipe specific
+          * @i_bdev:      block device driver
+          * @i_cdev:      character device driver
+          * @i_generation:
+          *               inode version number used by some filesystems
+          * @i_fsnotify_mask:
+          *               filesystem notification mechanism
+          * @i_fsnotify_mark_entries:
+          *               filesystem notification mechanism
+          * @inotify_watches:
+          *               inotify mechanism
+          * @inotify_mutex:
+          *               inotify mechanism
+          * @i_state:     inode state flag
+          * @dirtied_when:
+          *               jiffies of first dirtying
+          * @i_flags:     inode flag
+          * @i_writecount:
+          *               usage counter for writing processes
+          *               == 0 -> no writers,no VM_DENYWRITE mappings
+          *                < 0 -> vm_area_structs with VM_DENYWRITE set exist
+          *                > 0 -> users are writing to the file
+          *               # get_write_access(): i_writecount += 1 <-> i_wrtiecount >= 0
+          *                 put_write_access(): --i_writecount
+          *                 deny_write_access(): i_writecount -= 1 <-> i_writecount <= 0
+          *
+          * @i_security:  security specific
+          * @i_private:   private data
           */
          struct inode {
                  struct hlist_node i_hash;
@@ -35173,8 +35202,9 @@ Chapter 16 : Accessing Files
                if everything is OK,__do_fault() will makeup a new Page Table Entry that corresponds
                the fault address,the page in Page Table Entry is the page got from fault() method,its address 
                is recorded in @vmf.page.
-
-              
-
+            !! system call sys_munmap() is used to unmap memory mapping.even the memory mapping is removed
+               by do_munmap(),the page that VMA mapped still alive in page cache of the file.function
+               remove_vma() called by remove_vma_list() just fput() @vm_file member,page cache stay reference
+               on it.the writeback is handled later by the BDI.
 
          
