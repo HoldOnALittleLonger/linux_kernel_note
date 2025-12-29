@@ -739,7 +739,7 @@ Chapter 2 : Memory Addressing
        *  so a Page Directory can address up to 1024x1024x4096 = 2^32 memory cells.
        */
 
-    the entries of Page Directories and Page Tables have the same structure,each entry includes the following fields :
+    The entries of Page Directories and Page Tables have the same structure,each entry includes the following fields :
       Present flag :
         it = 1,the referred-to page(or Page Table) is contained in main memory;
         it = 0,the referred-to page(or Page Table) is not contained in main memory,the remainder bits may be used by OS for
@@ -1041,10 +1041,9 @@ Chapter 2 : Memory Addressing
      The Linear Address Fields :
        the macros simplify Page Table handling >
          PAGE_SHIFT
-           specifies the length in bits of the Offset field;
+           specifies the length in bits of the Offset field; /* usually is defined to 12 */
            this macro is used by PAGE_SIZE to return the size of the page,finally,
            the PAGE_MASK macro yields the value 0xfffff000 and is used to mask all the bits of the Offset field.
-           /* usually is defined to 12 */
 
          PMD_SHIFT
            the total length in bits of the Offset and Table fields of a linear address;
@@ -1206,6 +1205,12 @@ Chapter 2 : Memory Addressing
             pte_young()       /*  Accessed  */
             pte_file()        /*  Dirty,when the Present is cleared and the Dirty flag is set,the page belongs to a
                                *  non-linear disk file mapping.
+                               *  pte_flags(@pte) & _PAGE_FILE
+                               *                    ^_PAGE_BIT_DIRTY => 6
+                               */
+            pte_flags()       /*  retrieve flags of the pte
+                               *  native_pte_vla(@pte) & PTE_FLAGS_MASK
+                               *  ^pte.pte               ^~PTE_PFN_MASK => PHYSICAL_PAGE_MASK
                                */
     
           Page flag setting :
@@ -1354,6 +1359,14 @@ Chapter 2 : Memory Addressing
            *  if a new Page Table is allocated,the entry corresponding to @addr is initialized and the User/Supervisor is set,
            *  if the Page Table is kept in high memory,the kernel establishes a temporary kernel mapping,to be released by
            *  pte_unmap().
+           *  # pte_unmap() is defined in <arch/x86/include/asm/pgtable_32.h>
+           *    the macro function is expanded to kunmap_atomic(@pte, __KM_PTE)
+           *    macro __KM_PTE is defined in the same file,and it is expanded to
+           *      KM_NMI_PTE / KM_IRQ_PTE / KM_PTE0
+           *      |            |            |            
+           *      |            |            +--> neither NMI nor IRQ
+           *      |            +--> in_nmi() is FALSE and in_irq() is TRUE
+           *      +--> in_nmi() is TRUE
            */
     
           pte_alloc_kernel(mm, pmd, addr)
@@ -17595,11 +17608,11 @@ Chapter 9 : Process Address Space
 
           what do_page_fault() does :
             1> retrieve task struct of current process.
-               retrieve the memory descriptor of current process.
+               retrieve the memory descriptor of current process. /* @current->mm */
             2> retrieve the linear address which caused the Page Fault exception from
                control register cr2.
                /* CPU control unit stores the address in cr2 when Page Fault occurred */
-            3> process kernel memory checking to detect and handle instructions that would 
+            3> execute kernel memory checking to detect and handle instructions that would 
                cause a page fault for both a tracked kernel page and a userspace page.
                /* kmemcheck_active(@regs) T => kmemcheck_hide(@regs) */
             4> prefetchw on the semaphore object of memory descriptor,this action can update
@@ -17609,7 +17622,7 @@ Chapter 9 : Process Address Space
                returns _zero_;if kernel mmiotrace is active,and the fault had been handled by
                kmmio_handler(),then this function returns 1,in this case,do_page_fault() no
                more things can be done,just return to caller as well.
-            6> if we fault in kernel space {
+            6> if we fault in kernel space { /* address >= TASK_SIZE_MAX */
                        if @error_code disabled PF_PSVD, PF_USER, PF_PROT
                        then
                                have to check if this fault is vmalloc_fault,and if it is,then just
@@ -17661,7 +17674,7 @@ Chapter 9 : Process Address Space
                 
                if we succeed to try down read semaphore,then call to might_sleep(),because in this case,we will
                have missed might_sleep() from down_read().
-           12> find out the VMA from @mm by @address.
+           12> find out the VMA from @mm by @address. /* invoke find_vma() function */
                if unfound,call to bad_area() and return.
                that is the linear address is outside to this process's address space.
            13> if @vm_start <= @address,goto good_area.
@@ -17686,7 +17699,8 @@ Chapter 9 : Process Address Space
                /* the case that @address is permitted only when the stack is allowed to be expanded to include it */
            good_area:
            17> set local variable @write to (@error_code & PF_WRITE).
-               if the VMA is not allowed to be written
+               invoke access_error() on the VMA with @write and @error_code as the parameters.
+               if the VMA is not allowed to be written /* it is access error */
                then call to bad_area_access_error() and return.
                /* permission deny */
            18> call to handle_mm_fault(),which handles this page fault.
@@ -17780,11 +17794,11 @@ Chapter 9 : Process Address Space
           to @address and to determine how to allocate a new page frame for the process.
           /* pte_alloc_map() just populate PTE on a PMD,but does not set present for it */
           if PTE is not present
-                  which is _zero_ value
+                  PTE is _zero_ value /* the PTE is filled with 0 */
                           if VMA operation is not NULL and routine fault() is setup
                           then end up by call to do_linear_fault()
                           else end up by call to do_anonymous_page()
-                  it is used to mapping a file
+                  it is used to mapping a file /* pte_file() */
                           end up by call to do_nonlinear_fault()
                   end up by call to do_swap_page()
           proceed checking for FAULT_FLAG_WRITE if setup in @flags,the parameter of handle_mm_fault(),
@@ -17887,8 +17901,159 @@ Chapter 9 : Process Address Space
                      /* @vma->vm_ops is NULL OR @vma->vm_ops->fault is NULL */
                      /* anonymous mapping,get a new page frame */
 
-          case 2> => call to do_nonlinear_fault()
+          case 2> => call to do_nonlinear_fault() /* mapped a disk file but it is non-linear memory mappings */
           case 3> => call to do_swap_page()
+
+        function __do_fault() :
+          <mm/memory.c>
+            /**
+             * __do_fault - common interface for try to create a new page mapping
+             * @mm:         memory descriptor
+             * @vma:        VMA that need mapping
+             * @address:    linear addres for the mapping
+             * @pgoff:      page offset for @address
+             * @flags:      Page Fault flags
+             * @orig_pte:   original PTE for @address
+             * return:      return value from @fault() method of VMA OR error code
+             */
+            static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long address,
+                                  pmd_t *pmd, pgoff_t pgoff, unsigned int flags, pte_t orig_pte);
+
+            description for __do_fault() :
+              create a local object named @vmf is type of struct vm_fault.
+              set @vmf {
+                      .virtual_address := (void __user *)(@address & PAGE_MASK)
+                      .pgoff := @pgoff
+                      .flags := @flags
+                      .page := NULL
+              }
+
+              invoke @vma->vm_ops->fault() on @vmf,this method is used to handle Page Fault exception
+              in exact VMA,return value stored in local variable @ret.
+              if VM_FAULT_ERROR | VM_FAULT_NOPAGE is set in @ret,return @ret to caller,that means failed.
+              if @vmf.page set by @fault() enabled PG_hwpoison,then we can not use the page,unlock it if
+              VM_FAULT_LOCKED is set in @ret,return VM_FAULT_HWPOISON.
+
+              next,invoke lock_page() on @vmf.page,if no VM_FAULT_LOCKED is set in @ret,this is for consistency
+              in subsequent calls,make the faulted page always locked.
+              if VM_FAULT_LOCKED is set in @ret,then check whether PG_locked is set in the page;cleared
+              means it is a VM_BUG.
+
+              set local object @page to @vmf.page -- the page descriptor returned by fault() method of @vma.
+
+              check early C-O-W break.
+              if we are failed because FAULT_FLAG_WRITE -- write failed,then
+                      @vm_flags no VM_SHARED /* get exclusive copy because PRIVATE MAPPING */
+                              attempt to prepare anonymous VMA by call to anon_vma_prepare() on @vma.
+                              set error code to VM_FAULT_OOM,goto "out" if failed.
+                              /* attach an anon_vma to the memory region @vma */
+
+                              invoke alloc_page_vma() with GFP_HIGHUSER_MOVABLE try to allocate a page
+                              for @vma contain @address,goto "out" if failed,error code also is VM_FAULT_OOM.
+                              /* the page stored in @page */
+
+                              mem_cgroup_newpage_charge() this newly allocated page.
+                              page_cache_release() it and goto "out" if failed,error code is VM_FAULT_OOM.
+
+                              check VM_LOCKED flag of @vm_flags,if VMA been locked,we must clear memory lock
+                              for page @vmf.page.
+                              
+                              call to copy_user_highpage() to copy data in @vmf.page to the newly allocated page.
+                              __SetPageUptodate() on the newly allocated page @page.
+
+                      @vm_flags has VM_SHARED
+                              if @page_mkwrite() is defined in @vm_ops of @vma
+                                      unlock the @page,in this case,it is @vmf.page.
+                                      enable flags FAULT_FLAG_WRITE | FAULT_FLAG_MKWRITE in @vmf.flags.
+                                      invoke @page_mkwrite() on @vma with @vmf.
+                                      check status:
+                                        VM_FAULT_ERROR | VM_FAULT_NOPAGE
+                                          goto "unwritable_page",error code is the return value of page_mkwrite().
+
+                                        !VM_FAULT_LOCKED
+                                          lock_page()
+                                          check its mapping,if the page is not cached,unlock it,goto "unwritable_page",
+                                          return value is 0.
+                                        VM_FAULT_LOCKED
+                                          VM_BUG_ON() no PG_locked,usually,the page is locked by that method.
+
+              invoke pte_offset_map_lock(),pass it @mm,@pmd,@address,&@ptl(local variable is type of spinlock_t) as
+              parameters.the returned pointer to the newly created PTE is stored in local variable @page_table.
+              /* makeup new PTE in PMD,and establish kernel atomic mapping */
+
+              check @page_table and @orig_pte,if new PTE is same as @orig_pte /* same fields */
+                      /* if we are from do_linear_fault(),the @orig_pte should been pte_unmap() in that function. */
+
+                      invoke flush_icache_page() on @vma with the @page /* maybe the exclusive copy */
+                      /* flush_icache_page() in x86 is NOP */
+
+                      call mk_pte() to construct a new PTE{the @page, @vma->vm_page_prot}.
+                      if we failed because FAULT_FLAG_WRITE,then have to
+                              set Dirty flag for PTE
+                              set Read/Write flag for PTE if @vma enabled VM_WRITE
+                      next,check if we have did exclusive copy /* anonymous VMA prepare */
+                              increase MM_ANONPAGES counter of @mm
+                              invoke page_add_new_anon_rmap() to add PTE mapping to a new anonymous page -- the page
+                      if we no exclusive copy,that means the VMA is shared,then
+                              increase MM_FILEPAGES counter of @mm
+                              invoke page_add_file_rmap() to add PTE mapping to a file page
+                              if we failed FAULT_FLAG_WRITE,then record the page descriptor in local @dirty_page,and
+                              get_page() on it.
+                      set_pte_at(),set PTE at position @page_table.
+                      invoke update_mmu_cache(),update MMU cache for entry @page_table.
+              new PTE is not same as @orig_pte,some field been changed,then we cant use it,because it is not suit for
+              current process
+                      mem_cgroup_unchare_page() the page if we did mem cgroup charge.
+                      page_cache_release() the page if we has exclusive copy.
+
+              call to pte_unmap_unlock() on @page_table and the lock @ptl.
+                      /* remove kernel atomic PTE mapping */
+
+              "out": /* normal path */
+                @dirty_page is TRUE,that means VMA is shared,and we have called page_mkwrite() method of @vma because
+                FAULT_FLAG_WRITE.
+                        set PG_dirty of @dirty_page.that is call to @a_ops of the mapping that cached @dirty_page.
+                        unlock @dirty_page,PG_locked should been set by the member method of @vma.
+                        put_page() on @dirty_page. /* we get it before */
+                        if PG_dirty is set AND its mapping is not NULL -- cached,then call to
+                        balance_dirty_pages_ratelimited().
+                        if @vma->vm_file is TRUE,invoke file_update_time() for that file.
+                @dirty_page is FALSE,that means VMA is not shared,we maybe have exclusive copy.
+                        unlock @vmf.page,PG_locked is set by @fault() method.
+                        if we have exclusive copy,invoke page_cache_release() on @vmf.page.
+                finally,return @ret to caller.
+
+              "unwritable_page": /* page_mkwrite() failed */
+                page_cache_release() the page
+                return @ret to caller.
+
+        function do_linear_fault() :
+          <mm/memory.c>
+            /**
+             * do_linear_fault - routine used to handle linear file mapping Page Fault exception
+             * @mm:              process memory descriptor
+             * @vma:             VMA cause the exception
+             * @address:         linear address
+             * @page_table:      PTE that corresponds to @address
+             * @pmd:             PMD of the PTE
+             * @flags:           Page Fault flags
+             * @orig_pte:        original PTE,normally,it is set to *@page_table by handle_pte_fault()
+             * return:           0 OR error code
+             * # this routine is end up call to __do_fault()
+             *   but before it does that,have to retrieve pgoff that contains @address,and invoke
+             *   pte_unmap() on @page_table to unmap the PTE
+             *   ! pte_unmap() is expanded to kunmap_atomic(),kernel will unmap the PTE in FIX_KMAP
+             *   ! pgoff corresponds to @address is calculated through the expression -
+             *       (((@address & PAGE_MASK) - @vma->vm_start) >> PAGE_SHIFT) + @vma->vm_pgoff
+             *          |<- Offset field ->|
+             *          |<--------- length in VMA ----------->|
+             *          |<---------------- number of pages ----------------->|
+             *          |<---------------------------- page offset --------------------------->|
+             *     function invoke __do_fault() with the @pgoff
+             */
+            static int do_linear_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+                                       unsigned long address, pte_t *page_table, pmd_t *pmd,
+                                       unsigned int flags, pte_t orig_pte);
 
         function do_anonymous_page() :
           <mm/memory.c>
@@ -35014,7 +35179,7 @@ Chapter 16 : Accessing Files
             method takes care of reading the page by accessing the block device.
             /* almost all disk-based filesystems and block device files implemente the
              * @fault method by means of the filemap_fault() function,which is defined in
-             * <mm/filemap.c>                ^called by __do_fault() from do_nonlinear_fault()
+             * <mm/filemap.c>                ^called by __do_fault() from do_linear_fault()
              */
 
         Creating a Memory Mapping :
@@ -35179,6 +35344,7 @@ Chapter 16 : Accessing Files
                                               * if we did async readahead,the return value is VM_FAULT_LOCKED,
                                               * if it is sync readahead,the value is VM_FAULT_MAJOR | VM_FAULT_LOCKED.
                                               */ ==> normal path
+                                                     the page still locked
 
               no_cached_page: /* no readahead,just read a specified page */
                 the page is not in page cache,invoke page_cache_read() to cache it.this function allocate new
@@ -35197,14 +35363,16 @@ Chapter 16 : Accessing Files
                 otherwise,shrink_readahead_size_eio() for the file's @f_ra,return VM_FAULT_SIGBUS.
                 /* shrink_readahead_size_eio() - @ra->ra_pages /= 4 */
 
-            !! function do_nonlinear_fault() invoke to __do_fault(),and __do_fault() invoke to fault()
+            !! function do_linear_fault() invoke to __do_fault(),and __do_fault() invoke to fault()
                method of that VMA.
                if everything is OK,__do_fault() will makeup a new Page Table Entry that corresponds
                the fault address,the page in Page Table Entry is the page got from fault() method,its address 
                is recorded in @vmf.page.
+               for a non-linear memory mapping that maps a disk file,function do_nonlinear_fault() will be called.    
             !! system call sys_munmap() is used to unmap memory mapping.even the memory mapping is removed
                by do_munmap(),the page that VMA mapped still alive in page cache of the file.function
                remove_vma() called by remove_vma_list() just fput() @vm_file member,page cache stay reference
                on it.the writeback is handled later by the BDI.
+
 
          
