@@ -34030,7 +34030,7 @@ Chapter 16 : Accessing Files
              * @ra:                        file readahead state
              * @filp:                      file object
              * @offset:                    start offset into @mapping,in pagecache page-sized units
-             * @req_size:                  total size of the read which the caller is performing in
+             * @req_size:                  total size of the read which the caller is performing on
              *                             pagecache pages
              * # EXPORT_SYMBOL_GPL
              * # this routine just perform some checkings and then invoke helper functions
@@ -35335,7 +35335,7 @@ Chapter 16 : Accessing Files
               /* readpage() would release PG_locked when accomplished reading,but kernel preempt can take
                * place before we invoke lock_page() at previous steps.
                */
-              if it is the case,we have to unlock the page,page_cache_release() it,return VM_FAULT_SIGBU.
+              if it is the case,we have to unlock the page,page_cache_release() it,return VM_FAULT_SIGBUS.
               /* the file is truncated,thus the data in that page is not consist with the file on disk */
               it is not the case,we have succeed to get page and read it.
               update @ra's @prev_pos to @pgoff,of course,in file offset.
@@ -35349,7 +35349,7 @@ Chapter 16 : Accessing Files
               no_cached_page: /* no readahead,just read a specified page */
                 the page is not in page cache,invoke page_cache_read() to cache it.this function allocate new
                 page,add it into pagecache,if succeed,call readpage() on it.
-                if page_cache_read() succeed,we jump to "retry_find",then we get into the normal path.
+                if page_cache_read() succeed,we jump to "retry_find",then we can get into the normal path.
                 otherwise,return VM_FAULT_OOM if the function returned -ENOMEM,return VM_FAULT_SIGBUS for others.
 
               page_not_uptodate:
@@ -35373,6 +35373,80 @@ Chapter 16 : Accessing Files
                by do_munmap(),the page that VMA mapped still alive in page cache of the file.function
                remove_vma() called by remove_vma_list() just fput() @vm_file member,page cache stay reference
                on it.the writeback is handled later by the BDI.
+            !! User Mode process can issues system call madvise() for the linear address that tell kernel the
+               future read operations on VMA mapped disk file are sequential reads -- MADV_SEQUENTIAL,that
+               set VM_SEQ_READ for the VMA;and in other hand,MADV_RANDOM let flag VM_RAND_READ is set in that
+               VMA.advice MADV_NORMAL means unspecified order,this cause both VM_RAND_READ and VM_SEQ_READ are
+               set in VMA.
+
+        Flushing Dirty Memory Mapping Pages to Disk :
+          system call sys_msync() is used to sync a memory mapping.
+
+          <mm/msync.c>
+            /**
+             * sys_msync - system call msync for sync memory mapping
+             * @start:     starting linear address
+             * @len:       length of memory region
+             * @flags:     indicates what have to be done
+             * return:     0 OR error code
+             * # there are three kinds of flags :
+             *     MS_SYNC  - syncs the entire file - including mappings
+             *     MS_ASYNC - do not start I/O
+             *     MS_INVALIDATE - asks to invalidate other mappings of the same file
+             */
+            SYSCALL_DEFINE3(msync, unsigned long, start, size_t, len, int, flags)
+            => asmlinkage long sys_msync(unsigned long start, size_t len, int flags);
+
+            brief description for sys_msync() :
+              first,it have to check @flags,there must be at least one flag is enabled,
+              and cant be MS_ASYNC AND MS_SYNC at the same time.
+              @start must be a valid address.
+              any checking is failed,return -EINVAL.
+
+              use @len with @start to calculate @end of the region,@end < @start,return -ENOMEM;
+              @end == @start,return 0 with do nothing. /* range [@start, @end) */
+
+              acquire @mmap_sem for read,it come from @current->mm.
+              try to find the VMA which spanned the interval,from linear address @start.
+
+              next,make use of an infinite for-cycle {
+                      if the VMA is NULL,release @mmap_sem and return -ENOMEM.
+
+                      if @start is less than VMA->vm_start,that means there is some unmapped
+                      address ranges,in this case,we reset @start to VMA->vm_start,ignore the
+                      unmapped region;check again @start and @end,if it is greater than or equal to @end,
+                      we release @mmap_sem and return -ENOMEM.
+                      /* we ignored it,but still return -ENOMEM at the end */
+
+                      check @flags,MS_INVALIDATE AND VM_LOCKED,then release semaphore and return -EBUSY.
+                      /* the memory region is locked,we can not invalidate it */
+
+                      /* ready to sync */
+                      reset @start to VMA->vm_end.
+                      if MS_SYNC AND VMA->vm_file is not NULL /* file mapping */ AND VM_SHARED
+                              get file on @vm_file.
+                              release semaphore.
+                              invoke vfs_fsync() on the file,not only datasync,we need to sync everything.
+                              put the file.                        /* ^only inode */        
+                              if vfs_fsync() returned an error code OR @start is greater than or equal to @end,
+                              return the error code.                   /* interval have been consumed */
+                              file synchronization succeed,acquire semaphore again,and find_vma() from @start.
+                              /* return value of vfs_fsync() is stored in local variable,it would be
+                               * returned to userspace.
+                               */
+                      other cases
+                              return 0 and release semaphore if interval have been consumed.
+                              update VMA to VMA->vm_next.
+                              /* so we can know that MS_ASYNC do no thing except check VMAs,
+                               * and MS_SYNC without VM_SHARED as the same.
+                               * this ensure there are some VMAs have spanned the interval [@start, @end).
+                               * maybe some unmapped region,in this case,we need return -ENOMEM.
+                               */
+              }
+              release semaphore,return error code or 0.
+
+              !! maybe the last recent vfs_fsync() succeed,but if we have detected some unmapped address ranges
+                 during iterating,-ENOMEM still have to be returned.
 
 
          
