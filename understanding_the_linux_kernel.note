@@ -30020,6 +30020,7 @@ Chapter 15 : The Page Cache
          *                 associated with the inode
          *                 # generic list can be freely used by the filesystem
          *                   for its specific purposes
+         *                 # this list usually collects @b_assoc_buffers of buffer heads
          * @assoc_mapping: usually,pointer to the address_space object of the block
          *                 device including the indirect blocks
          */
@@ -32762,10 +32763,114 @@ Chapter 15 : The Page Cache
              * # this routine is sync on file object that associated to @fd,it invoke
              *   fget() to get the file object and invoke vfs_fsync() on it if it is not
              *   NULL,fput() it after work accomplished
-             * # vfs_fsync() : invoke vfs_fsync_range() on range 0 -- LLONG_MAX
+             * # vfs_fsync() : (@file, @dentry, @datasync)
+             *                 invoke vfs_fsync_range() on range 0 -- LLONG_MAX
              *                 ! dentry is @file->f_path.dentry
+             *                 
              */
             static int do_fsync(unsigned int fd, int datasync);
+
+
+            /**
+             * <fs/buffer.c>
+             *   ##
+             *   # sync_mapping_buffers - write out AND wait upon a mapping's "associated" buffers
+             *   # @mapping:              the mapping
+             *   # return:                0 OR error code
+             *   # ! EXPORT_SYMBOL
+             *   # ! this routine retrieve the @assoc_mapping of @mapping,if associated mapping is
+             *   #   NULL or @mapping's @private_list is empty,function return 0 with do nothing;
+             *   #   otherwise,invoke fsync_buffers_list(),pass it @assoc_mapping->private_lock and
+             *   #   @mapping->private_list as parameters,return the result of fsync_buffers_list()
+             *   ##
+             *   int sync_mapping_buffers(struct address_space *mapping);
+             *
+             *   ##
+             *   # fsync_buffers_list - write out and wait upon a list of buffers
+             *   # @lock:               spinlock have to be acquired when operating associate buffers
+             *   # @list:               list of buffers
+             *   # return:              0 OR error code
+             *   # ! this routine make sure that all initially dirty buffers get waited on,but that
+             *   #   any subsequently dirtied buffers do not.
+             *   #   thus there are two main stages :
+             *   #     1> first,copy dirty buffers to a temporary inode list,queueing the writes
+             *   #     2> clean up,waiting for those writes to complete
+             *   ##
+             *   static int fsync_buffers_list(spinlock_t *lock, struct list_head *list);
+             *   ! description for fsync_buffers_list() :
+             *       acquire @lock,enter a for-cycle stop when @list is empty.
+             *       for { !! first stage
+             *
+             *               retrieve next buffer in @list
+             *               retrieve the buffer's @b_assoc_map,the another mapping it associated with,
+             *               stored it in local variable @mapping
+             *               call to __remove_assoc_queue() for unlink current buffer from @b_assoc_buffers,
+             *               disconnect with @b_assoc_map                                  !! ^@private_list
+             *               if current buffer is dirty OR it is locked
+             *                       use @b_assoc_buffers to add current buffer into a temporary list
+             *                       restore @b_assoc_map of current buffer
+             *                       BH_Dirty is set
+             *                               get_bh()
+             *                               release @lock
+             *                               invoke ll_rw_block() with parameters SWRITE_SYNC_PLUG,1,current buffer
+             *                               next,if local variable @prev_mapping is not NULL and @prev_mapping is
+             *                               not equal to @mapping
+             *                                       invoke blk_run_address_space() on @prev_mapping
+             *                                       !! call to @prev_mapping->backing_dev_info->unplug_io_fn() with
+             *                                          page is NULL,if both BDI and method unplug_io_fn() are valid.
+             *                               set @prev_mapping to @mapping !! we queue a new one,and kick off the previous
+             *                                                                mapping,if some buffers come from the same
+             *                                                                mapping,we defer kick off until another mapping's
+             *                                                                buffer is queued
+             *                               brelse() current buffer
+             *                               acquire @lock again
+             *       }
+             *       while-cycle stop when temporary list is empty { !! second stage
+             *               ! at there,we traverse list from tail to head.
+             *               ! temporary list collecting buffers either BH_Locked or BH_Dirty,
+             *                 but function ll_rw_dirty() would clear BH_Dirty for the buffer which
+             *                 is going to be submitted for I/O.
+             *
+             *               retrieve the last buffer from temporary list
+             *               get_bh() on it
+             *               get its @b_assoc_map,store it in @mapping
+             *               !! if it is neither dirty nor locked,the mapping should be NULL
+             *               invoke __remove_assoc_queue() for the buffer !! unlink it from temporary list
+             *               if BH_Dirty is set !! newly dirtied buffer
+             *                       list add the buffer to @mapping->private_list through @b_assoc_buffers
+             *                       set @b_assoc_map to @mapping
+             *               release @lock -- we acquired it in stage 1
+             *               call to wait_on_buffer() on current buffer !! wait until BH_Locked is clear
+             *               check BH_Uptodate for it,it have not set,record the error code -EIO.
+             *               brelse() current buffer
+             *               acquire @lock again
+             *       }
+             *       release @lock
+             *       call to osync_buffers_list(),pass it @lock,@list as parameters
+             *       return result to caller -- 0 OR -EIO OR result of osync_buffers_list()
+             *   
+             *   ##
+             *   # osync_buffers_list - routine designed to support O_SYNC I/O
+             *   # @lock:               lock for operating on @list
+             *   # @list:               buffers
+             *   # return:              0 OR error code
+             *   # ! this routine waits synchronously for all already-submitted IO to complete,
+             *   #   but does not queue any new writes to the disk
+             *   # ! acquire @lock
+             *   #   traverse @list from tail to head
+             *   #     for each buffer,if it is BH_Locked !! because ll_rw_block() set BH_Locked for submitted buffers
+             *   #             get_bh() on it
+             *   #             release @lock
+             *   #             wait_on_buffer() until BH_Locked is clear
+             *   #             if current buffer still have no BH_Uptodate is set,record error code -EIO
+             *   #             brelse() current buffer
+             *   #             acquire @lock
+             *   #             restart list traversing
+             *   #   release @lock,return error code or 0 to caller
+             *   ##
+             *   static int osync_buffers_list(spinlock_t *lock, struct list_head *list);
+             */
+
 
             /**
              * vfs_fsync_range - helper to sync a range of data & metadata to disk
@@ -32784,11 +32889,13 @@ Chapter 15 : The Page Cache
              *   function simple_fsync() create writeback control with @sync_mode = WB_SYNC_ALL,
              *   @nr_to_write = 0,then invoke sync_mapping_buffers() on the mapping of inode;
              *   next,check @datasync and I_DIRTY_DATASYNC,if @datasync is TRUE AND no I_DIRTY_DATASYNC,
-             *   return the return value of sync_mapping_buffers() to caller,otherwise,invoke
-             *   sync_inode(),and writeback_single_inode() is called,then is write_inode() is called
+             *   return the return value of sync_mapping_buffers() to caller(no inode sync);otherwise,
+             *   invoke sync_inode(),and writeback_single_inode() is called,then is write_inode() is called
              *   for ext2 filesystem,it is ext2_write_inode() - writeback inode information
              *   ! if sync_mapping_buffers() failed but sync_inode() succeed,the error code of
              *     sync_mapping_buffers() will be returned to caller
+             *   ! but set @nr_to_write to 0 let writeback_single_inode() only write inode info,do not
+             *     touch pages in the page cache.
              */
             int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
                                 loff_t end, int datasync);
@@ -32818,6 +32925,10 @@ Chapter 15 : The Page Cache
                                         if __filemap_fdatawrite_range() succeed => filemap_fdatawait_range()
 
                both functions are return -EIO if writing was failed
+
+            !! simple_fsync() writeback dirty associated buffers,inode information.
+               the dirty pages in page cache @file->f_mapping is handled by vfs_fsync_range() itself,that is
+               invoke routine filemap_write_and_wait_range() on all pages in the page cache.
               
 
 Chapter 16 : Accessing Files
@@ -35397,7 +35508,7 @@ Chapter 16 : Accessing Files
             SYSCALL_DEFINE3(msync, unsigned long, start, size_t, len, int, flags)
             => asmlinkage long sys_msync(unsigned long start, size_t len, int flags);
 
-            brief description for sys_msync() :
+            description for sys_msync() :
               first,it have to check @flags,there must be at least one flag is enabled,
               and cant be MS_ASYNC AND MS_SYNC at the same time.
               @start must be a valid address.
@@ -35447,6 +35558,3 @@ Chapter 16 : Accessing Files
 
               !! maybe the last recent vfs_fsync() succeed,but if we have detected some unmapped address ranges
                  during iterating,-ENOMEM still have to be returned.
-
-
-         
