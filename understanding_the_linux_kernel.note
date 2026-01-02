@@ -6315,6 +6315,9 @@ Chapter 4 : Interrupts and Exceptions
       !  current->thread_info is stored in the process's kernel stack.
 
 
+/* END OF CHAPTER 4 */
+
+
 Chapter 5 : Kernel Synchronization
     How the Kernel Services Requests :
       two types of requests >
@@ -8377,6 +8380,9 @@ Chapter 5 : Kernel Synchronization
         !!  whenever more than one locks is to request,the changes of dead-lock to occur would
             increase significantly.for reduce dead-lock probability,must acquire the locks in a
             predefined order.
+
+
+/* END OF CHAPTER5 */
           
 
 Chapter 6 : Timing Measurements
@@ -9991,6 +9997,9 @@ Chapter 6 : Timing Measurements
             */
            SYSCALL_DEFINE4(clock_nanosleep, const clockid_t, which_clock, int, flags,
                            const struct timespec __user *, rqtp, struct timespec __user *, rmtp);
+
+
+/* END OF CHAPTER6 */
 
 
 Chapter 7 : 
@@ -11975,6 +11984,10 @@ Chapter 7 :
               before process finding,have to sign a RCU read-side critical section,and,have to acquire
               runqueue lock before call to scheduling class API.
           !!  timespec value "0" means the timeslice is infinity(real time process only,SCHED_FIFO).
+
+
+/* END OF CHAPTER7 */
+
 
 Chapter 8 : Memory Management
     Page Frame Management :
@@ -15929,6 +15942,9 @@ Chapter 8 : Memory Management
              ACCESSES A BUG,BECAUSE THE MASTER KERNEL PAGE TABLES DO NOT INCLUDE VALID ENTRIES.)
 
 
+/* END OF CHAPTER8 */
+
+
 Chapter 9 : Process Address Space
     Memory allocating behaviors in Kernel Mode and in User Mode :
       > if a kernel function makes a request for dynamic memory,it must have a valid reason to issue that
@@ -16929,7 +16945,9 @@ Chapter 9 : Process Address Space
                         @f_mapping
                         /* because it is shared by other,thus allow writing */
                 if @vm_flags enabled VM_NONLINEAR,then insert
-                        @f_mapping->i_mmap_nonlinear into @vma
+                        @vma into tail of @f_mapping->i_mmap_nonlinear /* connector is @vma->shared.vm_set.list */
+                        AND
+                        set @vma->shared.vm_set.parent to NULL
                         /* the file is not mapping in linear */
                 flush dcache and return to caller.
                       /* dentry cache */
@@ -17229,7 +17247,64 @@ Chapter 9 : Process Address Space
                         if succeed to mlock the VMA,then update @mm->locked_vm += (@len >> PAGE_SHIFT)
                 else if enabled MAP_POPULATE AND disabled MAP_NONBLOCK
                 then
-                        make pages of the VMA present
+                        make pages of the VMA present /* make_pages_present() */
+                        
+                        /**
+                         * <mm/memory.c>
+                         *  ##
+                         *  # make_pages_present - for a given interval,get user pages on it
+                         *  # @addr:               starting linear address for the interval
+                         *  # @end:                end boundary - usually come from "@addr + @len"
+                         *  # return:              0 OR -EFAULT
+                         *  # ! this routine make use of @addr to find_vma() on @current->mm,
+                         *  #   then invoke get_user_pages() with arguments -
+                         *  #     @current, @current->mm, @addr, @end/PAGE_SIZE - @addr/PAGE_SIZE, 
+                         *  #     @vm_flags & VM_WRITE != 0, 0, NULL, NULL
+                         *  ##
+                         *  int make_pages_present(unsigned long addr, unsigned long end);
+                         *
+                         *  ##
+                         *  # get_user_pages - pin user pages in memory
+                         *  # @tsk:            target task
+                         *  # @mm:             target mm
+                         *  # @start:          starting user address
+                         *  # @nr_pages:       number of pages from start to pin
+                         *  # @write:          whether pages will be written to by the caller
+                         *  # @force:          whether to force write access even if user mapping is
+                         *  #                  readonly,this will result in the page being COWed even
+                         *  #                  in MAP_SHARED mappings.
+                         *  # @pages:          array that receives pointers to the pages pinned
+                         *  #                  at least @nr_pages long OR null if caller only intends
+                         *  #                  to ensure the pages are faulted in
+                         *  # @vmas:           array of pointers to VMAs corresponding to each page,
+                         *  #                  OR NULL if the caller does not require them
+                         *  # return:          number of pages pinned OR error code
+                         *  # ! EXPORT_SYMBOL
+                         *  # ! this routine call to __get_user_pages() with specified flags,the default
+                         *  #   flag is FOLL_TOUCH,@pages it not NULL - enable FOLL_GET,@write is TRUE - enable FOLL_WRITE,
+                         *  #   @force is TRUE - enable FOLL_FORCE
+                         *  # ! __get_user_pages(),for each page in the interval,it try find_extend_vma() to find out a VMA
+                         *  #   which corresponding to the page's addres(if no such VMA,but has previous VMA,it expand_stack()
+                         *  #   on previous VMA let it cover the address)
+                         *  #     !! the interval is splited to several parts and size of each unit is PAGE_SIZE
+                         *  #
+                         *  #   if no such VMA(either no previous VMA,or expand_stack() faied),it checks the page's address,
+                         *  #   if it is in gate area of @tsk,then make use of @tsk's @gate_vma(valid if and only if AT_SYS_INFO_EHDR defined)
+                         *  #     for @gate_vam case,it makeups PTE for the page and continue to next page
+                         *  #
+                         *  #   VMA is NULL OR VM_IO | VM_PFNMAP enabled OR no required VM flags in VMA,return number of pinned pages or -EFAULT
+                         *  #                                                                                                            !! nothing pinned
+                         *  #   VMA associated hugetlb page,handle work over to follow_hugetlb_page()
+                         *  #   
+                         *  #   VMA is exist,and it is not hugetlb VMA,traverse current VMA's interval in PAGE_SIZE,
+                         *  #   for each not present page,invoke handle_mm_fault() for it - linear address of the page,
+                         *  #   check the result,update accounting or report error
+                         *  ##
+                         *  int get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+                         *                     unsigned long start, int nr_pages, int write, int force,
+                         *                     struct page **pages, struct vm_area_struct **vmas);
+                         */
+
             16> return linear address @addr /* !! SUCCEED TO mmap_region() */
             unmap_and_free_vma:
             17> increase @file's inode @i_writecount if @correct_wcount > 0
@@ -18655,6 +18730,9 @@ Chapter 9 : Process Address Space
              */
 
 
+/* END OF CHAPTER9 */
+
+
 Chapter 10 : System Calls
     POSIX APIs and System Calls :
       difference between an application programmer interface(API) and a system call >
@@ -19605,6 +19683,9 @@ Chapter 10 : System Calls
          system calls,we should call to kernel functions filp_open() and vfs_write().these two function are
          declared in <linux/fs.h> they are belong to VFS,and their function definition is placed in
          <fs/namei.c> and <fs/read_write.c>,respectively.
+
+
+/* END OF CHAPTER10 */
 
 
 Chapter 11 : Signals
@@ -21402,6 +21483,8 @@ Chapter 11 : Signals
                              current process for a fixed amount of time.
                              /* C lib wrapper sigwaitinfo() and sigtimedwait() call to this routine */
 
+
+/* END OF CHAPTER11 */
 
 
 Chapter 12 : The Virtual Filesystem
@@ -24773,6 +24856,8 @@ Chapter 12 : The Virtual Filesystem
                return error code to caller.
 
 
+/* END OF CHAPTER12 */
+
 
 Chapter 13 : I/O Architecture and Device Drivers
     I/O Architecture :
@@ -27183,6 +27268,9 @@ Chapter 13 : I/O Architecture and Device Drivers
 
             ! buffer handling for sequential devices is easy because the same buffer is
               never reused.(no retransmit request)
+
+
+/* END OF CHAPTER13 */
 
 
 Chapter 14 : Block Device Drivers
@@ -29879,6 +29967,9 @@ Chapter 14 : Block Device Drivers
             put_disk() on @disk
             bd_put() the block device descriptor @bdev
             return error code to caller
+
+
+/* END OF CHAPTER14 */
 
 
 Chapter 15 : The Page Cache
@@ -32929,6 +33020,9 @@ Chapter 15 : The Page Cache
             !! simple_fsync() writeback dirty associated buffers,inode information.
                the dirty pages in page cache @file->f_mapping is handled by vfs_fsync_range() itself,that is
                invoke routine filemap_write_and_wait_range() on all pages in the page cache.
+
+
+/* END OF CHAPTER15 */
               
 
 Chapter 16 : Accessing Files
@@ -35558,3 +35652,140 @@ Chapter 16 : Accessing Files
 
               !! maybe the last recent vfs_fsync() succeed,but if we have detected some unmapped address ranges
                  during iterating,-ENOMEM still have to be returned.
+
+      Non-Linear Memory Mappings :
+        Linux 2.6 kernel offers another kind of access method for regular files -
+          the non-linear memory mappings
+          non-linear memory mappings is similar to linear memory mapping,but its
+          memory pages are not mapped to sequential pages on the file,rather,each
+          memory page maps a random(arbitrary) page of file's data.
+          /* User Mode process can call to mmap() several times to achieve this,but that is not very efficient,
+           * each mapping page requires its own memory region(VMA).
+           */
+
+        VM_NONLINEAR => the VMA contains a non-linear mapping.
+        all non-linear mappings of a file are collected in address_space.i_mmap_nonlinear.
+
+        !! "Understanding the Linux Kernel" HAVE MENTIONED SYSTEM CALL remap_file_pages(),BUT
+           THIS SYSTEM CALL IS "deprecated".AND SINCE Linux 2.6.23,THE SYSTEM CALL CREATES
+           NON-LINEAR MAPPING ONLY ON IN-MEMORY FILESYSTEMS.
+           FOR FILESYSTEMS WITH A BACKING STORE,SHOULD USE mmap() TO ADJUST WHICH PARTS OF THE FILE ARE
+           MAPPED TO WHICH ADDRESSES.
+
+        if User Mode process want to establish non-linear memory mapping,it must call to mmap() for create
+        a normal shared memory mapping associated with a file,then issue remap_file_pages() on the pages in
+        the shared memory region.
+
+        sys_remap_file_pages() :
+          <mm/fremap.c>
+            /**
+             * sys_remap_file_pages - establish non-linear memory mapping for the file's pages
+             * @start:                starting linear address
+             * @size:                 size of new mapping
+             * @prot:                 (memory protection)unused,but must can not be 0
+             * @pgoff:                initial page index of the file pages
+             * @flags:                0 OR MAP_NONBLOCKED,the later will cause no I/O
+             * return:                0 OR error code
+             * # deprecated
+             */
+            SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
+                            unsigned long, prot, unsigned long, pgoff, unsigned long, flags)
+            => asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
+                                                    unsigned long prot, unsigned long pgoff,
+                                                    unsigned long flags);
+
+            description for sys_remap_file_pages() :
+              calculate @end from @start and @size.
+              do @prot checking,if condition(cant be 0) is not satisfied,return -EINVAL.
+              calculate pgoff of @start,convert @size to pgoff(s). /* @it & PAGE_MASK => Offset field */
+              if address range wrap,or span zero-size,return -EINVAL.
+              /* pgoff_start + pgoff_size <= pgoff_start */
+
+              #if PTE_FILE_MAX_BITS < BITS_PER_LONG
+                      @pgoff + pgoff_size >> PAGE_SHIFT >= 1UL << PTE_FILE_MAX_BITS
+                              return -EINVAL
+                      /* exceeded maximum PTE(s) limit */
+              #endif
+                                         /* retry */
+              acquire @mmap_sem for read,invoke find_vma() with the mm and pgoff_start to find out
+              VMA which overlap the interval.
+
+              /* we must work on a exist VMA and which has VM_SHARED set */
+              VMA unfound OR VMA is not VM_SHARED goto "out".
+              /* we can not touch the VMA has private data and without VM_NONLINEAR */
+              VMA has private data(@vm_private_data) AND VMA has no VM_NONLINEAR set,goto "out".
+              /* we can not establish non-linear mapping on this VMA */
+              VMA has no VM_CAN_NONLINEAR set,goto "out".
+
+              /* bad interval */
+              @end <= pgoff_start OR pgoff_start < VMA->vm_start OR @end > VMA->vm_end,goto "out".
+              
+              now,we have checked all conditions,so we can try to establish non-linear mapping on VMA.
+              if VMA has no VM_NONLINEAR
+              then
+                      /* the file portion been exist */
+                      if @pgoff is equal to linear_page_index(VMA, pgoff_start)
+                      then set return value to 0,goto "out".
+                      /* the index got by
+                       *   (((pgoff_start - VMA->vm_start) >> PAGE_SHIFT) + VMA->vm_pgoff) >> (PAGE_CACHE_SHIFT - PAGE_SHIFT)
+                       *   we have known @vm_start is started from 0,for get the real memory linear address for
+                       *   the memory unit,must combined it with memory descriptor
+                       */
+
+                      /* we are going to establish new mapping,thus WRITE lock is needed */
+                      if we have not acquired write lock,then we must release @mmap_sem,and acquire it again for write,
+                      then goto "retry" find VAM.
+
+                                                    /* no BDI_CAP_NO_ACCT_DIRTY in mapping's @backing_dev_info */
+                      if current file's mapping has capicity for account dirty pages,then
+                              let @flags &= MAP_NONBLOCK,it MAP_NONBLOCK is set,we would not start I/O.
+                              get_file() on the file.
+                              invoke mmap_region(),pass it the file, pgoff_start, pgoff_size, @flags, VMA->vm_flags, @pgoff
+                              as the parameters.
+                              fput() the file.
+                              if a valid address is returned by mmap_region(),we let the return value record it,
+                              else BUG_ON() if the address != pgoff_start,return value is 0.
+                              goto "out".
+                              /* we establish new memory region at there,dirty pages should contribute to accounting */
+
+                      acquire mapping's @i_mmap_lock.
+                      flush_dcache_mmap_lock() on the mapping.
+
+                      set VM_NONLINEAR for the VMA.
+                      remove VAM from mapping's @i_mmap,the priority tree. /* through vma_prio_tree_remove() */
+                      insert VAM into mapping's @i_mmap_nonlinear. /* through vma_nonlinear_insert() */
+
+                      flush_dcache_mmap_unlock() on the mapping.
+                      release @i_mmap_lock.
+
+              /* maybe it has non-linear mapping before,or we just set VM_NONLINEAR for it */
+              VMA has VM_NONLINEAR,that means this VMA contains a non-linear mapping.
+              check VM_LOCKED,if VMA is locked,we must drop PG_Mlocked flag for over-mapped range.
+              /* backup @vm_flags,invoke munlock_vma_pages_range() on [pgoff_start, pgoff_start + pgoff_size),restore flags */
+
+              call to mmu_notifier_invalidate_range_start() on the interval,this ask MMU invalid the specified memory range.
+              /* invalidate_range_start() is called when all pages in the range are still mapped and have at least one refcount */
+              call to populate_range() on the interval with @pgoff.
+              /* for each page in the interval,it invoke install_file_pte() on it.
+               * install_file_pte() retrieve the PTE corresonding to the page's address,then
+               * makeup a new PTE through pgoff_to_pte(@pgoff),and use the new one instead the PTE.
+               * macro pgoff_to_pte() is defined in <arch/x86/asm/pgtable-3level.h>,@pte_low is _PAGE_FILE,@pte_high is the pgoff.
+               *                                    #^suppose 3-level paging.
+               */
+              call to mmu_notifier_invalidate_range_end().
+              /* invalidate_range_end() is called when all pages in the range have been unmapped and the pages have been freed by
+               * VM.
+               * we need establish non-linear mapping,thus the older mappings should be removed.
+               */
+
+              if no error occurred AND no MAP_NONBLOCK is set,then we must try to start I/O.
+                      if VM_LOCKED,then invoke mlock_vm_pages_range() on the interval to keep consistency.
+                      else,invoke make_pages_present() on the interval,it we are holding @mmap_sem for write,must release it
+                      before the calling.
+            
+              "out":
+                      /* if we acquired WRITE,then we must have released READ */
+                      if we have not holding @mmap_sem for write,then release @mmap_sem READ.
+                      otherwise,releae @mmap_sem WRITE.
+
+                      return error code or normal return value.
