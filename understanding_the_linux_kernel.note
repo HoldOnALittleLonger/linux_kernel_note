@@ -1044,6 +1044,16 @@ Chapter 2 : Memory Addressing
            specifies the length in bits of the Offset field; /* usually is defined to 12 */
            this macro is used by PAGE_SIZE to return the size of the page,finally,
            the PAGE_MASK macro yields the value 0xfffff000 and is used to mask all the bits of the Offset field.
+           /**
+            * PAGE_SIZE := 1UL << PAGE_SHIFT => 00000000000000000001000000000000 -> 2^12 = 4096
+            * PAGE_MASK := ~(PAGE_SIZE - 1)  => PAGE_SIZE - 1 => 00000000000000000000111111111111 -> 4095
+            *                                   ~(PAGE_SIZE - 1) => 11111111111111111111000000000000
+            *                                                       |--------||--------||----------|
+            *                                                       |         |         |
+            *                                                       |         |         +--> Offset 12 bit
+            *                                                       |         +--> Table 10 bit
+            *                                                       +--> Directory 10 bit
+            */
 
          PMD_SHIFT
            the total length in bits of the Offset and Table fields of a linear address;
@@ -17873,7 +17883,7 @@ Chapter 9 : Process Address Space
                           if VMA operation is not NULL and routine fault() is setup
                           then end up by call to do_linear_fault()
                           else end up by call to do_anonymous_page()
-                  it is used to mapping a file /* pte_file() */
+                  it is used to mapping a file /* pte_file() : Present cleared, Dirty set */
                           end up by call to do_nonlinear_fault()
                   end up by call to do_swap_page()
           proceed checking for FAULT_FLAG_WRITE if setup in @flags,the parameter of handle_mm_fault(),
@@ -18101,6 +18111,35 @@ Chapter 9 : Process Address Space
               "unwritable_page": /* page_mkwrite() failed */
                 page_cache_release() the page
                 return @ret to caller.
+    
+        function do_nonlinear_fault() :
+          <mm/memory.c>
+            /**
+             * do_nonlinear_fault - routine used to handle nonlinear file mapping Page Fault exception
+             * @mm:                 memory descriptor
+             * @vma:                VMA cause the exception
+             * @address:            linear address
+             * @page_table:         PTE corresponds to @address
+             * @pmd:                PMD contains @page_table
+             * @flags:              Page Fault flags
+             * @orig_pte:           original PTE,generally,it is set to *@page_table
+             * return:              0 OR error code
+             * # this routine is end up call to __do_fault()
+             *   first,it enable FAULT_FLAG_NONLINEAR in @flags
+             *   then pte_unmap_same(), the function checks @page_table and @orig_pte whether
+             *   they are same,and pte_unmap() @page_table,for non-smp and non-preempt platform,it always
+             *   return TRUE(even they are not same,@page_table still be unmapped)
+             *   if pte_unmap_same() returned false,do_nonlinear_fault() have to return 0,no __do_fault() is
+             *   called
+             *   next,if @vma has no VM_NONLINEAR,then we can not handle this Page Fault as a nonlinear fault,
+             *   report bad pte -- Page table corrupted,return VM_FAULT_SIGBUS to caller -- must kill the process
+             *   everything is OK,use pte_to_pgoff() to retrieve the pgoff related to the Page Fault from @orig_pte
+             *   !! pgoff_to_pte() save it in @pte_high member
+             *   return to caller by call to __do_fault()
+             */
+            static int do_nonlinear_fault(struct mm_struct *mm, struct vm_area_struct *vma,
+                                          unsigned long address, pte_t *page_table, pmd_t *pmd,
+                                          unsigned int flags, pte_t orig_pte);
 
         function do_linear_fault() :
           <mm/memory.c>
@@ -18112,7 +18151,7 @@ Chapter 9 : Process Address Space
              * @page_table:      PTE that corresponds to @address
              * @pmd:             PMD of the PTE
              * @flags:           Page Fault flags
-             * @orig_pte:        original PTE,normally,it is set to *@page_table by handle_pte_fault()
+             * @orig_pte:        original PTE,generally,it is set to *@page_table by handle_pte_fault()
              * return:           0 OR error code
              * # this routine is end up call to __do_fault()
              *   but before it does that,have to retrieve pgoff that contains @address,and invoke
@@ -18120,10 +18159,11 @@ Chapter 9 : Process Address Space
              *   ! pte_unmap() is expanded to kunmap_atomic(),kernel will unmap the PTE in FIX_KMAP
              *   ! pgoff corresponds to @address is calculated through the expression -
              *       (((@address & PAGE_MASK) - @vma->vm_start) >> PAGE_SHIFT) + @vma->vm_pgoff
-             *          |<- Offset field ->|
+             *          |<----------------->|
+             *          +--> Directory AND Table
              *          |<--------- length in VMA ----------->|
              *          |<---------------- number of pages ----------------->|
-             *          |<---------------------------- page offset --------------------------->|
+             *          |<--------------------- exact page offset --------------------------->|
              *     function invoke __do_fault() with the @pgoff
              */
             static int do_linear_fault(struct mm_struct *mm, struct vm_area_struct *vma,
@@ -33388,12 +33428,18 @@ Chapter 16 : Accessing Files
             this routine process generic_segment_checks() on all segments,the access
             flag is VERIFY_WRITE,if each segment is access_ok(),then return 0,otherwise,
             return error code;thus generic_file_aio_read() would return it to caller,too.
+            /* &@nr_segs is passed to generic_segment_checks(),the routine will adjust
+             * number of segments will be readed,and calculate the total number of bytes
+             * of data have to be reded from disk,the result is stored in @count.
+             * @count is a local variable of generic_file_aio_read(),its address passed to
+             * generic_segment_checks().
+             */
 
             if I/O mode is O_DIRECT,that is bypass page cache,then get inode size of the
             file,we can not read the data at the position exceeded file size.
             @pos < file size
               try filemap_wrtie_and_wait_range() at first,
-              if the function was failed,try @a_ops->direct_IO()
+              if the function was succeed(returned 0),try @a_ops->direct_IO()
               if direct_IO() returned a positive value,increase @iocb->ki_pos,touch_atime()
               of the file through file_accessed() /* O_NOATIME is set,do not touch atime */
             in other case that @pos >= file size OR these two tries all are failed,give up
@@ -35682,7 +35728,7 @@ Chapter 16 : Accessing Files
              * sys_remap_file_pages - establish non-linear memory mapping for the file's pages
              * @start:                starting linear address
              * @size:                 size of new mapping
-             * @prot:                 (memory protection)unused,but must can not be 0
+             * @prot:                 (memory protection)unused,but must be 0
              * @pgoff:                initial page index of the file pages
              * @flags:                0 OR MAP_NONBLOCKED,the later will cause no I/O
              * return:                0 OR error code
@@ -35696,18 +35742,23 @@ Chapter 16 : Accessing Files
 
             description for sys_remap_file_pages() :
               calculate @end from @start and @size.
-              do @prot checking,if condition(cant be 0) is not satisfied,return -EINVAL.
-              calculate pgoff of @start,convert @size to pgoff(s). /* @it & PAGE_MASK => Offset field */
+              do @prot checking,if condition(must be 0) is not satisfied,return -EINVAL.
+              sanitize Offset field of linear address @start,convert @size to the same type.
+              /* @start &= PAGE_MASK => Directory AND Table
+               * @size  &= PAGE_MASK => this request the size of remap region at least one page,
+               *                        if the remap region is less than 4096,the result would be 0
+               */
               if address range wrap,or span zero-size,return -EINVAL.
-              /* pgoff_start + pgoff_size <= pgoff_start */
+              /* @start + @size <= @start */
 
               #if PTE_FILE_MAX_BITS < BITS_PER_LONG
-                      @pgoff + pgoff_size >> PAGE_SHIFT >= 1UL << PTE_FILE_MAX_BITS
+                               /* number of pages about @size */
+                      @pgoff + (@size >> PAGE_SHIFT) >= 1UL << PTE_FILE_MAX_BITS
                               return -EINVAL
                       /* exceeded maximum PTE(s) limit */
               #endif
                                          /* retry */
-              acquire @mmap_sem for read,invoke find_vma() with the mm and pgoff_start to find out
+              acquire @mmap_sem for read,invoke find_vma() with the @current's mm and @start to find out
               VMA which overlap the interval.
 
               /* we must work on a exist VMA and which has VM_SHARED set */
@@ -35718,16 +35769,16 @@ Chapter 16 : Accessing Files
               VMA has no VM_CAN_NONLINEAR set,goto "out".
 
               /* bad interval */
-              @end <= pgoff_start OR pgoff_start < VMA->vm_start OR @end > VMA->vm_end,goto "out".
+              @end <= @start OR @start < VMA->vm_start OR @end > VMA->vm_end,goto "out".
               
               now,we have checked all conditions,so we can try to establish non-linear mapping on VMA.
               if VMA has no VM_NONLINEAR
               then
                       /* the file portion been exist */
-                      if @pgoff is equal to linear_page_index(VMA, pgoff_start)
+                      if @pgoff is equal to linear_page_index(VMA, @start)
                       then set return value to 0,goto "out".
                       /* the index got by
-                       *   (((pgoff_start - VMA->vm_start) >> PAGE_SHIFT) + VMA->vm_pgoff) >> (PAGE_CACHE_SHIFT - PAGE_SHIFT)
+                       *   (((@start - VMA->vm_start) >> PAGE_SHIFT) + VMA->vm_pgoff) >> (PAGE_CACHE_SHIFT - PAGE_SHIFT)
                        *   we have known @vm_start is started from 0,for get the real memory linear address for
                        *   the memory unit,must combined it with memory descriptor
                        */
@@ -35740,11 +35791,11 @@ Chapter 16 : Accessing Files
                       if current file's mapping has capicity for account dirty pages,then
                               let @flags &= MAP_NONBLOCK,it MAP_NONBLOCK is set,we would not start I/O.
                               get_file() on the file.
-                              invoke mmap_region(),pass it the file, pgoff_start, pgoff_size, @flags, VMA->vm_flags, @pgoff
+                              invoke mmap_region(),pass it the file, @start, @size, @flags, VMA->vm_flags, @pgoff
                               as the parameters.
                               fput() the file.
                               if a valid address is returned by mmap_region(),we let the return value record it,
-                              else BUG_ON() if the address != pgoff_start,return value is 0.
+                              else BUG_ON() if the address != @start,return value is 0.
                               goto "out".
                               /* we establish new memory region at there,dirty pages should contribute to accounting */
 
@@ -35761,16 +35812,17 @@ Chapter 16 : Accessing Files
               /* maybe it has non-linear mapping before,or we just set VM_NONLINEAR for it */
               VMA has VM_NONLINEAR,that means this VMA contains a non-linear mapping.
               check VM_LOCKED,if VMA is locked,we must drop PG_Mlocked flag for over-mapped range.
-              /* backup @vm_flags,invoke munlock_vma_pages_range() on [pgoff_start, pgoff_start + pgoff_size),restore flags */
+              /* backup @vm_flags,invoke munlock_vma_pages_range() on [@start, @start + @size),restore flags */
 
               call to mmu_notifier_invalidate_range_start() on the interval,this ask MMU invalid the specified memory range.
               /* invalidate_range_start() is called when all pages in the range are still mapped and have at least one refcount */
               call to populate_range() on the interval with @pgoff.
               /* for each page in the interval,it invoke install_file_pte() on it.
                * install_file_pte() retrieve the PTE corresonding to the page's address,then
-               * makeup a new PTE through pgoff_to_pte(@pgoff),and use the new one instead the PTE.
+               * makeup a new PTE through pgoff_to_pte(current_pgoff),and use the new one instead the PTE. ! pgoff auto increased.
                * macro pgoff_to_pte() is defined in <arch/x86/asm/pgtable-3level.h>,@pte_low is _PAGE_FILE,@pte_high is the pgoff.
                *                                    #^suppose 3-level paging.
+               * if encountered error,install_file_pte() returns -ENOMEM.
                */
               call to mmu_notifier_invalidate_range_end().
               /* invalidate_range_end() is called when all pages in the range have been unmapped and the pages have been freed by
@@ -35789,3 +35841,30 @@ Chapter 16 : Accessing Files
                       otherwise,releae @mmap_sem WRITE.
 
                       return error code or normal return value.
+
+      Direct I/O Transfers :
+        program that want to have full control of the whole I/O data transfer mechanism,can make use of Direct I/O.
+        such program usually is self-caching application,for example,high-performance database servers.
+        most of database servers implement their own caching mechanisms that exploit the peculiar nature of the queries
+        to the database.
+          reasons about kernel page cache is detrimental :
+            > lots of page frames are wasted to duplicate disk data already in RAM(in user-level disk cache).
+            > the read() and write() system calls are slowed down by the redundant instructions that handle.
+              the page cache and the read-ahead,ditto for the paging operations related to the file memory mappings
+            > rather than transferring the data directly between the disk and the user memory,the read() and write()
+              system calls make two transfers: between the disk and a kernel buffer and between the kernel buffer and
+              the user memory.
+
+        Direct I/O : kernel programs the disk controller to transfer the data directly from/to pages belonging to the
+                     User Mode address space of a self-caching application. -- bypass kernel page cache
+        for ordinary I/O,while the data transfer is in progress,process switch may occurs,because the data transfer is
+        asynchronous.thus,the pages belong to User Mode process can be swapped out,but kernel Disk cache cant be swapped
+        out and visible to all processes in Kernel Mode,so the page contains data copied from User Mode to Kernel Mode
+        is valid even process switch has occurred. -- Disk cache
+        for Direct I/O,kernel must take care that these pages in User Mode are accessible by every process in Kernel Mode
+        and they are not swapped out while the data transfer is in progress.
+
+        when process open a file with O_DIRECT enabled,function __dentry_open() will check the address_space of the file by
+        test @a_ops,and @a_ops->direct_IO(),@a_ops->get_xip_mem().   /* ^called by dentry_open(),in <fs/open.c> */
+        if NULL @a_ops OR no either direct_IO() or get_xip_mem() is defined,-EINVAL would be returned.
+        /* system call fcntl() can be used set O_DIRECT for a been opened file through command F_SETFL */
