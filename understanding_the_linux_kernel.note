@@ -33164,6 +33164,9 @@ Chapter 16 : Accessing Files
            *         io vector array,if there is only one vector,then
            *         make use of @ki_inline_vec,in this case,
            *         @iov_base is @ki_buf,and @iov_len is @ki_left
+           *         # struct iovec is defined in <linux/uio.h>
+           *           it contains two members: void __user *iov_base
+           *                                    __kernel_size_t iov_len
            * @ki_nr_segs:
            *         number of segments,each io vector represents one segment
            * @ki_cur_seg:
@@ -35868,3 +35871,295 @@ Chapter 16 : Accessing Files
         test @a_ops,and @a_ops->direct_IO(),@a_ops->get_xip_mem().   /* ^called by dentry_open(),in <fs/open.c> */
         if NULL @a_ops OR no either direct_IO() or get_xip_mem() is defined,-EINVAL would be returned.
         /* system call fcntl() can be used set O_DIRECT for a been opened file through command F_SETFL */
+
+        for READ,function generic_file_aio_read() invoke direct_IO() method of address_space;for WRITE,function
+        __generic_file_aio_write() invoke generic_file_direct_write(),and in which,method direct_IO() is called.
+        implementation of direct I/O depends on filesystem,but for most disk-based filesystem,its direct I/O
+        implementation just a wrapper of blockdev_direct_IO().
+
+        <linux/fs.h>
+          enum {
+                  DIO_LOCKING = 0x01,       /* need locking between buffered and direct access */
+                  DIO_SKIP_HOLES = 0x02,    /* filesystem does not support filling holes */
+          };
+
+          /**
+           * blockdev_direct_IO - a wrapper of __blockdev_direct_IO(),but pass DIO_LOCKING | DIO_SKIP_HOLES
+           *                      to the function as the last parameter
+           * @rw:                 data direction
+           * @iocb:               kernel io control
+           * @inode:              file's inode
+           * @bdev:               block device
+           * @iov:                io vector(s)
+           * @offset:             file offset
+           * @nr_segs:            number of io vectors
+           * @get_block:          get_block() method
+           * @end_io:             end I/O method
+           *                      # typedef void (dio_iodone_t)(struct kiocb *iocb, loff_t offset, ssize_t bytes, void *private);
+           * return:              return value from __blockdev_direct_IO()
+           * # there is another version for no locking,blockdev_direct_IO_no_locking(),it pass 0 as the last parameter
+           *   to __blockdev_direct_IO()
+           */
+          static inline ssize_t blockdev_direct_IO(int rw, struct kiocb *iocb, struct inode *inode,
+                                                   struct block_device *bdev, const struct iovec *iov,
+                                                   loff_t offset, unsigned long nr_segs, get_block_t get_block,
+                                                   dio_iodone_t end_io);
+
+        <fs/direct-io.c>
+          /**
+           * __blockdev_direct_IO - routine execute Direct I/O on a block device
+           * @rw:                   data direction
+           * @iocb:                 kernel io control
+           * @inode:                file's inode
+           * @bdev:                 block device
+           * @iov:                  io vector(s)
+           * @offset:               file offset
+           * @nr_segs:              number of io vectors
+           * @get_block:            get_block() method
+           * @end_io:               method called when I/O completed
+           * @flags:                behavior control
+           * return:                number of data length OR error code
+           * # EXPORT_SYMBOL
+           * # this routine is a library function for use by filesystem drivers
+           * # locking rules -
+           *     > DIO_LOCKING specified
+           *       for WRITE,this routine is called under @i_mutex and returns with @i_mutex held
+           *       for READ,@i_mutex is not held on entry,but it is taken and dropped again before returning
+           *       for R/W,@i_alloc_sem is taken in shard mode,and released on I/O completion
+           *     > DIO_LOCKING is not specified
+           *       no any internal locking,rely on the filesystem to synchronize direct I/O R/W versus each
+           *       other and truncate
+           *       for R/W,both @i_mutex and @i_alloc_sem are not held on entry and are never taken
+           */
+          ssize_t __blockdev_direct_IO(int rw, struct kiocb *iocb, struct inode *inode, struct block_device *bdev,
+                                       const struct iovec *iov, loff_t offset, unsigned long nr_segs, get_block_t get_block,
+                                       dio_iodone_t end_io, int flags);
+
+          what __blockdev_direct_IO() does :
+            1> get blk-bits from @inode->i_blkbits.
+               get blk-size-mask through "(1 << blk-bits) - 1". /* for 512 block size,blk-bits is 9,thus mask is 0x01ff */
+               set @end to @offset.
+               declare a struct dio pointer @dio.
+            2> if @rw is WRITE,then set @rw := WRITE_ODIRECT_PLUG.
+               if @bdev is not NULL,set bdev-blk-bits to blksize_bits(bdev_logical_block_size(@bdev)).
+                                                         /* calculate blk size bits according to
+                                                          * @bdev->bd_disk->queue->limits.logical_block_size,
+                                                          * if NULL queue,the block size default is 512
+                                                          */
+            3> if @offset & blk-size-mask is not 0,that means @offset is not a multiple of block-size.
+               in this case,we must re-caculate blk-size-mask depend on bdev-blk-bits.
+               reset blk-bits to bdev-blk-bits if @bdev is not NULL.
+               let blk-size-mask := (1 << blk-bits) - 1.
+               and check again,if the result still is TRUE,goto label "out",the error code is -EINVAL.
+               /**
+                * this is because Direct I/O bypass page cache.in page cache,kernel read a full block,
+                * and only fill the buffer with data it wants.
+                * if we bypass page cache,then no one will help us align to disk block(the size is 512).
+                * if @offset is not block size aligned,the disk controller can not perform "zero-copy"
+                * DMA transfers starting at the @offset.
+                * the minimum size of data read from disk is one sector.
+                * for example,@offset is 303,if we want to read data starting from 303,then we must read
+                * the file block has number 0;but we are in direct I/O,no one help us to adjust the file block
+                * number that neeed to be readed,thus,@offset & blk-size-mask can not get correct block number.
+                * the hard disk only knows the sector0, sector1, ... , sector_i, secotr_k, sector_n .
+                * if we ask disk to read file start from 303,it do not know what is the sector stored data
+                * we want;but if @offset is 1024,it will know the sector2 contains the data we want.
+                * (suppose file start from sector0, sector0 [0, 511], sector1 [512, 1023], sector2[1024, 1535],
+                *  and so on.)
+                */
+            4> make use of a for-cycle,for each segments,do {
+                       store current segment's buffer address in local variable @addr.
+                       store current segment's buffer size in local variable @size.
+                       update @end to @end + @size.(the initial value of @end is @offset)
+                       check,if @addr is not a multiple of blk-size OR @size is not a multiple of blk-size,
+                       then
+                               re-calculate blk-size-mask as same as the above.
+                               and check again,if either conditions is not satisfied,goto label "out",the
+                               error code is -EINVAL.
+               }
+            5> kmalloc() an object is type of struct dio,store the pointer in @dio,gfp flag is GFP_KERNEL.
+               return -ENOMEM if failed on allocating.
+               set all fields except @pages array in the object to zero.
+               set @dio->flags to @flags.
+            6> if DIO_LOCKING is set,then
+                       rw is READ AND @end is greater than @offset
+                               acquire mutex @inode->i_mutex.
+                               invoke filemap_write_and_wait_range() on the file's @f_mapping,range is
+                               [@offset, @end - 1].
+                               if any error occurred,release @i_mutex,free @dio,goto "out",the error code
+                               is returned by filemap_write_and_wait_range().
+                       otherwise,invoke down_read_non_owner() on @inode->i_alloc_sem,acquire semaphore for
+                       READ in shared mode.
+            7> set dio->is_async to
+                 not KIOCB_SYNC_KEY AND not (WRITE AND @end > inode's size)
+                                            #^valid range
+               call to direct_io_worker(),the arguments are :
+                 @rw, @iocb, @inode, @iov, @offset, @nr_segs, blk-bits, @get_block, @end_io, @dio
+            8> if DIO_LOCKING is set,then
+                       @rw is WRITE AND return value from direct_io_worker() less than 0
+                               check whether @end is greater than current inode's size,if it is the case,
+                               call to vmtruncate() on @inode with its current size.
+            
+            "out":
+              just return the length of data or error code.if direct_io_worker() encountered error,the
+              error code will be returned to the caller who called blockdev_direct_IO().
+
+          /**
+           * direct_io_worker - routine execute direct IO
+           * @rw:               data direction
+           * @iocb:             kernel io control
+           * @inode:            file's inode
+           * @iov:              io vector(s)
+           * @offset:           file offset
+           * @nr_segs:          number of io vectors
+           * @blkbits:          block size bits
+           * @get_block:        get_block() method
+           * @end_io:           called when I/O completed
+           * @dio:              dio object
+           * return:            data length OR error code
+           * # this routine will release both @i_mutex and @i_alloc_sem
+           */
+          static ssize_t
+          direct_io_worker(int rw, struct kiocb *iocb, struct inode *inode, const struct iovec *iov,
+                           loff_t offset, unsigned long nr_segs, unsigned blkbits, get_block_t get_block,
+                           dio_iodone_t end_io, struct dio *dio);
+
+          what direct_io_worker() does :
+            1> set up @dio :
+                 .inode              = @inode
+                 .rw                 = @rw
+                 .blkbits            = @blkbits
+                 .blkfactor          = @inode->i_blkbits - @blkbits
+                 .block_in_file      = @offset >> @blkbits
+                 .get_block          = @get_block
+                 .end_io             = @end_io
+                 .final_block_in_bio = -1
+                 .next_block_for_io  = -1
+                 .iocb               = @iocb
+                 .i_size             = @inode's size
+                 init .bio_lock through spin_lock_init()
+                 .refcount           = 1
+               if @dio->blkfactor is TRUE,set @dio->pages_in_io to 2.
+            2> for each segments,do {
+                       let @user_addr store current vector's @iov_base.
+                       let @dio->pages_in_io +=
+                               ((@user_addr + current vector's @len + PAGE_SIZE - 1) / PAGE_SIZE
+                                - @user_addr / PAGE_SIZE)
+               } /* calculates how many pages in this direct I/O.
+                  *                            (ceiling)
+                  *                      (linear address arithmetic)
+                  *                |<-- iov_len -->|<-- PAGE_SIZE - 1 -->|
+                  * |##############|===============@=====================|===============@=====================|...|
+                  *                ^iov_base                             ^iov_base
+                  *                 iov[0]
+                  * |####################################################|===============@=====================|...|
+                  *                                                      ^iov_base     
+                  *                                                       iov[1]
+                  *                                                      |<-- iov_len -->|<-- PAGE_SIZE - 1 -->|...|
+                  */
+            3> for each segments,do {
+                       /* we handle one vector in once iteration,place it in current request,and submit it */
+
+                       let @user_addr store current vector's @iov_base.
+                       set @bytes to current vector's @iov_len.
+                       let @dio->size += @bytes.
+                       calculate block number of @user_addr,store it in @dio->first_block_in_page.
+                       calculate the last block number relative to current segment,depends on @dio->block_in_file,
+                       store it in @dio->final_block_in_request.
+
+                       set @dio->head to 0.
+                       set @dio->tail to 0.
+                       set @dio->curr_page to 0.
+                       set @dio->total_pages to 0.
+
+                       if @user_addr & PAGE_SIZE - 1 is TRUE,then
+                       /* suppose PAGE_SIZE is 4096 => 0001000000000000 (0x1000)
+                        * PAGE_SHIFT is 12
+                        * PAGE_SIZE - 1 is 4095 => 0000111111111111 (0x0fff)
+                        * @iov_base is in the middle of a page,thus,during I/O,
+                        * the page from User Mode containing the address @iov_base also
+                        * required to be pinned.this is why @total_pages have to be increased.
+                        */
+                               increase @dio->total_pages.
+                               let @bytes -= PAGE_SIZE - (@user_addr & (PAGE_SIZE - 1)).
+                               /**
+                                * for @bytes,if it is less than the remaining space of current page,
+                                * this expression will get a negative value,then @bytes will
+                                * wrapped.
+                                */
+
+                                /* Kernel "C" optimization,use defined behavior of unsigned integer wrapping
+                                 * to eliminate conditional branches.
+                                 */
+
+                                                /**
+                                                 * if the buffer @iov_base spanned two pages,
+                                                 * then will have to pin the next page,too.
+                                                 * if @bytes is wrapped,that means it is less than
+                                                 * the remaining space of current page.
+                                                 * and expression
+                                                 *   "@bytes + PAGE_SIZE - 1"
+                                                 * would get a result is greater than MAX(typeof(@bytes),
+                                                 * thus it will be cut,so the @result / PAGE_SIZE will
+                                                 * get a correct value.it is 0 if @bytes did not wrapped
+                                                 * 1 page,or greater than 0 if it wrapped several pages.
+                                                 * # e.g.
+                                                 *     iov_base is 4000, iov_len is 32
+                                                 *     @bytes get value -64,and wrapped to 65472
+                                                 *     65472 + 4095 = 69567
+                                                 *     cut to 4031
+                                                 *     4031 / 4096 = 0
+                                                 */
+                       let @dio->total_pages += (@bytes + PAGE_SIZE - 1) / PAGE_SIZE.
+                       set @dio->curr_user_address to @user_addr.
+
+                       call to do_direct_IO() on @dio to handle this request.
+
+                       let @dio->result += current vector's @iov_len -
+                                           ((@dio->final_block_in_request - @dio->block_in_file) << @blkbits).
+                       the @result store the sum of data length of each request.
+                    
+                       invoke dio_cleanup() on @dio and break cycle,if do_direct_IO() returned an error.
+               }
+
+            4> if ret value of do_direct_IO() returned -ENOTBLK AND WRITE is set in @rw
+               then,reset @ret to 0.
+               call to dio_zero_block(),pass it @dio and 1 as parameters.
+               /* there may be some unwritten disk at the end of a part-written fs-block-sized block,
+                * go zero that now.
+                */
+            5> if @dio->cur_page is TRUE,then
+                       call to dio_send_cur_page() on @dio.
+                       if @ret is 0,set @ret to the result of this calling.
+                       page_cache_release() the @cur_page,and set this field to NULL.
+            6> if @dio->bio is TRUE,then call to dio_bio_submit() on @dio to submit the BIO.
+               call to dio_cleanup() on @dio.
+            7> if READ is set in @rw AND DIO_LOCKING is set in @dio->flags,release @i_mutex of @dio->inode.
+               BUG_CHECK,it is a BUG if @ret == -EIOCBQUEUED.
+            8> if @dio->is_async is TRUE AND @ret is equal to 0 AND @dio->result is TRUE AND
+                  (READ is set in @rw OR @dio->result is equal to @dio->size)
+                       set @ret to -EIOCBQUEUED
+               if @ret is not equal to -EIOCBQUEUED
+                       kick off the inode's address_space by invoke blk_run_address_space(@dio->inode->i_mapping).
+                       invoke dio_await_completion() on @dio.
+                              /* wait on and process all in-flight BIOs.
+                               * this must only be called once all bios have been issued
+                               * so that the refcount can only decrease.
+                               * this just waits for all bios to make it through dio_bio_complete().
+                               * io error information is stored in @dio->io_error,and should be propagated via
+                               * dio_complete().
+                               */
+            9> acquire @dio->bio_lock,and disable local interrupt.
+               retrieve --@dio->refcount.
+               release the lock,and restore local interrupt.
+               if we found the refount is equal to 0,we must call to dio_complete(),pass it @dio,@offset,@ret as
+               paramters,and kfree() the @dio.                       /* this routine will release @i_alloc_sem
+                                                                      * it also call to @end_io if @dio->result
+                                                                      * is not FALSE
+                                                                      */
+               otherwise,do BUG CHECK,it is a BUG if @ret is not equal to -EIOCBQUEUED.
+           10> return @ret to caller.
+
+               
+            
+
