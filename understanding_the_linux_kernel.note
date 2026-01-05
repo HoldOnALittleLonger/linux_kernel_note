@@ -12044,11 +12044,22 @@ Chapter 8 : Memory Management
             /**
              * page - structure page represent a physical page
              * @flags:        atomic flags,32 flags describe the status of the page frame
-             * @_count:       usage count,-1 unused(free page)
-             *                if more than one processes are sharing it,its value must be
-             *                greater than 1
+             * @_count:       usage count
              *                # this field would decrease whenever a process releases this page frame
              *                  or COW is executed on it
+             *                # !! THE BOOK HAS INTRODUCED WHEN @_count IS SET TO -1 MEANS NO ONE
+             *                     IS USING IT.BUT IN KERNEL VERSION 2.6.34.1,NOWHERE HAS SET THIS
+             *                     FIELD TO -1
+             *                     FUNCTION page_count() JUST atomic_read() THIS FIELD,BUT THE BOOK
+             *                     SAID THIS ROUTINE RETURN @_count + 1 AS THE RESULT,IT IS NOT
+             *                     CORRECT IN KERNEL 2.6.34.1
+             *                     IN HEADER <linux/mm.h>,IT SAID page_count() == 0 MEANS THE PAGE
+             *                     IS "FREE",@page->lru IS THEN USED FOR FREELIST MANAGEMENT IN THE
+             *                     BUDDY ALLOCATOR;page_count() > 0 MEANS THE PAGE HAS BEEN ALLOCATED
+             *                     
+             *                     EVEN IN BOOTING PHASE,FUNCTION init_page_count() SET THIS FIELD
+             *                     TO 1,THIS FUNCTION IS CALLED IN memmap_init_zone(),WHICH IS
+             *                     DEFINED IN <mm/page_alloc.c> AS A "__meminit" FUNCTION
              * @_mapcount:    count of ptes mapped in mms to show when page is mapped
              *                AND limit reverse map searches
              *                # Number of Page Table entries that refer to the page frame
@@ -16605,8 +16616,8 @@ Chapter 9 : Process Address Space
               it checks memory region cache of the memory descriptor @mm at first.
               if the cache is the appropriate VMA,then it must satisfied the condition :
                       cache AND cache->@vm_end > @addr AND cache->@vm_start <= @addr
-              if no cache hitting,then scanning the memory regions of in the memory try to
-              find out the proper one.
+              if no cache hitting,then scanning the memory regions in the memory try to
+              find out a proper one.
               as described previously,for optimize to scanning procedure,red-black tree
               must be considered.
               because the key of left node is less than current and less than right node,
@@ -17307,8 +17318,13 @@ Chapter 9 : Process Address Space
                          *  #   VMA associated hugetlb page,handle work over to follow_hugetlb_page()
                          *  #   
                          *  #   VMA is exist,and it is not hugetlb VMA,traverse current VMA's interval in PAGE_SIZE,
-                         *  #   for each not present page,invoke handle_mm_fault() for it - linear address of the page,
-                         *  #   check the result,update accounting or report error
+                         *  #   for each not present page(call to follow_page() on the VMA,if everything is OK,this function will return a
+                         *  #   page descriptor,otherwise,return NULL or BAD ADDRESS.the traversing stopped when follow_page() returned a non-NULL
+                         *  #   address),invoke handle_mm_fault() for it - linear address of the page,check the result,update accounting or report
+                         *  #   error
+                         *  #
+                         *  #   if we have encountered a unexpected error in the traversing,we have to early stop __get_user_pages() and return
+                         *  #   error to caller
                          *  ##
                          *  int get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
                          *                     unsigned long start, int nr_pages, int write, int force,
