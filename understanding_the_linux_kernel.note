@@ -12222,7 +12222,7 @@ Chapter 8 : Memory Management
         data structures that are most often referenced by the CPU are stored.
         /**
          * the Kernel make use of NUMA even for some peculiar uniprocessor systems that have huge "holes"
-         * inthe physical address space.
+         * in the physical address space.
          */
 
         ! physical memory inside each node can be split into several zones.
@@ -14116,7 +14116,7 @@ Chapter 8 : Memory Management
               got_pg:
               15> check if kernel memory checking is enabled
                   then
-                          do kernel memor checking for page allocation through 
+                          do kernel memory checking for page allocation through 
                           kmemcheck_pagealloc_alloc(@page, @order, @gfp_mask)
                   return page descriptor,we finally got some page frames.
 
@@ -33736,6 +33736,9 @@ Chapter 16 : Accessing Files
              *                  # block in file : get through page index 
              *                  # logical block in disk : the logical block relative to
              *                  #                         position of the block in the disk partion
+             *                  # typedef int (get_block_t)(struct *inode inode, sector_t iblock,
+             *                  #                           struct buffer_head *bh_result, int create);
+             *                  # <linux/fs.h> 
              * return:          always 0
              * # EXPORT_SYMBOL
              * # this function create a buffer_head object named @map_bh,set its @b_state and @b_size
@@ -35907,6 +35910,140 @@ Chapter 16 : Accessing Files
 
         <fs/direct-io.c>
           /**
+           * how many user pages to map in one call to get_user_pages(),this determines
+           * the size of a structure on the stack.
+           */
+          #define DIO_PAGES 64
+
+          /**
+           * dio - dio block,a dio block is somewhere between the hard sector size and the
+           *       filesystem block size.it is determined on a per-invocation basis.when
+           *       talking to the filesystem,we need to convert dio blocks to fs blocks by
+           *       scaling the dio block quantity down by @blkfactor;similarly,fs block size
+           *       quantities are converted to bio block quantities by shifting left by @blkfactor
+           * @bio:        bio under assembly,the BIO of current submission
+           * @inode:      file's inode
+           * @rw:         data direction
+           * @i_size:     inode size when submitted
+           * @flags:      flags, DIO_LOCKING | DIO_SKIP_HOLES
+           * @blkbits:    block size bits
+           * @blkfactor:  when we are using an alignment which is finer than the filesystem's soft
+           *              block size,this specifies how much finer.value 2 means 1/4 block alignment
+           * @start_zero_done:
+           *              flag,sub-blocksize zeroing has been performed at the start of a WRITE
+           * @pages_in_io:
+           *              approximate total IO pages
+           * @size:       total request size
+           * @block_in_file:
+           *              logical block number of current offset in the file
+           * @blocks_available:
+           *              current number of available blocks
+           * @final_block_in_request:
+           *              number of last block in the request
+           *              it usually is @block_in_file + (current segment length >> @blkbits)
+           * @first_block_in_page:
+           *              the logical block number corresponding to the segment address
+           *              of this request
+           *              # suppose offset is 4000,block size is 512,then the result
+           *                is 4000 >> 9 => 7
+           * @boundary:   previous block is at a boundary
+           *              if @map_bh is BH_Boundary,its value is TRUE,otherwise is FALSE
+           * @reap_counter:
+           *              rate limit reaping
+           * @get_block:  get_block() method
+           * @end_io:     end_io() method
+           * @final_block_in_bio:
+           *              current final block in @bio + 1
+           * @next_block_for_io:
+           *              next block to be put under I/O in dio_blocks units
+           * @map_bh:     last get_block() result
+           * @cur_page:   the page
+           * @cur_page_offset:
+           *              offset into @cur_page
+           * @cur_page_len:
+           *              remaining number of bytes at @cur_page_offset
+           * @cur_page_block:
+           *              the block number corresponding to @cur_page to starts
+           * @bio_lock:   protect BIO fields
+           * @refcount:   refcount of this dio and BIOs
+           * @bio_list:   singly linked via @bi_private
+           * @waiter:     waiting task
+           * @iocb:       kernel io control block
+           * @is_async:   IO async indicator
+           * @io_error:   IO error in completion path
+           * @result:     IO result,usually is the data length
+           * @curr_page:  number of pages been get via get_user_pages()
+           * @total_pages:
+           *              number of pages involve this request
+           * @curr_user_address:
+           *              current segment's address
+           * @head:       next page to process,this field usually as subscript
+           *              to @pages[]
+           * @tail:       last valid page + 1
+           * @page_errors:
+           *              errno from get_user_pages()
+           * @pages:      array of page descriptors,used to stores page descriptors
+           *              get from get_user_pages(),these pages will be pinned during
+           *              data transferring
+           */
+          struct dio {
+                  /* BIO submission state */
+                  struct bio *bio;
+                  struct inode *inode;
+                  int rw;
+                  loff_t i_size;
+                  int flags;
+                  unsigned blkbits;
+                  unsigned blkfactor;
+                  unsigned start_zero_done;
+                  int pages_in_io;
+                  size_t size;
+                  sector_t block_in_file;
+                  unsigned blocks_available;
+                  sector_t final_block_in_request;
+                  unsigned first_block_in_page;
+                  int boundary;
+                  int reap_counter;
+                  get_block_t *get_block;
+                  dio_iodone_t *end_io;
+                  sector_t final_block_in_bio;
+                  sector_t next_block_for_io;
+                  struct buffer_head map_bh;
+                  
+                  /* deferred addtion of a page to the bio */
+                  struct page *cur_page;
+                  unsigned cur_page_offset;
+                  unsigned cur_page_len;
+                  sector_t cur_page_block;
+
+                  /* BIO completion state */
+                  spinlock_t bio_lock;
+                  unsigned long refcount;
+                  struct bio *bio_list;
+                  struct task_struct *waiter;
+
+                  /* AIO related stuff */
+                  struct kiocb *iocb;
+                  int is_async;
+                  int io_error;
+                  ssize_t result;
+
+                  /* Page fetching state */
+                  int curr_page;
+                  int total_pages;
+                  unsigned long curr_user_address;
+                  
+                  /* Page queue */
+                  unsigned head;
+                  unsigned tail;
+                  int page_errors;
+
+                  /* pages[] are not zeroed out at allocation time */
+                  struct page *pages[DIO_PAGES];
+          };
+
+
+          /**
            * __blockdev_direct_IO - routine execute Direct I/O on a block device
            * @rw:                   data direction
            * @iocb:                 kernel io control
@@ -35972,7 +36109,13 @@ Chapter 16 : Accessing Files
                        store current segment's buffer size in local variable @size.
                        update @end to @end + @size.(the initial value of @end is @offset)
                        check,if @addr is not a multiple of blk-size OR @size is not a multiple of blk-size,
-                       then
+                       then   
+                               /* we require address of segment and length of segment both align to block size.
+                                * because @offset is aligned to block size,and the minimum size of data for I/O
+                                * on a disk usually is 512(block size),thus the segment must is large enough to
+                                * store the dat read from/write into the disk.
+                                */
+
                                re-calculate blk-size-mask as same as the above.
                                and check again,if either conditions is not satisfied,goto label "out",the
                                error code is -EINVAL.
@@ -36030,6 +36173,17 @@ Chapter 16 : Accessing Files
                  .rw                 = @rw
                  .blkbits            = @blkbits
                  .blkfactor          = @inode->i_blkbits - @blkbits
+                                       /* differ between inode's blkbits and caller passed blkbits,
+                                        * inode's i_blkbits is set by filesystem.
+                                        * if we are called from __blockdev_direct_IO(),@blkbits either
+                                        * is filesystem's blkbits or the block device's blkbits.
+                                        * # suppose filesystem block size is 1024,but block device block size
+                                        *   is 512,and @blkbits is the block device's blkbits.
+                                        *   @i_blkbits of inode is 10,@blkbits is 9,result is 1.
+                                        *   dio.blkfactor is 1,the bytes gap is 512B.
+                                        *   for blkfactor is 2,disk block size is 512,the filesystem's
+                                        *   soft block size is 2048,512 is 1/4 of 2048.
+                                        */
                  .block_in_file      = @offset >> @blkbits
                  .get_block          = @get_block
                  .end_io             = @end_io
@@ -36044,7 +36198,7 @@ Chapter 16 : Accessing Files
                        let @user_addr store current vector's @iov_base.
                        let @dio->pages_in_io +=
                                ((@user_addr + current vector's @len + PAGE_SIZE - 1) / PAGE_SIZE
-                                - @user_addr / PAGE_SIZE)
+                                - @user_addr / PAGE_SIZE)             #^4095
                } /* calculates how many pages in this direct I/O.
                   *                            (ceiling)
                   *                      (linear address arithmetic)
@@ -36056,6 +36210,9 @@ Chapter 16 : Accessing Files
                   *                                                      ^iov_base     
                   *                                                       iov[1]
                   *                                                      |<-- iov_len -->|<-- PAGE_SIZE - 1 -->|...|
+                  *
+                  * if this routine is called from __blockdev_direct_IO(),then segment's address and segment's length
+                  * must been aligned to block size.
                   */
             3> for each segments,do {
                        /* we handle one vector in once iteration,place it in current request,and submit it */
@@ -36065,8 +36222,9 @@ Chapter 16 : Accessing Files
                        let @dio->size += @bytes.
                        calculate block number of @user_addr,store it in @dio->first_block_in_page.
                        calculate the last block number relative to current segment,depends on @dio->block_in_file,
-                       store it in @dio->final_block_in_request.
-
+                       store it in @dio->final_block_in_request. /* current segment's length >> @blkbits + 
+                                                                  * @dio->block_in_file
+                                                                  */
                        set @dio->head to 0.
                        set @dio->tail to 0.
                        set @dio->curr_page to 0.
@@ -36159,6 +36317,235 @@ Chapter 16 : Accessing Files
                                                                       */
                otherwise,do BUG CHECK,it is a BUG if @ret is not equal to -EIOCBQUEUED.
            10> return @ret to caller.
+
+          /**
+           * do_direct_IO - do direct I/O
+           *                walk the user pages,and the file,mapping blocks to disk and generating
+           *                a sequence of (page,offset,len,block) mappings.these mappings are injected
+           *                into submit_page_section(),which take care of the next stage of submission
+           * @dio:          dio block
+           * return:        0 OR error code
+           * # direct IO against a blockdev is different from a file.because we can happily perform page-sized
+           *   but 512B aligned IOs,this is important that blockdev IO be able to have fine alignment and large sizes
+           *   so what we do is to permit the @get_block() function to populate bh.b_size with the size of IO which
+           *   is permitted at this @offset and this @i_blkbits
+           *   for best results,the blockdev should be set up with 512B @i_blkbits and it should set @b_size to
+           *   PAGE_SIZE or more inside get_block().this gives fine alignment but still allows thisfunction
+           *   to work in PAGE_SIZE units
+           */
+          static int do_direct_IO(struct dio *dio);
+
+          what do_direct_IO() does :
+            1> get blk-bits through @dio->blkbits.
+               get blocks-per-page by calculate "PAGE_SIZE >> blk-bits".
+               make use the buffer @dio->map_bh.
+               get block-in-page through @dio->first_block_in_page. /* the block corresponding to the segment address */
+            2> enter a while-cycle,stop condition is @dio->block_in_file >= @dio->final_block_in_request {
+                       call to dio_get_page() on @dio to get a page descriptor in @page.
+                       /* if @dio->tail - @dio->head is 0,that means no pages present,we must refill it.
+                        * this willd be done by dio_refill_pages() on @dio.
+                        * when there is some pages present,we retrieve the page descriptor through @dio->pages[@dio->head++]
+                        *
+                        * dio_refill_pages() :
+                        *         first,calculate number of pages have to be refilled - min(total_pages - curr_page, DIO_PAGES).
+                        *         then call to get_user_pages_fast() to get pages,and stores page descriptors in @dio->pages[].
+                        *         !! because direct_io_worker() will clear page fetching state,thus @total_pages is a relative
+                        *            value about current segment.if current segment spanned more than one pages,then it is the
+                        *            number of pages than segment have spanned.
+                        *            because @curr_user_address is set to the address of current segment,and @curr_page is set
+                        *            to 0,dio_refill_pages() is called again from dio_get_page().
+                        *            in this case,get_user_pages_fast() have to get user pages from current segment's linear
+                        *            address,number of pages is @total_pages or DIO_PAGES
+                        *                                       #^because @curr_page is set to 0
+                        *
+                        *         if failed but @blocks_available is not 0 AND @rw is WRITE,then use a page - ZERO_PAGE(0).
+                        *         # macro ZERO_PAGE() is defined in <arch/x86/include/asm/pgtable.h>,ZERO_PAGE is a global
+                        *           shared page that is always zero.
+                        *           array named @empty_zero_page is type of unsigned long,size of elements is 128 = 4096 / 32
+                        *           for 32 bit architecture.(unsigned long is 32 bit,32 * 128 == 4096B)
+                        *           ZERO_PAGE(vaddr) => (virt_to_page(empty_zero_page))
+                        *         if we are using ZERO_PAGE,then we must store the error code from get_user_pages_fast() in
+                        *         @dio->page_errors,if the field is 0.then page_cache_get() the ZERO_PAGE,let @dio->pages[0]
+                        *         stores the page descriptor of ZERO_PAGE,set @head to 0,set tail to 1,return 0 to caller.
+                        *         if get_user_pages_fast() was succeed,then we have to
+                        *                 update @curr_user_address to @curr_user_address + number of pinned pages 
+                        *                 # this is because we get pages starting from @curr_user_address
+                        *                 update @curr_page to @curr_page + number of pinned pages
+                        *                 set @head to 0,set @tail to number of pinned pages
+                        *                 return 0 to caller
+                        *                 # now @curr_user_address is the address of last page frame.
+                        *                   but dio_get_page() still return page at @pages[0],current segment's
+                        *                   address.
+                        *                   when we need to refill pages again,the linear address is started from @curr_user_address,
+                        *                   but before we consumed all pages in @pages[],@curr_user_address is useless.
+                        *                   direct_io_worker() will reset page fetching state,in this case,dio_refill_pages()
+                        *                   will be called for each segment,and @curr_user_address is the current segment's
+                        *                   linear address.
+                        *         !! when do_direct_IO() is called from direct_io_worker(),@curr_user_address must be the
+                        *            current segment's iov_base.
+                        */
+
+                       if it is bad page frame,goto label "out",return value is PTR_ERR(@page).
+
+                       enter a nested while-cycel,stop condition is block-in-page >= blocks-per-page {
+                               /* we handle one page in this cycle */
+                               get offset into this page through "block-in-page << blk-bits".
+                                   (offset-in-page)
+
+                               if @dio->blocks_available is _zero_,we must get more blocks for it.
+                               so,we have to
+                                       invoke get_more_blocks() on it.
+                                       /**
+                                        * this routine invoke @dio->get_block() if and only if @dio->page_errors is 0,that
+                                        * means no error was detected at previous stage.
+                                        *
+                                        * ! it is a BUG if @dio->block_in_file >= @dio->final_block_in_request,that means
+                                        *   the work about file data handling is not belongs to current request.
+                                        *
+                                        * if @rw is WRITE,then we need to @create new block,but if DIO_SKIP_HOLES is set AND
+                                        * @dio->block_in_file is less than (@dio->inode's size >> @dio->blkbits),then we can
+                                        * not @create new block.
+                                        * ! for writes inside @i_size on a DIO_SKIP_HOLES filesystem we forbid block
+                                        *   creations: only overwrites are permitted.
+                                        *   we will return early to the caller once we see an unmapped buffer head returned,
+                                        *   and the caller will fall back to buffered I/O.
+                                        *   otherwise,the decision is left to the get_blocks() method,which may decide to
+                                        *   handle it or also return an unmapped buffer head.
+                                        * but argument for @iblock of get_block() method depends on filesystem,routine
+                                        * get it by calculate "@dio->block_in_file >> @dio->blkfactor".
+                                        * this routine make use of @dio->map_bh as buffer head,@b_state is set to 0;
+                                        * @b_size is set to "@fs_count << @dio->inode->i_blkbits".
+                                        * about @fs_count:
+                                        *                     |<---------------- dio count --------------------->|
+                                        *         fs_count := (@dio->final_block_in_request - @dio->block_in_file) >> @dio->blkfactor
+                                        *         fs_count++ if and only if "dio count" & "(1 << @dio->blkfactor) -1" is not zero.
+                                        *         /* alignment */
+                                        *         /* suppose fblkinreq is 8,and blkinfile is 2,@blkfactor is 1,
+                                        *          * fs_count is 6 >> 1 => 0b110 >> 1 => 0b11 => 3
+                                        *          * 0b110 & (1 << 1) - 1 => 0b110 & 0b001 => 0,no increasement
+                                        *          * @b_size => 3 << 10(1024B) => 1100000000000 => 6144 == 6 * 1024
+                                        *          * thus,@blocks_available would be 6144 >> 9 => 12
+                                        *          */
+                                        * we get a whole chunk at once,instead to invoke get_block() for each piece which is block-sized.
+                                        * function return the result of get_block() to caller or @dio->page_errors if it is not _zero_.
+                                        */
+                                       if we failed to get more blocks,we have to page_cache_release() and goto label "out".
+                                       in this case,the error code either is @dio->page_errors or error code from get_block().
+        
+                                       if @map_bh has no BH_Mapped,goto label "do_holes".
+        
+                                       update @dio->blocks_available,it is the result of "@map_bh->b_size >> @dio->blkbits",because we
+                                       get the whole chunk at once.
+                                       update @dio->next_block_for_io,it is the result of "@map_bh->b_blocknr << @dio->blkfactor".
+        
+                                       if @map_bh has BH_New,we must call to clean_blockdev_aliases() on @dio,this function will
+                                       unmap_underlying_metadata() for each block in the chunk.
+        
+                                       /* @blkfactor is _zero_,means no remainder gap,we can just get into next stage */
+                                       if @dio->blkfactor is _zero_,we have goto label "do_holes".
+        
+                                       /* if we are at the start of IO and that IO starts partway into a fs-block,
+                                        * dio remainder will be non-zero.
+                                        * if IO is READ then we can simply advance the IO cursor to the first block
+                                        * which is to be read.
+                                        * if IO is WRITE AND the block was newly allocated,we can not do that,the start of
+                                        * fs block must be zeroed out on-disk.
+                                        */
+                                       if @map_bh has no BH_New,we update @dio->next_block_for_io to
+                                               @dio->next_block_for_io + (@dio->block_in_file & ((1 << @dio->blkfactor) - 1))
+                                                                         |<---------------- dio remainder ----------------->|o
+                                       update @dio->blocks_available to
+                                              @dio->blocks_available - (@dio->block_in_file & ((1 << @dio->blkfactor) - 1))
+                                              /* follow the suppose at above,@block_availabe is 12,
+                                               * dio remainder is "2 & ((1 << 1) - 1)" => 0b10 & 0b01 => 0
+                                               * @blocks_availabe -= 0 => 12
+                                               */
+
+                               do_holes: /* handle holes */
+
+                               if @map_bh has no BH_Mapped,that is no block in disk corresponds to the buffer head,it is a hole.
+                               then we have to
+                                       for WRITE operation,we just page_cache_release() @page and return -ENOTBLK.
+                                       
+                                       get size alignment for inode's size,it is ALIGN(@dio->inode's @i_size, 1 << blk-bits).
+                                       if @dio->block_in_file is greater than or equal to (i_size_aligned >> blk-bits),that means
+                                       we encountered EOF,just page_cache_release() @page,goto label "out".
+
+                                       otherwise,zero_user() on @page from block-in-page << blk-bits to maximum block size,that is,
+                                       we zero out this block.
+                                       let @dio->block_in_file increase,block-in-page increase,goto label "next_block".
+
+                               @map_bh is BH_Mapped.
+
+                               if @dio->blkfactor is not _zero_ AND not @dio->start_zero_done,then dio_zero_block() on @dio with
+                               parameter @end = 0,this routine zero out unused portion of the block with zeros.
+                               /* this is happens only if user-buffer,file offset or io length is not filesystem block-size multiple.
+                                * end is zero if we are doing the start of the IO,1 at the end of the IO.
+                                * dio_zero_block(dio, end) :
+                                *         set @dio->start_zero_done = 1. # we only zero out at I/O starting
+                                *         if @dio->blkfactor is 0 OR @dio->map_bh has no BH_New,just return to caller.
+                                *         if @dio->block_in_file & ((1 << @dio->blkfactor) - 1) is zero,just return to caller.
+                                *            |<----------- this_chunk_blocks ---------------->|
+                                *         if @end is 1,we set @this_chunk_blocks to "(1 << @dio->blkfactor) - @this_chunk_blocks".
+                                *         calculate bytes of this chunk,it is @this_chunk_blocks << @dio->blkbits.
+                                *         make use of ZERO_PAGE(0).
+                                *         try submit_page_section(),pass it arguments :
+                                *                 @dio, ZERO_PAGE(0), bytes of this chunk, @dio->next_block_for_io
+                                *         if submit_page_section() returned an error code,just return to caller without zero out.
+                                *         otherwise,we update @dio->next_block_for_io += @this_chunk_blocks.
+                                */
+
+                               let local variable @this_chunk_blocks = @dio->blocks_available.
+                               store the result of "(PAGE_SIZE - offset-in-page) >> blk-bits" in local variable @u,it is
+                               the number of blocks that corresponding to the reamining space.
+                               
+                               if @this_chunk_blocks is greater than @u,let @this_chunk_blocks = @u,that means se use the
+                               remaining space.
+                               reset @u to @dio->final_block_in_request - @dio->block_in_file,it is the number of blocks
+                               that corresponding to the length of data in this request.
+                               check again,if @this_chunk_blocks is greater than @u,let @this_chunk_blocks = @u,we only
+                               need space that is right large enough to store the data we want.
+                               
+                               calculate @this_chunk_bytes,it is @this_chunk_blocks << blk-bits.
+                               /* it is a BUG if @this_chunk_bytes is 0 */
+
+                               if @map_bh has BH_Boundary,we set @dio->boundary to TRUE,otherwise,it must be FALSE.
+
+                               invoke submit_page_section(),pass it the arguments :
+                                       @dio, @page, offset-in-page, @this_chunk_bytes, @dio->next_block_for_io
+                                             #^dio_get_page()
+
+                               if submit_page_section() returned an error code,page_cache_release() @page,goto label
+                               "out",in this case,the return value is the error code.
+
+
+                               submit_page_section() succeed.
+                               update @dio->next_block_for_io to @dio->next_block_for_io + @this_chunk_blocks.
+                               update @dio->block_in_file to @dio->block_in_file + @this_chunk_blocks.
+                               advance block-in-page,it is block-in-page + @this_chunk_blocks.
+                               /* cycle will end when block-in-page >= blocks-per-page */
+                               update @dio->blocks_available to @dio->blocks_available -= @this_chunk_blocks.
+                                                                                          #^blocks spanned segment length
+
+                               next_blocks:
+                                
+                               it is a BUG if @dio->block_in_file is greater than @dio->final_block_in_request.
+                               /* because we call do_direct_IO() in direct_io_worker() for each segment in a for-cycle,
+                                * thus,for current request,the block in file should never greater than final block in request
+                                */
+
+                               if @dio->block_in_file is equal to @dio->final_block_in_request,that means we have handled this
+                               request,so break cycle.
+                       }
+
+                       page_cache_release() @page.
+                       set block-in-page to 0.
+                       /* this will let the next nested while-cycle start from block 0 of the next page.
+                        * if @dio->block_in_file == @dio->final_block_in_request,this cycle should be stopped before next
+                        * iteration.
+                        */
+               }            
+            3> return 0 or error code to caller.
 
                
             
