@@ -27341,14 +27341,14 @@ Chapter 14 : Block Device Drivers
                                   I/O Request
                                        |
                                        V
-                                      VFS---------------------+
-                                      | |                     |
-                      +---------------+ |                     |
-                      |                 |                     V
-                      |                 |                 Direct I/O
-                      V                 |                     |
-                      Disk Caches       |                     |
-                          |             V                     V
+                                      VFS
+                                      | |                     
+                      +---------------+ |                     
+                      |                 |                     
+                      |             Direct I/O
+                      V                 |                     
+                      Disk Caches       |                     
+                          |             V                     
                           +------>Disk Filesystem /* Mapping Layer */
                                         |
                                         V
