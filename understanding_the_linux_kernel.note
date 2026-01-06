@@ -12060,6 +12060,12 @@ Chapter 8 : Memory Management
              *                     EVEN IN BOOTING PHASE,FUNCTION init_page_count() SET THIS FIELD
              *                     TO 1,THIS FUNCTION IS CALLED IN memmap_init_zone(),WHICH IS
              *                     DEFINED IN <mm/page_alloc.c> AS A "__meminit" FUNCTION
+             *
+             *                # when got a new page,function prep_new_page() would be called on the
+             *                  kernel control path.in which,function set_page_refcounted() will be
+             *                  invoked,and this routine set page's @_count field to 1(of course,
+             *                  have to done some BUG checking before set @_count.this routine
+             *                  is defined in <mm/internal.h>)
              * @_mapcount:    count of ptes mapped in mms to show when page is mapped
              *                AND limit reverse map searches
              *                # Number of Page Table entries that refer to the page frame
@@ -27335,13 +27341,14 @@ Chapter 14 : Block Device Drivers
                                   I/O Request
                                        |
                                        V
-                                      VFS
-                                      | |
-                      +---------------+ |
-                      |                 |
-                      V                 |
-                      Disk Caches       |
-                          |             V                      
+                                      VFS---------------------+
+                                      | |                     |
+                      +---------------+ |                     |
+                      |                 |                     V
+                      |                 |                 Direct I/O
+                      V                 |                     |
+                      Disk Caches       |                     |
+                          |             V                     V
                           +------>Disk Filesystem /* Mapping Layer */
                                         |
                                         V
@@ -35972,8 +35979,10 @@ Chapter 16 : Accessing Files
            *              current final block in @bio + 1
            * @next_block_for_io:
            *              next block to be put under I/O in dio_blocks units
+           *              for the time that no I/O task now,it should be the block number
+           *              of @cur_page the new comming page
            * @map_bh:     last get_block() result
-           * @cur_page:   the page
+           * @cur_page:   current deferred I/O page
            * @cur_page_offset:
            *              offset into @cur_page
            * @cur_page_len:
@@ -36298,16 +36307,24 @@ Chapter 16 : Accessing Files
 
             4> if ret value of do_direct_IO() returned -ENOTBLK AND WRITE is set in @rw
                then,reset @ret to 0.
-               call to dio_zero_block(),pass it @dio and 1 as parameters.
+               call to dio_zero_block(),pass it @dio and 1 as second parameter.
                /* there may be some unwritten disk at the end of a part-written fs-block-sized block,
                 * go zero that now.
                 */
-            5> if @dio->cur_page is TRUE,then
+            5> if @dio->cur_page is TRUE,then /* remain a I/O task */
                        call to dio_send_cur_page() on @dio.
                        if @ret is 0,set @ret to the result of this calling.
                        page_cache_release() the @cur_page,and set this field to NULL.
-            6> if @dio->bio is TRUE,then call to dio_bio_submit() on @dio to submit the BIO.
+            6> if @dio->bio is TRUE,then call to dio_bio_submit() on @dio to submit the BIO. /* remain a BIO */
                call to dio_cleanup() on @dio.
+               /**
+                * this routine make use a while-cycle,stop condition is dio_pages_present() returned 0.
+                * for each page get through dio_get_page(),it invoke page_cache_release() on it.
+                * # dio_get_page() would let @dio->head increase,if @dio->tail - @dio->head is 0,dio_pages_present()
+                *   will return 0,then cycle stopped.
+                *   these pages are get through dio_refill_pages().even we put page at there,if the BIO this page
+                *   associated with is not completed,the refcount stay a positive number.
+                */
             7> if READ is set in @rw AND DIO_LOCKING is set in @dio->flags,release @i_mutex of @dio->inode.
                BUG_CHECK,it is a BUG if @ret == -EIOCBQUEUED.
             8> if @dio->is_async is TRUE AND @ret is equal to 0 AND @dio->result is TRUE AND
@@ -36453,6 +36470,10 @@ Chapter 16 : Accessing Files
                                        update @dio->blocks_available,it is the result of "@map_bh->b_size >> @dio->blkbits",because we
                                        get the whole chunk at once.
                                        update @dio->next_block_for_io,it is the result of "@map_bh->b_blocknr << @dio->blkfactor".
+                                                                                          /* because we get a chunk of blocks,
+                                                                                           * this will get the initial block number
+                                                                                           * of blocks in this chunk
+                                                                                           */
         
                                        if @map_bh has BH_New,we must call to clean_blockdev_aliases() on @dio,this function will
                                        unmap_underlying_metadata() for each block in the chunk.
@@ -36562,6 +36583,149 @@ Chapter 16 : Accessing Files
                         */
                }            
             3> return 0 or error code to caller.
+
+          /**
+           * submit_page_section - an autonomous function to put a chunk of a page under deferred I/O
+           * @dio:                 dio block
+           * @page:                the page
+           * @offset:              offset into page
+           * @len:                 chunk length
+           * @blocknr:             logical block number for next I/O start
+           * return:               0 OR error code
+           */
+          static int submit_page_section(struct dio *dio, struct page *page, unsigned offset,
+                                         unsigned len, sector_t blocknr);
+
+          description for submit_page_section() :
+            this function do not immediately submit I/O,but prefer to wait and see if the next chunck
+            can be merged into this I/O.
+            if @dio->rw set WRITE,have to invoke task_io_account_write() on @len to update write accounting.
+            next,check if this section is able to be merged with the previous one :
+              @dio->cur_page == @page AND @dio->cur_page_offset + @dio->cur_page_len == @offset
+              AND @dio->cur_page_block + (@dio->cur_page_len >> @dio->blkbits) == @blocknr
+              /**
+               *
+               *                |<------ previous len ------>|<------ this len ------>|
+               * |..............|============================@========================|..........| => same page
+               *                #^previous offset            #^this offset
+               *                |                            |
+               *                +--> previous blocknr        +--> this blocknr
+               */
+              then
+                      let @dio->cur_page_len += @len /* we merge them */
+                      if @dio->boundary is TRUE,that means a mapped block in this chunk has BH_Boundary,thus
+                      we have to dispatch I/O.
+                              call to dio_send_cur_page() on @dio,return value stored in local variable @ret.
+                              page_cache_release() on @dio->cur_page,we no longer need this page.
+                              set @dio->cur_page to NULL,because the old one been dispatched.
+                      return @ret to caller /* @ret's default value is 0 */
+
+            can not merge them :
+                    if @dio->cur_page is not NULL,that means there been a submission wait for dispatching.
+                    so,dispatch it as the same.
+                    if @ret is not 0,that means dio_send_cur_page() returned an error,we have to return the
+                    error code to caller.
+
+            the case @dio->cur_page is NULL(we have dispatched the old one OR no submission is waiting) :
+              page_cache_get() on @page.
+              set @dio->cur_page to @page.
+              set @dio->cur_page_offset to @offset.
+              set @dio->cur_page_len to @len.
+              set @dio->cur_page_block to @blocknr.
+
+              return @ret(value is 0) to caller.
+
+          /**
+           * dio_send_cur_page - dispatch I/O task of dio block
+           * @dio:               dio block
+           * return:             0 OR error code
+           */
+          static int dio_send_cur_page(struct dio *dio);
+
+          description for dio_send_cur_page() :
+            this routine is used to dispatch the I/O that involve @dio->cur_page.
+
+            if @dio->bio is not NULL,that means @dio been holding a BIO,we have to check
+            if we can merge them to instead create a new BIO.
+                    @dio->final_block_in_bio != @dio->cur_page_block => they are not contiguous
+                            we just dio_bio_submit() the current BIO @dio->bio.
+                    if @dio->boundary is TRUE => we can not merge them
+                            just dio_bio_submit() current BIO @dio->bio.
+                    
+                    /* dio_bio_submit() :
+                     *         set @bio->bi_private to the @dio
+                     *         acquire lock and disable local interrupt
+                     *         increase @dio->recount # because we dispatched a BIO
+                     *         release lock and restore interrupt
+                     *         call to bio_set_pages_dirty(@dio->bio) if @dio->is_async is TRUE and @dio->rw is READ
+                     *                                                   # asynchronous READ operation
+                     *         dispatch the BIO through submit_bio()
+                     *         reset @dio->bio to NULL,reset @dio->boundary to 0
+                     */
+
+            if @dio->bio is NULL,no one we can merge into
+                    so,have to invoke dio_new_bio() on @dio with @dio->cur_page_block as the starting blocknr.
+                    if allocating failed,just return error code to caller.
+
+            try dio_bio_add_page() on @dio,just attempt merge I/O,do not submit.
+            if dio_bio_add_page() returned 1,that means these I/O can not be merged
+                    so we have to submit current BIO at first
+                    dio_new_bio() to create a new BIO for this I/O
+                    if create new bio succeed,call to dio_bio_add_page() on @dio to place @dio->cur_page to the new BIO
+                    return the result to caller
+                    if creating was failed,we have to return the error code to caller
+            dio_bio_add_page() returned 0,that means these I/O have been merged,return 0 to caller
+
+            /**
+             * static int dio_bio_add_page(dio) :
+             *   first,try bio_add_page() on @dio->bio with page @dio->cur_page and its relative informations
+             *   bio_add_page() returned a value is equal to @dio->cur_page_len,that means merging succeed
+             *           if @dio->cur_page_len + @dio->cur_page_offset == PAGE_SIZE,that means we used a whole page,
+             *           so have to decrease @dio->pages_in_io # we are done this this page
+             *           page_cache_get() @dio->cur_page
+             *           update @dio->final_block_in_bio,the result is @dio->cur_page_block + @dio->cur_page_len >> @dio->blkbits
+             *           return 0 to caller,tell it merging succeed
+             *   merging failed,return 1 to caller.
+             *
+             * ! we increased page refcount in this function,the refcount would be decreased in dio_bio_complelte() if that
+             *   BIO has BIO_UPTODATE.
+             *   for synchronous I/O,this routine is called by dio_await_completion() in direct_io_worker();method @end_io()
+             *   is called by dio_complete() in direct_io_worker(),of course,@end_io can be NULL.
+             */
+
+
+        /**
+         * general flow
+         *
+         * User Mode Process =>
+         *   open(O_DIRECT)
+         *   READ/WRITE the file =>
+         *     filp->f_ops->direct_IO() =>
+         *       filesystem direct_IO() =>
+         *         blockdev_direct_IO =>
+         *           __blockdev_direct_IO() =>
+         *             direct_io_worker() =>
+         *               do_direct_IO() =>
+         *                 dio_get_page() =>
+         *                   dio_refill_pages() =>
+         *                     get_user_pages_fast() =>
+         *                       handle_mm_fault()
+         *                 submit_page_section() =>
+         *                   dio_send_cur_page() =>
+         *                     /* submit old at first,if can not merge them */
+         *                     dio_bio_submit() =>
+         *                       submit_bio() =>
+         *                         __make_request() /* Generic Block Layer*/
+         *                     dio_bio_add_page() =>
+         *                       bio_add_page() /* can be merged,merge them */
+         *                                      /* just merge,not submitting */
+         *               dio_cleanup()
+         *               dio_await_completion()
+         *               dio_complete() =>
+         *                 @end_io()
+         *
+         */
+            
 
                
             
