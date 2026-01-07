@@ -33202,6 +33202,7 @@ Chapter 16 : Accessing Files
            *         kio event fd,if the @aio_resfd field of the userspace iocb
            *         is not zero,this is the underlying eventfd context to deliver
            *         events to
+           * # slab cache : @kiocb_cachep
            */
           struct kiocb {
                   struct list_head ki_run_list;
@@ -36725,8 +36726,192 @@ Chapter 16 : Accessing Files
          *                 @end_io()
          *
          */
-            
 
-               
-            
+      Asynchrnous I/O :
+        User Mode process issues an asynchrnous I/O task via POSIX library functions,and the control will be returned
+        to the process after I/O task have enqueued.process can continues its execution,when I/O completed,it will
+        received a signal from Kernel.structure aiocb is defined in header <aio.h>,it is the User Mode AIO control block,
+        used to tell POSIX library how to handle the Asynchrnous I/O request.
+          /*
+           *  struct aiocb {
+           *          int aio_fildes;                   /* fd */
+           *          off_t aio_offset;                 /* file offset */
+           *          volatile void *aio_buf;           /* buffer */
+           *          size_t aio_nbytes;                /* length of transfer */
+           *          int aio_reqprio;                  /* request priority */
+           *          struct sigevent aio_sigevent;     /* notification method */
+           *          int aio_lio_opcode;               /* operation to be performed,lio_listio() only */
+           *  };
+           *
+           *  primitives :
+           *    aio_read        -    enqueue a read request
+           *    aio_write       -    enqueue a write request
+           *    aio_fsync       -    enqueue a sync request
+           *    aio_error       -    obtain the error status of an enqueued I/O request
+           *    aio_return      -    obtain the return status of a completed I/O request
+           *    aio_suspend     -    suspend the caller until one or more of a specified set of I/O requests completes
+           *    aio_cancel      -    attempt to cancle outstanding I/O requests
+           *    lio_listio      -    enqueue multiple I/O requests using a single function call
+           *
+           *  library : POSIX Real-Time - rt
+           */
 
+        Asynchrnous I/O in Kernel :
+          asynchrnous I/O can be implemented by a system library without any kernel support at all.the method is
+          start a lightweight process,let it to handle asynchronous I/O,and I/O request have completed,it inform the
+          main thread.just make use of synchrnous I/O interfaces as well,but queue I/O requests in User Mode.
+          /* but kernel-level implementation of asynchrnous I/O more faster */
+
+          kernel support asynchrinous I/O primitives :
+            io_setup
+            io_submit
+            io_getevents
+            io_cancel
+            io_destroy
+
+            !! because glibc does not provide wrapper functions for these system call,user have to issue them via
+               syscall() interface.
+               libaio provides some wrappers,but it use different io_context_t instance,and it will return the
+               -error_code when error is encountered.
+               for issue them via syscall(),the error is -1,and @errno is set.
+
+          Asynchrnous I/O Context :
+            an asynchrnous I/O context is a set of data structures that keep track of the on-going progresses of
+            the asynchrnous I/O operations requested by the process.
+            each AIO context is associated with a "kioctx" object,it contains all information relevant for the
+            context.
+            the kioctx objects created for a process are collected in member @ioctx_list of the memory descriptor.
+                                                                             /* hash list */
+            /* <linux/aio_abi.h> - typedef __kernel_ulong_t aio_context_t;
+             * before call to io_setup(),*@ctxp must be initialized to 0.if io_setup() is succeed,
+             * then @ctxp is filled in with the resulting handle.
+             */
+
+            <linux/aio.h>
+              /* current number of aio requests in system wide */
+              unsigned long aio_nr;
+
+              /* maximum number of aio requests at the same time in system wide */
+              unsigned long aio_max_nr = 0x10000;
+
+              #define AIO_RING_MAGIC 0xa10a10a1
+              #define AIO_RING_COMPAT_FEATURES 1
+              #define AIO_RING_INCOMPAT_FEATURES 0
+
+              /**
+               * aio_ring - AIO ring header
+               * @id:       @user_id of the kioctx object which holds this ring
+               * @nr:       number of events,usually is kioctx.max_reqs + 2
+               *            # 2 - include buffer's head/tail overlap entry
+               *              @max_reqs usually is @nr_events required by user
+               *              -- user copy
+               * @head:     head of the requests,default is 0(initial no events)
+               * @tail:     tail of the requests,default is 0(initial no events)
+               * @magic:    AIO RING MAGIC
+               * @compat_features:
+               *            AIO RING COMPAT FEATURES
+               * @incompat_features:
+               *            AIO RING INCOMPAT FEATURES
+               * @header_length:
+               *            sizeof(struct aio_ring)
+               * # this structure is initialized in routine aio_setup_ring(),
+               *   and the instance is stored in the first page of aio_ring_info.ring_pages           
+               */
+              struct aio_ring {
+                      unsigned id;
+                      unsigned nr;
+                      unsigned head;
+                      unsigned tail;
+
+                      unsigned magic;
+                      unsigned compat_features;
+                      unsigned incompat_features;
+                      unsigned header_length;
+              };
+
+              #define AIO_RING_PAGES 8
+
+              /**
+               * aio_ring_info - memory buffer in the address space of the User Mode process,and is also accessible
+               *                 by all processes in Kernel Mode
+               * @mmap_base:     User Mode starting address,get through do_mmap()
+               *                                                        # PROT_READ | PROT_WRITE,MAP_ANONYMOUS | MAP_PRIVATE
+               * @mmap_size:     length of the AIO ring
+               * @ring_pages:    array of page descriptors used when the @internal_pages is not sufficient for request
+               * @ring_lock:     protection
+               * @nr_pages:      number of pages in this AIO ring
+               *                 # this field is set in aio_setup_ring() by invoke get_user_pages(),
+               *                   because do_mmap() will invoke mmap_region(),new VMAs that cover the memory buffer
+               *                   are created,get_user_pages() then attempt get page for them
+               *                   page descriptors are stored in @ring_pages
+               * @nr:            trust copy,usually is kioctx.max_reqs + 2
+               * @tail:          tail of the ring
+               * @internal_pages:
+               *                 pre-defined buffer,maximum size is 8 * PAGE_SIZE bytes
+               */
+              struct aio_ring_info {
+                      unsigned long mmap_base;
+                      unsigned long mmap_size;
+    
+                      struct page **ring_pages;
+                      spinlock_t ring_lock;
+                      long nr_pages;
+
+                      unsigned nr, tail;
+
+                      struct page *internal_pages[AIO_RING_PAGES];
+              };
+
+              /**
+               * kioctx - Kernel Mode asynchrnous I/O context corresponing to a User Mode AIO context
+               * @users:  number of users of this kioctx,get_ioctx() will increase this member
+               * @dead:   is this kioctx dead?this member is set to 1 when kioctx is destroyed
+               * @user_id:
+               *          user identifier,usually is @ring_info.mmap_base
+               * @list:   connector,used to link this kioctx to memory descriptor
+               * @wait:   wait queue,used to wait events completion on this kioctx
+               * @ctx_lock:
+               *          protection
+               * @reqs_active:
+               *          number of active requests
+               * @active_reqs:
+               *          list collects active requests,and eacn request is a kiocb instance,
+               *          linked by use @ki_list
+               * @run_list:
+               *          list collects requests in run queue,linked by use @ki_run_list
+               *                                /* in progress */
+               * @max_reqs:
+               *          number of events that required by user specified in io_setup()
+               * @ring_info:
+               *          AIO ring info
+               * @wq:     kioctx delayed work,the handler is aio_kick_handler()
+               * @rcu_head:
+               *          RCU mechanism,used to put kioctx(free it)
+               * # slab cache : @kioctx_cachep
+               */
+              struct kioctx {
+                      atomic_t users;
+                      int dead;
+                      struct mm_struct *mm;
+                      
+                      /* needs improving */
+                      unsigned long user_id;
+                      struct hlist_node list;
+
+                      wait_queue_head_t wait;
+                
+                      spinlock_t ctx_lock;
+                    
+                      int reqs_active;
+                      struct list_head active_reqs;
+                      struct list_head run_list;
+                    
+                      /* sys_io_setup() currently limits this to an unsigned int */
+                      unsigned max_reqs;
+
+                      struct aio_ring_info ring_info;
+
+                      struct delayed_work wq;
+
+                      struct rcu_head rcu_head;
+              };
