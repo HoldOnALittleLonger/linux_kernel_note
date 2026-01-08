@@ -36787,6 +36787,22 @@ Chapter 16 : Accessing Files
              * then @ctxp is filled in with the resulting handle.
              */
 
+            <linux/aio_abi.h>
+              /**
+               * io_event - structure used to represent aio event
+               * @data:     data field from the iocb
+               * @obj:      what iocb this event came from
+               * @res:      result code for this event
+               * @res2:     secondary result
+               * # read() from /dev/aio returns these structures
+               */
+              struct io_event {
+                      __u64 data;
+                      __u64 obj;
+                      __s64 res;
+                      __s64 res2;
+              };
+
             <linux/aio.h>
               /* current number of aio requests in system wide */
               unsigned long aio_nr;
@@ -36801,10 +36817,11 @@ Chapter 16 : Accessing Files
               /**
                * aio_ring - AIO ring header
                * @id:       @user_id of the kioctx object which holds this ring
-               * @nr:       number of events,usually is kioctx.max_reqs + 2
+               * @nr:       capacity of io events in the ring buffer
+               *            # user copy,it might greater than kioctx.max_reqs + 2,
+               *              because kernel allocate memory at least one page
                *            # 2 - include buffer's head/tail overlap entry
                *              @max_reqs usually is @nr_events required by user
-               *              -- user copy
                * @head:     head of the requests,default is 0(initial no events)
                * @tail:     tail of the requests,default is 0(initial no events)
                * @magic:    AIO RING MAGIC
@@ -36814,6 +36831,9 @@ Chapter 16 : Accessing Files
                *            AIO RING INCOMPAT FEATURES
                * @header_length:
                *            sizeof(struct aio_ring)
+               * @io_events:
+               *            array of io_event instances,"io_events[0]" used as placeholder,
+               *            the real array is allocated in aio_setup_ring()
                * # this structure is initialized in routine aio_setup_ring(),
                *   and the instance is stored in the first page of aio_ring_info.ring_pages           
                */
@@ -36827,6 +36847,8 @@ Chapter 16 : Accessing Files
                       unsigned compat_features;
                       unsigned incompat_features;
                       unsigned header_length;
+
+                      struct io_event io_events[0];
               };
 
               #define AIO_RING_PAGES 8
@@ -36844,7 +36866,7 @@ Chapter 16 : Accessing Files
                *                   because do_mmap() will invoke mmap_region(),new VMAs that cover the memory buffer
                *                   are created,get_user_pages() then attempt get page for them
                *                   page descriptors are stored in @ring_pages
-               * @nr:            trust copy,usually is kioctx.max_reqs + 2
+               * @nr:            trust copy
                * @tail:          tail of the ring
                * @internal_pages:
                *                 pre-defined buffer,maximum size is 8 * PAGE_SIZE bytes
@@ -36861,6 +36883,46 @@ Chapter 16 : Accessing Files
 
                       struct page *internal_pages[AIO_RING_PAGES];
               };
+
+              !! about @nr in struct aio_ring_info and in struct aio_ring -
+                   the memory space have to be allocated in aio_setup_ring() is
+                     nr_events += 2
+                     size = sizeof(struct aio_ring)
+                     size += sizeof(struct io_event) * nr_events
+                     nr_pages = (size + (PAGE_SIZE - 1)) >> PAGE_SHIFT /* ceiling */
+                     nr_events = (PAGE_SIZE * nr_pages - sizeof(struct aio_ring)) / sizeof(struct io_event)
+
+                     aio_ring_info.nr := nr_events
+                     aio_ring.nr := aio_ring_info.nr
+
+                   +--> aio_ring_info.ring_pages
+                   |
+                   |          +--> aio_ring.io_events[]                          +--> compensate buffer's head/tail overlap entry
+                   |          |                                                  |
+                   |          |                                                 |<---- additional ---->|
+                   +----------+----------+----------+----------+-----+----------+----------+-----------+- - - - - -+
+                   |          |          |          |          |     |          |          |           |           |
+                   | aio_ring | io_event | io_event | io_event | ... | io_event | io_event | io_event  |   unused  |
+                   |          |          |          |          |     |          |          |           |           |
+                   +----------+----------+----------+----------+-----+----------+----------+-----------+- - - - - -+
+                   |          |<------------ nr_events user required ---------->|                                  |
+                   |                                                                                               |
+                   |<------------------------------------- aio_ring_info.mmap_size ------------------------------->|
+                   |                                       (PAGE_SIZE * nr_pages)
+                   +--> starting linear address : aio_ring_info.mmap_base
+
+                   suppose @nr_events is 8
+                   suppose unsigned int is 8B
+                   suppose PAGE_SIZE is 4096
+                   sizeof(io_event) is 8 + 8 + 8 + 8 => 32B
+                   sizeof(aio_ring) is 8 + 8 + 8 + 8 + 8 + 8 + 8 + 8 => 64B
+                   @nr_events += 2 => 10
+                   size of memory space is 10 * 64 + 32 => 672B
+                   ceiling : (672 + 4095) >> PAGE_SHIFT => 4767 / 4096 = 1 page
+                   @nr_events = (1 * 4096 - 64) / 32 => 126 (aio_ring.nr = aio_ring_info.nr = @nr_events)
+                   but we only use 8 io_event instances in the memory space
+                   except the additional two io_event instances,there is remaining 126 - (8 + 2) = 116 unused instances
+                   /* unused instances -> holes,aio use their positions,but not themselves */
 
               /**
                * kioctx - Kernel Mode asynchrnous I/O context corresponing to a User Mode AIO context
@@ -36915,3 +36977,65 @@ Chapter 16 : Accessing Files
 
                       struct rcu_head rcu_head;
               };
+
+          The Asynchronous I/O Infrastructures :
+            Create and Destroy :
+              <fs/aio.c>
+                /**
+                 * sys_io_setup - setup a new AIO context
+                 * @nr_events:    the number of aio events
+                 * @ctxp:         User Mode pointer used to store context handle
+                 *                # because it is User Mode pointer,kernel read/write
+                 *                  it must use User Mode access routines such get_user()/put_user()
+                 * return:        0 OR error code
+                 * # this routine first get *@ctxp,it must be initialized to 0,otherwise,return -EINVAL
+                 *   if @nr_events is 0,also return -EINVAL
+                 *   call to ioctx_alloc() with @nr_events,this function create a new aio context
+                 *   succeed,then put the handle into @ctxp and return 0,put user failed,get_ioctx()
+                 *   on the recently allocated kioctx and io_destroy() it,return error code to caller,
+                 *   failed on allocate new kioctx,just return error to caller as well
+                 */
+                SYSCALL_DEFINE2(io_setup, unsigned, nr_events, aio_context_t __user *, ctxp)
+                => asmlinkage long sys_io_setup(unsigned nr_events, aio_context_t __user *ctxp);
+
+                /**
+                 * sys_io_destroy - destroy a specified aio context
+                 * @ctx:            aio context handle
+                 * return:          0 OR error code
+                 * # first,this function must to lookup the kioctx which is associated with @ctx,
+                 *   so it invoke lookup_ioctx(),if found,io_destroy() it and return 0
+                 *   no such kioctx,print debug info and return -EINVAL
+                 * # name of this function is sys_io_destroy(),it is not io_destroy()
+                 */
+                SYSCALL_DEFINE1(io_destroy, aio_context_t, ctx)
+                => asmlinkage long sys_io_destroy(aio_context_t ctx);
+
+                /**
+                 * ioctx_alloc - attempt to allocate a new kioctx object and initialize it
+                 * @nr_events:   number of aio events that user required
+                 * return:       new kioctx's pointer OR bad pointer -- ERR_PTR
+                 * # @nr_events greater than 0x10000000U / sizeof(struct io_event) OR @nr_events
+                 *   greater than 0x10000000U / sizeof(struct kiocb) => too high,return -EINVAL,
+                 *   and @nr_events can not exceeds @aio_max_nr,in this case,return -EAGAIN
+                 * # this routine allocate new kioctx from slab cache @kioctx_cachep with GFP_KERNEL flag,
+                 *   return -ENOMEM if failed
+                 * # new kioctx initialization :
+                 *     .max_reqs = @nr_events
+                 *     .mm = @current->mm,increase @current->mm->mm_count(because this kioctx is referring it)
+                 *     .users = 1
+                 *     spinlocks(.ctx_lock and .ring_info.ring_lock) are initialized through spin_lock_init()
+                 *     .wait initialized through init_wait_queue_head()
+                 *     lists are initialized through INIT_LIST_HEAD()
+                 *     .wq initialized through INIT_DELAYED_WORK(),handler is aio_kick_handler()
+                 *     the rest is setup in aio_setup_ring()
+                 * # after we have setup the kioctx,we have to check systemwide limits
+                 *   if @aio_nr + @nr_events > @aio_max_nr(if overflow happened,the result will less than @aio_nr),
+                 *   then we have to wait a while to see if someone destroyed some aio requests.so,invoke synchronize_rcu()
+                 *   and try again,if it is still exceeded limits,we must give up to it,clean up the newly allocated
+                 *   kioctx object through __put_ioctx() and return -EAGAIN
+                 *   if everything is OK,link this kioctx into memory descriptor's @ioctx_list,debug printk related info,
+                 *   return address of this kioctx object to caller                            (dprintk())
+                 * # in the case,we succeed to allocate new kioctx,but aio_setup_ring() failed,we have to decrease @mm_count
+                 *   of @current's memory descriptor,free the kioctx object,debug printk info and return -ENOMEM to caller 
+                 */
+                static struct kioctx *ioctx_alloc(unsigned nr_events);
