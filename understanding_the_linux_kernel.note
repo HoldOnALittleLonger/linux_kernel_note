@@ -750,8 +750,8 @@ Chapter 2 : Memory Addressing
       Field containing the 20 most significant bits of a page frame physical address :
         a page frame has a 4-kB capacity,so its physical address must be multiple of 4096,so the 12 least significant
         bits are always equal to 0.
-        it -> Page Directory,the page frame contains a Page Table;
-        it -> Page Table,the page frame contains a page of data;
+        it is Page Directory,the page frame contains a Page Table;
+        it it Page Table,the page frame contains a page of data;
 
       Accessed flag :
         page unit set each time accesses the corresponding page frame.(page unit never reset it,OS have to do this)
@@ -1294,7 +1294,9 @@ Chapter 2 : Memory Addressing
     
           mk_pte(p, prot)
           /*  use a page descriptor @p and a group of access rights @prot to builds the corresponding Page Table entry  */
-          /*  expanded to : pfn_pte(page_to_pfn(@p), (@prot))
+          /*  expanded to : pfn_pte(page_to_pfn(@p), (@prot)) => combine these two parameters to setup @pte of a temporary
+           *                                                     pte_t object,and return this temporary object by value
+           *                                                     (physical page and memory protection flag in @pte)
            *  page_to_pfn => __page_to_pfn
            *  __page_to_pfn(@page) : defined in <asm-generic/pgtable.h>
            *                         support 3 memory models(flat, discontiguous, sparse)
@@ -17325,12 +17327,27 @@ Chapter 9 : Process Address Space
                          *  #   
                          *  #   VMA is exist,and it is not hugetlb VMA,traverse current VMA's interval in PAGE_SIZE,
                          *  #   for each not present page(call to follow_page() on the VMA,if everything is OK,this function will return a
-                         *  #   page descriptor,otherwise,return NULL or BAD ADDRESS.the traversing stopped when follow_page() returned a non-NULL
-                         *  #   address),invoke handle_mm_fault() for it - linear address of the page,check the result,update accounting or report
-                         *  #   error
+                         *  #   page descriptor,otherwise,return NULL(no such page start at the specified linear address) or BAD ADDRESS.the
+                         *  #   traversing stopped when follow_page() returned a non-NULL address),invoke handle_mm_fault() for it - linear address
+                         *  #   of the page,check the result,update accounting or report error
                          *  #
                          *  #   if we have encountered a unexpected error in the traversing,we have to early stop __get_user_pages() and return
-                         *  #   error to caller
+                         *  #   error to caller,but if pinned pages number is not _zero_,we return it as instead
+                         *  #   
+                         *  #   finally,return number of pages been pinned to caller if no error occurred
+                         *  #                            # after we handled a VMA(follow_page() returned a non-NULL page),if the pointer to
+                         *  #                              that page is not PTR_ERR pointer,function increase number of pinned pages,decrease
+                         *  #                              @nr_pages because we have pinned a page
+                         *  #   !! actually,the follow_page() is called in a while-cycle(level-2),the stop condition is follow_page() returned
+                         *  #      a non-NULL page.the cycle is nested in another do-while cycle,the stop condition is @nr_pages is 0 OR all
+                         *  #      interval of current VMA has consumed(in PAGE_SIZE)
+                         *  #      if follow_page() returned a BAD ADDRESS,then this will be detected in the do-while cycle(level-1)
+                         *  #      if follow_page() returned a good page,then we increase pinned pages number,interval iterator
+                         *  #      if follow_page() returned NULL,we handle it via handle_mm_fault()
+                         *  #      note that,interval iterator is only updated in the do-while cycle,thus the next follow_page() in the
+                         *  #      while-cycle should return the page we just handled OR BAD ADDRESS if error happened
+                         *  #      (these two cycles are contained in another do-while cycle,it is the level-0 cycle,the stop condition
+                         *  #       is @nr_pages equal to _zero_.its task is find out an appropriate VMA)
                          *  ##
                          *  int get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
                          *                     unsigned long start, int nr_pages, int write, int force,
@@ -18022,6 +18039,7 @@ Chapter 9 : Process Address Space
              * @flags:      Page Fault flags
              * @orig_pte:   original PTE for @address
              * return:      return value from @fault() method of VMA OR error code
+             * # this routine only is called for linear fault and nonlinear fault
              */
             static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long address,
                                   pmd_t *pmd, pgoff_t pgoff, unsigned int flags, pte_t orig_pte);
@@ -18036,7 +18054,7 @@ Chapter 9 : Process Address Space
               }
 
               invoke @vma->vm_ops->fault() on @vmf,this method is used to handle Page Fault exception
-              in exact VMA,return value stored in local variable @ret.
+              in that exact VMA,return value stored in local variable @ret.
               if VM_FAULT_ERROR | VM_FAULT_NOPAGE is set in @ret,return @ret to caller,that means failed.
               if @vmf.page set by @fault() enabled PG_hwpoison,then we can not use the page,unlock it if
               VM_FAULT_LOCKED is set in @ret,return VM_FAULT_HWPOISON.
@@ -37039,3 +37057,58 @@ Chapter 16 : Accessing Files
                  *   of @current's memory descriptor,free the kioctx object,debug printk info and return -ENOMEM to caller 
                  */
                 static struct kioctx *ioctx_alloc(unsigned nr_events);
+
+                /**
+                 * aio_setup_ring - setup AIO ring buffer for a kioctx object
+                 * @ctx:            pointer to kioctx
+                 * return:          0 OR error code
+                 */
+                static int aio_setup_ring(struct kioctx *ctx);
+
+                brief description for aio_setup_ring() :
+                  about the calculation for number of aio events and the number of pages have to
+                  be allocated been described as above.but,if the number of pages is less than
+                  AIO_RING_PAGES,then make use of the internal pages @internal_pages of aio_ring_info
+                  object.
+                  this function setup the rest of @ring_info of @ctx :
+                    .mmap_size is @nr_pages * PAGE_SIZE
+
+                    .mmap_base is got by invoke do_mmap(),size is @mmap_size,protection is PROT_READ | PROT_WRITE,
+                    type is MAP_ANONYMOUS | MAP_PRIVATE (@file,@address and @offset are zeros)
+
+                    .nr_pages is set to the return value from get_user_pages(),the page descriptors are stored
+                    in @ring_pages member of @ring_info,starting linear address is @mmap_base,@nr_pages represents
+                    the number of pages have to pinning,@write of the routine is 1,@force is 0
+                                                        /* get_user_pages() returns the number of pages have pinned,
+                                                         * which maybe not reached our required number
+                                                         */
+                    .nr is set to @nr_events as above
+
+                  this function must acquire @ctx->mm->mmap_sem for write before call to do_mmap(),and release
+                  it after get_user_pages() returned.
+                  set @ctx->user_id to @mmap_base of the aio_ring_info object.
+                  next,it setup the ring header,it is stored in the head of buffer :
+                    .nr is @nr_events
+                    .id is @ctx->user_id
+                    .head is 0
+                    .tail is 0
+                    .magic is AIO_RING_MAGIC
+                    .compat_features is AIO_RING_COMPAT_FEATURES
+                    .incompat_features is AIO_RING_INCOMPAT_FEATURES
+                    .header_length is sizeof(struct aio_ring)
+                    /* for setup header,we have to kmap_atomic() the first page @ring_pages[0] of that aio_ring_info
+                     * object with type KM_USER0,kunmap_atomic() it later before we return to caller.
+                     * handle_mm_fault() have setup Page Table Entry,but that is for User Mode,for access the page
+                     * in Kernel Mode,we have to kmap it.
+                     */
+
+                /**
+                 * lookup_ioctx - lookup a kioctx object in current taks's memory descriptor
+                 * @ctx_id:       user id of that kioctx object
+                 * return:        address of that kioctx OR NULL
+                 * # the matching requires @user_id is equal to @ctx_id AND which kioctx can not be dead(@dead cant be 1),
+                 *   if found,get_ioctx() on it and return it
+                 * # for traverse @ioctx_list(hash list) of current task's memory descriptor,must call to rcu_read_lock()
+                 *   to avoid incoming updating,and release the lock later before we return to caller
+                 */
+                static struct kioctx *lookup_ioctx(unsigned long ctx_id);
