@@ -37052,7 +37052,8 @@ Chapter 16 : Accessing Files
                  *   and try again,if it is still exceeded limits,we must give up to it,clean up the newly allocated
                  *   kioctx object through __put_ioctx() and return -EAGAIN
                  *   if everything is OK,link this kioctx into memory descriptor's @ioctx_list,debug printk related info,
-                 *   return address of this kioctx object to caller                            (dprintk())
+                 *   return address of this kioctx object to caller                            (dprintk => prink,if DEBUG > 1
+                 *                                                                              otherwise,nop)
                  * # in the case,we succeed to allocate new kioctx,but aio_setup_ring() failed,we have to decrease @mm_count
                  *   of @current's memory descriptor,free the kioctx object,debug printk info and return -ENOMEM to caller 
                  */
@@ -37112,3 +37113,169 @@ Chapter 16 : Accessing Files
                  *   to avoid incoming updating,and release the lock later before we return to caller
                  */
                 static struct kioctx *lookup_ioctx(unsigned long ctx_id);
+
+            Submitting the Asynchrnous I/O Operations :
+              <fs/aio.c>
+                /* batch hash entry */
+                struct aio_batch_entry {
+                        struct hlist_node list; /* connector */
+                        struct address_space *mapping; /* file's mapping */
+                };
+
+                mempool_t *abe_pool; /* used to allocate struct aio_batch_entry object */
+
+                /**
+                 * sys_io_submit - system call issued by User Mode process to submit AIO operations
+                 * @ctx_id:        aio context
+                 * @nr:            number of struct *iocb objects in @iocbpp
+                 * @iocbpp:        array of pointers point to struct iocb objects
+                 * return:         0 OR error code
+                 * # this routine is a wrapper for do_io_submit(),@compat of do_io_submit() is 0
+                 */
+                SYSCALL_DEFINE3(io_submit, aio_context_t, ctx_id, long, nr, struct iocb __user * __user *, iocbpp)
+                => asmlinkage long sys_io_submit(aio_context_t ctx_id, long nr, struct iocb __user * __user *iocbpp);
+
+                /**
+                 * do_io_submit - do aio submitting
+                 * @ctx_id:       the target AIO context
+                 * @nr:           number of iocb pointers
+                 * @iocbpp:       pointer array of struct iocb *
+                 * return:        0 OR error code
+                 */
+                long do_io_submit(aio_context_t ctx_id, long nr, struct iocb __user * __user *iocbpp, bool compat);
+
+                brief description for do_io_submit() :
+                  @nr cant be 0,if it is 0,return -EINVAL to caller.
+                  all pointers in @iocbpp must be VERIFY_READ is succeed,otherwise,return -EFAULT to caller.
+                  if @ctx_id is not found out in @current's memory descriptor,return -EINVAL to caller.
+                  for each struct iocb pointer objects in @iocbpp,invoke __get_user() and copy_from_user() to
+                  copy the struct iocb object from User Mode into kernel buffer.
+                  /* __get_user(): copy pointer. copy_from_user(): copy data from User Mode that pointed by pointer */
+                  invoke io_submit_cone() with arguments :
+                    @ctx, local variable user_iocb, local variable tmp's address, local variable batch_hash, @compat
+                    /* @user_iocb  => __user pointer points to current iocb objcet(used by __get_user())
+                     * @tmp        => Kernel Mode buffer used to store current iocb object(used by copy_from_user())
+                     * @batch_hash => struct hlist_head array,size is AIO_BATCH_HASH_SIZE
+                     */
+                  if __get_user() failed or copy_from_user() failed,set error code to -EFAULT and break iteration.
+                  if io_submit_one() returned an error code,use the return value set error code,and break iteration.
+
+                  normal return path :
+                  
+                  call to aio_batch_free() on @batch_hash.for hash list in the array(the hash list linked some
+                  struct aio_batch_entry pointer objects),traverse the hash list.
+                  for each aio_batch_entry object,call to blk_run_address_space() on @abe(temporary variable)->mapping,
+                  iput() the host of this mapping,delete current entry from hash list,invoke mempool_free() to recycle
+                  current entry.
+
+                  invoke put_ioctx() on @ctx.
+                  return number of dispatched tasks or error code.
+
+                /**
+                 * io_submit_one - submit one AIO task
+                 * @ctx:           target kioctx object
+                 * @user_iocb:     User Mode pointer points to an object is type of struct iocb
+                 * @iocb:          Kernel Mode pointer points to kernel buffer where stroes a struct iocb object
+                 * @batch_hash:    array of hash lists
+                 * @compat:        compat feature
+                 * return:         0 OR error code
+                 */
+                static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb, struct iocb *iocb,
+                                         struct hlist_head *batch_hash, bool compat);
+
+                what io_submit_one() does :
+                  1> check @iocb->aio_reserved1 and @iocb->aio_reserved2,if either is TRUE,return -EINAL and
+                     print debug message. /* enforce forwards compatibility on users */
+                     check overflows,if overflow happened,return -EINVAL to caller.
+                     /* @iocb->aio_buf != (unsigned long)@iocb->aio_buf
+                      * OR
+                      * @iocb->aio_nbytes != (size_t)iocb->aio_nbytes
+                      * OR
+                      * (ssize_t)@iocb->aio_nbytes < 0)
+                      * TRUE => overflow happened
+                      */
+                  2> get the target file corresponds to file descriptor in @iocb through fget(),if no file,return
+                     -EBADF.
+                  3> invoke aio_get_req(),this function will allocate a new kiocb object from the slab cache @kiocb_cachep.
+                     almost all fields are set to zero,but @req->ki_users is set to 2.
+                     next,it checks the aio ring header of @ctx,if @ctx->reqs_active is less than
+                     aio_ring_avail(&@ctx->ring_info,@ring(pointer points to the ring header)),link @req->ki_list into
+                     @ctx->active_reqs,increase @ctx->reqs_active,return the @req.
+                     if no more free reqs,then free @req,and return NULL.
+                     /**
+                      * aio_ring_avail(@info, @ring) is defined in <linux/aio.h>
+                      * it expanded to "(@ring->head + @info->nr - 1 - @ring->tail) % @info->nr"
+                      */
+                     ! if no free req is available,this function will call to aio_fput_routine() with NULL,attempts to
+                       free some reqs on list @fput_head,then try again get req.
+                                              (defined in <fs/aio.c>,in function __aio_put_req(),if the req's file's
+                                               refcount is not 0 after decreased,it will add the req into @fput_head list,
+                                               rather than really put the req)
+                                               # after added,call queue_work(),enqueue @fput_work in work queue @aio_wq.
+                  4> if we failed to get req,then fput() the file,and return -EAGAIN.
+                     otherwise,set @req->ki_filp to the file.
+                     if IOCB_FLAG_RESFD is set in @iocb->aio_flags,then
+                             invoke eventfd_ctx_fdget() on @iocb->aio_resfd,store the eventfd in @req->ki_eventfd.
+                             if @ki_eventfd is ERR PTR,then set return value to the ERR PTR,goto "out_put_req" label.
+                  5> invoke put_user(),send @req->ki_key into User Mode object @user_iocb->aio_key.if we put user failed,
+                     dprintk() error message,goto label "out_put_req",in this case,error code is the result of put_user().
+                  6> setup @req {
+                             .ki_obj.user is @user_iocb
+                             .ki_user_data is @iocb->aio_data
+                             .ki_pos is @iocb->aio_offset
+                             .ki_buf is @iocb->aio_buf,converted to char _user * type
+                             .ki_nbytes is @iocb->aio_nbytes                   
+                             .ki_left is @iocb->aio_nbytes
+                             .ki_opcode is @iocb->aio_lio_opcode
+                     }
+                     invoke aio_setup_iocb() for this @req with @compat.
+                     this routine peforms the initial checks,and aio retry method setup for the kiocb(the @req).
+                     the behavior is depends on current aio cmd.
+                             IOCB_CMD_PREAD
+                             IOCB_CMD_PWRITE
+                               -> set up single vector for @req,and @ki_retry is aio_rw_vect_retry()
+                                  (through aio_setup_single_vector(),make use the inline vector of kiocb)
+                             IOCB_CMD_PREADV => "scatter input"
+                             IOCB_CMD_PWRITEV => "gather output"
+                               -> set up several vectors for @req,and @ki_retry is aio_rw_vect_retry()
+                                  (through aio_setup_vectored_rw(),if the inline vector of kiocb is not large
+                                   enough,kmalloc() io vectors,make use the allocated io vectors;otherwise,
+                                   make use of the inline io vector of kiocb)
+                             IOCB_CMD_FDSYNC
+                             IOCB_CMD_FSYNC
+                               -> only set @ki_retry to aio_fdsync() and aio_fsync(),respectively.
+                             !! aio_rw_vect_retry() will call to file's @aio_read() method or @aio_write() method,
+                                depends on the real operation.
+                                aio_fdsync() and aio_fsync() both are call to the file's @aio_fsync() method,but
+                                aio_fdsync() pass 1 as the second parameter,aio_fsync() pass 0 as the second parameter.
+                  7> if aio_setup_iocb() failed,goto "out_put_req",in this case,the error code is the return value of
+                     this calling.
+                     otherwise,acquire @ctx->ctx_lock,invoke aio_run_iocb() on this @req.
+                     next,check,if @ctx->run_list is not empty,drain the run list of @ctx,that is invoke __aio_run_iocbs()
+                     on @ctx in a while-cycle,stop condition is __aio_run_iocbs() returned FALSE.
+                                                                /* process all pending retries queued on the ioctx run list.
+                                                                 * for each object on run list,retrieve it,unlink it,
+                                                                 * pin it,and invoke aio_run_iocb() for it,invoke __aio_put_req()
+                                                                 * for it,get into next iteration.
+                                                                 * the traversing operates on a copying of @ctx's @run_list,
+                                                                 * after traversing accomplished,if @ctx's @run_list have some
+                                                                 * new pending retries,return 1 to caller,otherwise,return 0 to caller
+                                                                 */
+                  8> unlock @ctx_lock.
+                     if current aio cmd is R/W operation,invoke aio_batch_add(),add the file's @f_mapping into the hash 
+                     list,it is stored in @batch_hash,index is calculated through hash_ptr(@f_mapping, AIO_BATCH_HASH_BITS).
+                     if the file been existed in batch hash,return with do nothing.
+                     /* for add the @f_mapping into batch hash,this function have to allocate new aio_batch_entry object
+                      * from memory pool @abe_pool,gfp flag is GFP_KERNEL.
+                      */
+                  9> aio_put_req() on @req to drop extra ref to this @req,return 0 to caller.
+
+                  "out_put_req":
+                     invoke aio_put_req() twice on @req(because its default refcount is 2),and return error code to caller.
+
+                            
+
+
+
+
+
