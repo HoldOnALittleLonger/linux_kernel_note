@@ -33480,7 +33480,7 @@ Chapter 16 : Accessing Files
              * generic_segment_checks().
              */
 
-            if I/O mode is O_DIRECT,that is bypass page cache,then get inode size of the
+            if I/O mode is O_DIRECT,that means bypass page cache,then get inode size of the
             file,we can not read the data at the position exceeded file size.
             @pos < file size
               try filemap_wrtie_and_wait_range() at first,
@@ -37231,19 +37231,22 @@ Chapter 16 : Accessing Files
                      invoke aio_setup_iocb() for this @req with @compat.
                      this routine peforms the initial checks,and aio retry method setup for the kiocb(the @req).
                      the behavior is depends on current aio cmd.
-                             IOCB_CMD_PREAD
+                             IOCB_CMD_PREAD 
                              IOCB_CMD_PWRITE
-                               -> set up single vector for @req,and @ki_retry is aio_rw_vect_retry()
+                               -> check file mode,check file permisson,test access_ok() for buffer,
+                                  set up single vector for @req,set @ki_retry to aio_rw_vect_retry()
                                   (through aio_setup_single_vector(),make use the inline vector of kiocb)
                              IOCB_CMD_PREADV => "scatter input"
                              IOCB_CMD_PWRITEV => "gather output"
-                               -> set up several vectors for @req,and @ki_retry is aio_rw_vect_retry()
+                               -> check file mode,check file permisson,test access_ok() for buffer,
+                                  set up several vectors for @req,set @ki_retry to aio_rw_vect_retry()
                                   (through aio_setup_vectored_rw(),if the inline vector of kiocb is not large
                                    enough,kmalloc() io vectors,make use the allocated io vectors;otherwise,
                                    make use of the inline io vector of kiocb)
                              IOCB_CMD_FDSYNC
                              IOCB_CMD_FSYNC
-                               -> only set @ki_retry to aio_fdsync() and aio_fsync(),respectively.
+                               -> only set @ki_retry to aio_fdsync() and aio_fsync(),respectively;but if the method
+                                  is not implemented,return -EINVAL.
                              !! aio_rw_vect_retry() will call to file's @aio_read() method or @aio_write() method,
                                 depends on the real operation.
                                 aio_fdsync() and aio_fsync() both are call to the file's @aio_fsync() method,but
@@ -37273,9 +37276,171 @@ Chapter 16 : Accessing Files
                   "out_put_req":
                      invoke aio_put_req() twice on @req(because its default refcount is 2),and return error code to caller.
 
-                            
+                /**
+                 * aio_rw_vect_retry - AIO Read/Write method operates on vector(s)
+                 * @iocb:              kiocb object
+                 * return:             number of bytes that transferred OR error code
+                 */
+                static ssize_t aio_rw_vect_retry(struct kiocb *iocb);
+
+                brief description for aio_rw_vect_retry() :
+                  first,check @ki_opcode of @iocb.for Read operation,we make use of the file's @aio_read() method;for
+                  Write operation,we make use of the file's @aio_write() method.
+                  record current opcode in a local variable.
+                  check @ki_pos,it cant less than 0,otherwise,return -EINVAL.
+                  process the operation in a do-while cycle,the stop condition is
+                    nothing transferred
+                    OR
+                    @ki_left less than or equal to 0 /* no left data */
+                    OR
+                    current operations is not Write AND (current inode is a FIFO OR it is a Socket)
+                  we invoke the real method in the cycle,the buffer's address  is &@iocb->ki_iovec[@iocb->ki_cur_seg],
+                  the number of segments is "@iocb->ki_nr_segs - @iocb->ki_cur_seg".
+                  if we Read/Write some thing(return value is not 0 AND it is not a error code),invoke aio_advance_iovec(),
+                  this routine will updates fields of @iocb according to the length of data transferred.
+                  after do-while cycle end,prepare return value -
+                    if we have transferred all that we could,the return value is the @ki_nbytes of @iocb
+                    if we write partial data,return the length of data we have written rather than error code
+                  return the value to caller.
+
+                /**
+                 * aio_run_iocb - the core AIO execution routine,it is invoked both for initial I/O submission and
+                 *                subsequent retries via the aio_kick_handler()
+                 * @iocb:         the AIO task
+                 * return:        0 OR error code
+                 * # this routine is called with @ctx_lock is held,the lock is released and reacquired as needed
+                 *   during processing
+                 * # the retry method needs to be non-blocking as far as possible to avoid holding up other iocbs
+                 *   waiting to be serviced by the retry kernel thread
+                 * # only one retry instance is in progress for a given iocb at any time,providing that guarantee
+                 *   simplifies the coding of individual aio operations as it avoids various potential races
+                 */
+                static ssize_t aio_run_iocb(struct kiocb *iocb);
+
+                what aio_run_iocb() does :
+                  1> retrieve @iocb->ki_retry,if it is NULL,return 0 and print kernel message to report this.
+                  2> invoke kiocbClearKicked() of @iocb,this will avoid start the next retry iteration(serialization).
+                     because wait queue functions can trigger a kick iocb from interrupt context in the meantime,
+                     indicating that data is available for the next iteration.by clear kick flag,can make the
+                     kick code "think" that the iocb is still on the run list until we are actually done this one.
+                     when we are done with this iteration,we check the iocb whether it was kicked in the
+                     meantime,and if so,queue it up afresh.
+                  3> reset next and prev of @ki_run_list of @iocb to NULL,it will no longer on run list.
+                     relese @ctx_lock.                                    /* but "kick" code "think" it still on run list */
+                  4> check kiocbISCancelled() for @iocb,if it is cancelled,we would not invoke retry method for it.
+                     instead,we set return value to -EINTR,call to aio_complete() with arguments @iocb, -EINTR, 0.
+                     and goto "out" label.
+                  5> @iocb is not cancelled,so,we invoke retry method for it.
+                     if the return value neither is not -EIOCBRETRY,nor is not -EIOCBQUEUED,invoke aio_complete()
+                     on it,the second parameter is the return value of retry method.
+                  "out":
+                  6> acquire @ctx_lock again.
+                     if retry returned -EIOCBRETRY,then
+                             INIT_LIST_HEAD() on @ki_run_list of this @iocb.
+                             check if this @iocb is kicked via kiocbIsKicked(),then
+                                     /* we must queue the next iteration ourselves,if it has already been kicked,
+                                      * triggered by wait queue functions from interrupt context.
+                                      */
+                                     call to __queue_kicked_iocb() for it.
+                                             /**
+                                              * static inline int __queue_kicked_iocb(struct kiocb *iocb);
+                                              * - this routine have to be called when @ctx_lock is held.
+                                              *   if @iocb's @ki_run_list is empty,then add this @iocb to
+                                              *   tail of its kioctx's run_list,and return 1;otherwise,return 0.
+                                              */
+                                     invoke aio_queue_work() for the kioctx that retrieved from @iocb->ki_ctx.
+                                            /**
+                                             * static void aio_queue_work(struct kioctx *ctx);
+                                             * - this routine process a SMP memory barrier,then configure time out
+                                             *   value.if @ctx's @wait the wait queue is active(not empty),timeout is 1;
+                                             *   otherwise,timeout is "HZ / 10".
+                                             *   finally,invoke queue_delayed_work() to queue @ctx->wq on work queue
+                                             *   @aio_wq with the configured timeout.
+                                             */
+                  7> return the result to caller.
+
+                  /**
+                   * kiocbClearKicked(iocb) is defined in <linux/aio.h>
+                   * -  clear bit KIF_KICKED in @iocb->ki_flags.
+                   * kiocbIsKicked(iocb) is defined in <linux/aio.h>
+                   * - test KIF_KICKED in @iocb->ki_flags.
+                   * kiocbIsCancelled(iocb) is defined in <linux/aio.h>
+                   * - test KIF_CANCELLED in @iocb->ki_flags.
+                   */
+
+                /**
+                 * aio_complete - routine called when the I/O request on the given iocb is complete
+                 * @iocb:         the completed iocb
+                 * @res:          @res of io event
+                 * @res2:         @res2 of io event
+                 * return:        TRUE if this is the last user of the request
+                 * # EXPORT_SYMBOL
+                 */
+                int aio_complete(struct kiocb *iocb, long res, long res2);
+
+                description for aio_complete() :
+                  if @iocb is a sync kiocb(@ki_key == KIOCB_SYNC_KEY),then
+                          do BUG checking,it is a BUG if @iocb->ki_users is not 1.
+                          set @ki_user_data of @iocb to @res.
+                          set @ki_users of @iocb to 0.
+                          wake up processes waiting on this @iocb(@iocb->ki_obj.tsk).
+                          return 1 to caller.
+                  otherwise,we have to get ring info of the kioctx,because we have to update
+                  io event related with this @iocb.
+                  acquire @ctx_lock,disable local interrupt.
+                  if @iocb is not the last kiocb of run list,AND its @ki_run_list is not empty,
+                  we unlink it from run list.
+                  next,check,if @iocb is cancelled,we goto label "put_rq".
+
+                  /* update io event */
+                  kmap_atomic(),kmap ring header.invoke aio_ring_event() on the ring info with
+                  @tail field of the ring info,the third parameter is km_type value KM_IRQ0.
+                  this routine calculate the position of io event,kmap it,and return the linear
+                  address.
+                  increase local variable @tail,its previous value is the ring info's @tail field.
+                  if @tail is greater than or equal to ring info's @nr,reset @tail to 0.
+                  update the io event {
+                          obj := @iocb->ki_obj.user(converted to u64 unsigned long)
+                          data := @iocb->ki_user_data
+                          res := @res
+                          res2 := @res2
+                  }
+                  process a SMP memory barrier,set ring info's @tail to the local @tail;set ring header's
+                  @tail to the local @tail.
+                  invoke put_aio_ring_event() with km_type KM_IRQ0 on the io event,this routine do the
+                  reverse to aio_ring_event(),kunmap_atomic() unmap the ring header.
+
+                  if @iocb->ki_eventfd is not NULL => user specified the destination to deliver the result,
+                  invoke eventfd_signal() on the fd with second parameter 1.(this routine is safe to be called
+                                                                             in interrupt context)
+
+                  "put_rq": /* normal return path */
+                    invoke __aio_put_req() on this @iocb.
+                    process SMP memory barrier.
+                    if the kioctx's @wait is active => it is not empty,then wake up the processes on the waitqueue.
+                    release @ctx_lock,restore local interrupt.
+                    return 0(not the last user) or 1(the last user) to caller.
+
+                /**
+                 * aio_kick_handler - the handler for AIO delayed work,triggered to process pending retries on
+                 *                    an kioctx
+                 * @work:             the work
+                 * # the main work is invoke __aio_run_iocbs() on the kioctx this @work belongs to,
+                 *   for call to the function,have to use USER_DS,use the kioctx's @mm to process drain iocbs,
+                 *   acquire @ctx_lock and disable local interrupt;these will be UNDO after
+                 *   __aio_run_iocbs() returned.if __aio_run_iocbs() returned TRUE,then must call to
+                 *   queue_delayed_work() requeue @wq of the kioctx with timeout 0 on @aio_wq
+                 * # this routine invoke use_mm() to switch @current's memory to the kioctx's @mm.function use_mm()
+                 *   is defined in <mm/mmu_context.c>,it reset @current's @mm to the kioctx's @mm,then invoke
+                 *   switch_mm() to operates @current's @active_mm and @current's @mm.function switch_mm() usually
+                 *   is a architecture-dependent function.if @active_mm is different from current memory,then reload
+                 *   cr3 register from current memory,and reload LDT if LDTs also different.
+                 *   function unuse_mm() also defined in <mm/mmu_context.c>,it reverse the effect of use_mm()
+                 */
+                static void aio_kick_handler(struct work_struct *work);
+
+            !! THE KERNEL-LEVEL AIO FINALLY RETURNS WHEN I/O REQUEST HAVE BEEN EQUEUED INTO DRIVER'S REQUEST QUEUE.
+               FOR ASYNCHRONOUS I/O,PROCESS HAVE TO WAIT FOR DATA TRANSFER ACCOMPLISHED.
 
 
-
-
-
+/* END OF CHAPTER16 */
