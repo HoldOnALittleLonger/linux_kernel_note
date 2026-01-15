@@ -37441,6 +37441,109 @@ Chapter 16 : Accessing Files
 
             !! THE KERNEL-LEVEL AIO FINALLY RETURNS WHEN I/O REQUEST HAVE BEEN EQUEUED INTO DRIVER'S REQUEST QUEUE.
                FOR ASYNCHRONOUS I/O,PROCESS HAVE TO WAIT FOR DATA TRANSFER ACCOMPLISHED.
+               /* FOR BUFFERED I/O,DATA IS COPIED INTO PAGE CACHE,DO NOT WASTE TIME TO WAIT WRITEBACK. */
 
 
 /* END OF CHAPTER16 */
+
+
+Chapter 17 : Page Frame Reclaiming
+    The Page Frame Reclaiming Algorithm :
+      when the system load is low,the RAM is filled mostly by the disk caches and few running processes can benefit
+      from the information stored in them.
+      when the system load increases,the RAM is filled mostly by pages of the processes and the caches are shrunken
+      to make room for additional processes.
+
+      the page frame reclaiming algorithm of the Linux kernel refills the lists of free blocks of the buddy system
+      by "stealing" page frames from both User Mode processes and kernel caches.and actually,page frame reclaiming
+      must be performed before all the free memory has been used up;essentially,to free a page frame the kernel
+      must write its data to disk.(need buffer head data structures)
+
+      one of the goals of page frame reclaiming is conserve a minimal pool of free page frames so that the kernel
+      may safely recover from "low on memory" conditions.
+
+      Selecting a Target Page :
+        the objective of the page frame reclaiming algorithm(PFRA) is to pick up page frames and make them free.
+        these page frames must not been included in one of @free_area arrays of buddy system.
+
+        PFRA page frame type : /* distinguish according to their contents */
+          unreclaimable pages -> no reclaiming allowed or needed
+          - free pages(included in buddy system lists)
+            reserved pages(PG_reserved set)
+            pages dynamically allocated by the kernel
+            pages in the Kernel Mode stacks of the processes
+            temporarily locked pages(PG_locked set)
+            memory locked pages(VM_LOCKED set)
+
+          swappable pages -> save the page contents in a swap area
+          - anonymous pages in User Mode address spaces(e.g. pages in heap or stack)
+            mapped pages of "tmpfs" filesystem(e.g. IPC shared memory)
+            /* usually,the pages of special filesystem are not reclaimable */
+
+            /**
+             * a shared page frame belongs to multiple User Mode address spaces,while a
+             * non-shared page frame belongs to just one.
+             * a non-shared page frame might belong to several lightweight processes referring
+             * to the same memory descriptor.
+             * shared page frames are typically created when a process spawns a child,or when
+             * two or more processes access the same file by means of a shared memory mapping.
+             *
+             * a single process accesses to a file through a shared memory mapping,the corresponding
+             * pages are non-shared as far as the PFRA is concerned;a page belonging to a private
+             * memory mapping may be treated as shared by the PFRA if none of them modified the data
+             * in the page(ReadOnly)
+             */
+
+          syncable pages -> synchronize the page with its image to disk,if necessary
+          - mapped pages in User Mode address spaces
+            pages included in the page cache and containing data of disk files
+            block device buffer pages
+            pages of some disk caches(e.g. inode cache)
+
+          discardable pages -> nothing to be done
+          - unused pages included in memory caches(e.g. slab allocator caches)
+            unused pages of the dentry cache
+
+        Design of the PFRA :
+          in roughly speadking,any page belonging to a disk or memory cache,or to the User Mode address space
+          of a process,selecting the proper target pages is perhaps the most sensitive issue in kernel design.
+          the hardest job of a developer working on the virtual memory subsystem consists of finding an algorithm
+          that ensures acceptable performance both for desktop machines and for high-level machines such as
+          large database servers.
+          but,finding a good page frame reclaiming algorithm is a rather empirical job,with very little support
+          from theory.
+          /* thus,kernel code about PFRA might changed very quickly */
+
+          the general rules adopted by the PFRA :
+            1> Free the "harmless" page first
+                 pages included in disk and memory caches not referenced by any process should be reclaimed before
+                 pages belonging to the User Mode address spaces of the processes;in the case that pages included
+                 in disk caches,the page frame reclaiming can be done without modifying any Page Table Entry.
+
+            2> Make all pages of a User Mode process reclaimable
+                 with the exception of locked pages,the PFRA must be able to steal any page of a User Mode process,
+                 including the anonymous pages.in this way,processes that have been sleeping for a long period of time
+                 will progressively lose all their page frames.
+
+            3> Reclaim a shared page frame by unmapping at once all page table entries that reference it
+                 when the PFRA wants to free a page frame shared by several processes,it clears all page table
+                 entries that refer to the shared page frame,and then reclaims the page frame.
+
+            4> Reclaim "unused" pages only
+                 PFRA uses a simplified LRU replacement algorithm to classify pages as in-use and unused.if a page
+                 has not been accessed for a long time,the probability that it will be accessed in the near future
+                 is low and it can be considered "unused",on the other hand,if a page has been accessed recently,the
+                 probability that it will continue to be accessed is high and it must be considered as "in-use".
+                 /* the main idea behind the LRU algorithm is to associate a counter storing the age of the page
+                  * with each page in RAM - that is,the interval of time elapsed since the last access to the page.
+                  * PFRA reclaim only the oldest page of any process.
+                  * some platform support such LRU counter,but 80x86 do not support this,thus kernel cant rely on
+                  * the counter.
+                  * but "Accessed" flag of Page Table Entry is automatically set by the hardware when the page is
+                  * accessed,thus kernel can keeps track of the age of every page by combine this with LRU lists.
+                  */
+
+            !! careful selection of the order in which caches are examined.
+               ordering of pages based on aging.
+               distinction of pages based on the page state.
+
