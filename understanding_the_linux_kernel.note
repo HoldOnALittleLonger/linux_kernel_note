@@ -37547,3 +37547,65 @@ Chapter 17 : Page Frame Reclaiming
                ordering of pages based on aging.
                distinction of pages based on the page state.
 
+        Reverse Mapping :
+          locate quickly all the Page Table Entries that point to the same page frame - reverse mapping.
+          a technique named object-based reverse mapping,it is a sophisticated solution used in Linux 2.6.
+          essentially,for any reclaimable User Mode page,the kernel stores the backward links to all memory
+          regions in the system(the objects) that include the page itself,and each memory region descriptor
+          stores a pointer to a memory descriptor,which in turn includes a pointer to a Page Global Directory.
+
+          related data and routines :
+            PFRA must have a way to determine whether the page to be reclaimed is shared or non-shared,and
+            whether it is mapped or anonymous.
+
+            struct page.@_mapcount => -1 -> no Page Table entry references the page frame
+                                       0 -> the page is non-shared
+                                       > 0 -> the page is shared
+                                       /**
+                                        * routine page_mapcount() is defined in <linux/mm.h>,it returns
+                                        * page descriptor's @_mapcount + 1
+                                        */
+            struct page.@mapping   =>  NULL -> the page belongs to the swap cache
+                                       not NULL,the least significant bit is 1
+                                       -> the page is anonymous,and the @mapping field encodes the pointer
+                                          to an anon_vma descriptor
+                                       not NULL,the least significant bit is 0
+                                       -> the page is mapped,@mapping points to the address_space object
+                                          /* Linux aligns address of address_space object to multiple of four,
+                                           * thus the least significant bit can be used as a flag denoting
+                                           * whether the field contains a pointer to an address_space object
+                                           * or to an anon_vma descriptor.
+                                           */
+                                       /**
+                                        * routine PageAnon() is defined in <linux/mm.h>,it returns 1 if
+                                        * the least significant bit of @mapping is 1;otherwise,return 0.
+                                        */
+            
+            <mm/rmap.c>
+              /**
+               * try_to_unmap - try to remove all page table mappings to a page
+               * @page:         the page descriptor
+               * @flags:        action and flags
+               *                # enum ttu_flags = > try to unmap flags,defined in <linux/rmap.h>
+               *                  TTU_UNMAP = 0                   ! unmap mode
+               *                  TTU_MIGRATION = 1               ! migration mode
+               *                  TTU_MUNLOCK = 2                 ! munlock mode
+               *                  TTU_ACTION_MASK = 0xff          ! used to extract the modes
+               *                  TTU_IGNORE_MLOCK = (1 << 8)     ! ignore mlock
+               *                  TTU_IGNORE_ACCESS = (1 << 9)    ! do not age
+               *                  TTU_IGNORE_HWPOISON = (1 << 10) ! corrupted page is recoverable
+               * return:        SWAP_SUCCESS => succeed in removing all mappings   0
+               *                SWAP_AGAIN   => missed a mapping,try again later   1
+               *                SWAP_FAIL    => the page is unswappable            2
+               *                SWAP_MLOCK   => page is mlocked                    3
+               * # this routine if very short,at the first,it checks whether @page is locked,if it
+               *   is not PG_locked,that means we have encountered a BUG.
+               *   for KSM(Kernel Samepage Merging) page,this routine invoke try_to_unmap_ksm();
+               *   for anonymous page,this routine invoke try_to_unmap_anon();
+               *   for file mapped page,this routine invoke try_to_unmap_file();
+               *   if the result of that called function is not SWAP_MLOCK AND @page is not mapped,
+               *   we reset return value to SWAP_SUCCESS,otherwise,return the result to caller
+               */
+              int try_to_unmap(struct page *page, enum ttu_flags flags);
+            
+
