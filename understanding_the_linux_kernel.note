@@ -2049,6 +2049,9 @@ Chapter 3 : Processes
         list_for_each_entry(p, h, m)
                               similar to list_for_each,but returns the address of the data structure embedding the list_head
                               structure rather than the address of the list_head structure itself.
+                              /**
+                               * p = list_entry(h->next, typeof(*p), m)
+                               */
 
         usage :
           struct kobject {
@@ -37607,5 +37610,136 @@ Chapter 17 : Page Frame Reclaiming
                *   we reset return value to SWAP_SUCCESS,otherwise,return the result to caller
                */
               int try_to_unmap(struct page *page, enum ttu_flags flags);
+
+          Reverse Mapping for Anonymous Pages :
+            anonymous pages are often shared among several processes.
+            the common case : process fork a child,the child will share the memory with its parent
+                              until it has made changing to the memory area.
+            the quite unusual case : process create a memory region with MAP_ANONYMOUS and MAP_SHARED
+                                     flags,the pages of such a region will be shared among the future
+                                     descendants of the process.
+
+            strategy to link together all the anonymous pages that refer to the same page frame :
+              anonymous memory regions that include the page frame are collected in a doubly linked
+              circular list.
             
+            <linux/rmap.h>
+              /**
+               * anon_vma_chain - structure used to support find the anon_vma(s) associated
+               *                  with a VMA,or the VMAs associated with an anon_vma
+               * @vma:            VMA that anon_vmas in the chain associated with 
+               * @anon_vma:       anon_vma that VMAs associated with
+               * @same_vma:       list of anon_vma_chain(s) that linking all the anon_vma(s)
+               *                  associated with this VMA
+               * @same_anon_vma:  list of anon_vma_chains that link all the VMAs associated
+               *                  with @anon_vma
+               * # slab cache :   @anon_vma_chain_cachep in <mm/rmap.c>
+               * # in function anon_vma_prepare(),this structure is linked into VMA's @anon_vma_chain
+               *   list through @same_vma;and it also be linked into anon_vma's @head list through
+               *   @same_anon_vma.
+               */
+              struct anon_vma_chain {
+                      struct vm_area_struct *vma;
+                      struct anon_vma *anon_vma;
+                      struct list_head same_vma;
+                      struct list_head same_anon_vma;
+              };
+
+               +->anon_vma.head ------+        +----> VMA <-----------------+
+               |  ^                   |        |                            |
+               |  |    (@anon_vma)    |        |(@vma)                      |
+               |  +-------+-+         |        |                            |
+               |          | |         V        |                            |
+               |          | | (@same_anon_vma) |                            |
+               |  ... <-->|anon_vma_chain <--> anon_vma_chain <--> ...      |
+               |          ||                   |                            |
+               |          ||                   |                            |
+               |          ++-------------------+                            |
+               |(@anon_vma)|                                                |
+               |  +--------+                                                |
+               |  |(@vma)                                                   |
+               |  | +-------------------------------------------------------+ (share the same anon_vma)
+               |  | |
+               |  V V
+               +--VMA.anon_vma_chain ----+        +--> anon_vma (this anon_vma is associated with the same VMA)
+                  ^                      |        |
+                  |     (@vma)           |        |
+                  +---------+-+          |        |(@anon_vma)
+                            | |          V        |
+                            | |       (@same_vma) |
+                    ... <-->|anon_vma_chain <--> anon_vma_chain <--> ...
+                            |                    |
+                            |                    |
+                            |                    |
+                            +--------------------+
+
+
+              /**
+               * anon_vma - structure anon_vma is used to collect memory regions that include the
+               *            same anonymous page frame
+               * @lock:     protection
+               * @ksm_refcount:
+               *            Kernel Samepage Merging support
+               * @head:     doubly linked list used to collects anon_vma_chain objects,connector
+               *            is @same_anon_vma member of anon_vma_chain structure
+               * # struct vm_area_struct.anon_vma_chain is used to collects anon_vma_chain objects,
+               *   connector is @same_vma member of anon_vma_chain structure.
+               * # if a page frame is an anonymous page frame,its @mapping stores the pointer to
+               *   the anon_vma descriptor.
+               * # for each anonymous page frame there must be an anon_vma associated with it.
+               */
+              struct anon_vma {
+                      spinlock_t lock;
+
+              #ifdef CONFIG_KSM
+                      atomic_t ksm_refcount;
+              #endif
+
+                      struct list_head head;
+              };
+
+            ! when a page frame already referenced by process A is inserted into a Page Table entry of
+              process B(by fork(), clone(), vfork()),kernel just inserts the VMA of B that include the page
+              frame into the anon_vma list in which process A is linked,and let B.@anon_vma := A.@anon_vma .
+              struct vm_area_struct.vm_mm stores the memory descriptor,in which PGD is stored in @pgd member.
+              the Page Table entry of that anonymous page frame can then be determined by considering the
+              starting linear address of the anonymous page,which is easily obtained from the memory region
+              descriptor and the @index member of the page descriptor.
+
+            The try_to_unmap_anon() function :
+              <mm/rmap.c>
+                /**
+                 * try_to_unmap_anon - routine is used to try unmap anonymous page
+                 * @page:              page descriptor
+                 * @flags:             try to unmap flags
+                 * return:             same as try_to_unmap()
+                 * # this routine usually is called from try_to_unmap().
+                 */
+                static int try_to_unmap_anon(struct page *page, enum ttu_flags flags);
+
+                brief description for try_to_unmap_anon() :
+                  at first,this routine get the anon_vma through page_lock_anon_vma() function from @page.
+                  /* get descriptor from @page->mapping,and acquire @lock of the anon_vma.
+                   * when the function is in progress, RCU read would be locked,even after it returned a
+                   * valid anon_vma descriptor.(return NULL if failed,and without held any lock)
+                   */
+                  if NULL is returned,this routine return SWAP_AGAIN to caller.
+                  next.traverse VMAs that sharing "this" anon_vma {
+                          /* retrieve the next element in @anon_vma->head,the list
+                           * collecting anon_vma_chain object.
+                           * then,traverse each anon_vma_chain objects in the list @same_anon_vma
+                           */
+                          for current @avc(anon_vma_chain),get its @vma member.
+                          call to vma_address(),pass it @page and @vma as the parameters,this function
+                          returns the linear address corresponding to @page about to @vma;it return
+                          -EFAULT if the address is not fall into this VMA.
+                          in the case -EFAULT is returned,we just skip this @vma.
+                          otherwise,invoke try_to_unmap_one(),pass it @page, @vma, @the-address, @flags
+                          as the parameters.
+                          break cycle,if result is not SWAP_AGAIN or @page is not mapped.
+                                                                     /* @page->_mapcount < 0 */
+                  }
+                  finally,invoke page_unlock_anon_vma() to release the spin lock and the RCU read lock,
+                  return the last recent result of try_to_unmap_one() to caller.
+                  /* we skipped all VMAs,the default return value is SWAP_AGAIN */
 
