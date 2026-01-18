@@ -1212,7 +1212,7 @@ Chapter 2 : Memory Addressing
             pte_write()       /*  Read/Write  */
             pte_exec()        /*  User/Supervisor,pages on the 80x86 processor cannot be protected against code execution  */
             pte_dirty()       /*  Dirty  */
-            pte_young()       /*  Accessed  */
+            pte_young()       /*  Accessed -- _PAGE_ACCESSED */
             pte_file()        /*  Dirty,when the Present is cleared and the Dirty flag is set,the page belongs to a
                                *  non-linear disk file mapping.
                                *  pte_flags(@pte) & _PAGE_FILE
@@ -37712,7 +37712,7 @@ Chapter 17 : Page Frame Reclaiming
                  * try_to_unmap_anon - routine is used to try unmap anonymous page
                  * @page:              page descriptor
                  * @flags:             try to unmap flags
-                 * return:             same as try_to_unmap()
+                 * return:             same as try_to_unmap(),except SWAP_ACCESS
                  * # this routine usually is called from try_to_unmap().
                  */
                 static int try_to_unmap_anon(struct page *page, enum ttu_flags flags);
@@ -37732,7 +37732,7 @@ Chapter 17 : Page Frame Reclaiming
                           for current @avc(anon_vma_chain),get its @vma member.
                           call to vma_address(),pass it @page and @vma as the parameters,this function
                           returns the linear address corresponding to @page about to @vma;it return
-                          -EFAULT if the address is not fall into this VMA.
+                          -EFAULT if the address is not fall inside to this VMA.
                           in the case -EFAULT is returned,we just skip this @vma.
                           otherwise,invoke try_to_unmap_one(),pass it @page, @vma, @the-address, @flags
                           as the parameters.
@@ -37743,3 +37743,135 @@ Chapter 17 : Page Frame Reclaiming
                   return the last recent result of try_to_unmap_one() to caller.
                   /* we skipped all VMAs,the default return value is SWAP_AGAIN */
 
+            The try_to_unmap_one() function :
+              <mm/rmap.c>
+                /**
+                 * try_to_unmap_one - subfunction of try_to_unmap(),used to unmap the exact PTE mapping
+                 * @page:             the page
+                 * @vma:              the VMA in which @page is resided
+                 * @address:          linear address of the page
+                 * @flags:            behavior control
+                 * return:            same as try_to_unmap(),except SWAP_SUCCESS
+                 * # this routine is called repeatedly from either try_to_unmap_anon() or
+                 *   try_to_unmap_file()
+                 */
+                int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
+                                     unsigned long address, enum ttu_flags flags);
+
+                what try_to_unmap_one() does :
+                  1> get the PTE through page_check_address() routine,this routine use the @page,
+                     memory descriptor(@mm) of @vma,@address to retrieve pointer to the PTE,and acquire
+                     the spin lock @page_table_lock of memory descriptor.
+                     /* if defined USE_SPLIT_PTLOCKS,use the spin lock @ptl of PMD page to instead */
+                  2> if NULL PTE,goto label "out".
+
+                     if TTU_IGNORE_MLOCK is not set AND VM_LOCKED is set,goto label "out_mlock".
+                     /* require ignore mlock but VMA is locked */
+                     if TTU_IGNORE_MLOCK is not set AND TTU_MUNLOCK is set,goto label "out_unmap".
+                     /* require ignore mlock but set TTU_MUNLOCK */
+
+                     if TTU_IGNORE_ACCESS is not set,then invoke ptep_clear_flush_young_notify(),pass it
+                     @vma,@address,PTE as the parameters.if the result is not 0,set return value to SWAP_FAIL,
+                     goto label "out_unmap".                           /* page is considered "in-use" */
+                     /**
+                      * ptep_clear_flush_young_notify(vma, addr, ptep) is a macro function defined in
+                      * <linux/mmu_notifier.h>.
+                      * this routine invoke ptep_clear_flush_young(),then bitwise OR the result with the result
+                      * returned by mmu_notifier_clear_flush_yong() on @vma->mm,@addr,finally,return the result
+                      * of bitwise operation to caller.
+                      *
+                      * x86-platform ptep_clear_flush_young() function is defined in <arch/x86/mm/pgtable.c>,
+                      * it invoke ptep_test_and_clear_young() which is in the same source file.
+                      *
+                      * about ptep_test_and_clear_young(),if *@ptep is _PAGE_ACCESSED,then it call to routine
+                      * test_and_clear_bit() on @ptep->pte,bit is _PAGE_BIT_ACCESSED -> _PAGE_ACCESSED.
+                      * if we have clear _PAGE_BIT_ACCESSED,then invoke pte_update() to ask MMU update the PTE
+                      * at @ptep,return 1 if we have clear the bit,return 0 if *@ptep is not young.
+                      *
+                      * after ptep_test_and_clear_young() returned,if the result is 1,ptep_clear_flush_young()
+                      * next invoke flush_tbl_page() on @vma,@addr,this will flush TLB cache that associated
+                      * with the page in @vma starting at @addr.
+                      * finally,ptep_clear_flush_young() return the result of ptep_test_and_clear_young(),it is
+                      * 1 => if we have clear _PAGE_BIT_ACCESSED OR 0 => we did nothing.
+                      */
+                  3> invoke flush_cache_page(),on x86 platform,this function is a NOP,but on ARM platform,
+                     it process flush icache,instruction-cache.
+                     invoke ptep_clear_flush_notify() with @vma,@address,PTE,it will notify MMU to invalidate
+                     the page starting from @address in the @vma,the older value of PTE is returned by this routine,
+                     and it is stored in local variable named @pteval.
+                     next,check whether the PTE is dirty,if it is the case,set @page dirty.
+                     call to update_hiwater_rss() on the memory descriptor,this routine reset @hiwater_rss of
+                     @mm(the memory descriptor) to the result of get_mm_rss() on @mm,if hig watermark of rss is
+                     less than the result.
+                  4> /* bad page */
+                     if page is hardware poisoned, AND no TTU_IGNORE_HWPOISON is set in @flags,then
+                             /* in linux kernel,Hardware Poison is a feature used to detects and marks
+                              * physically failing memory as _unusable_.
+                              *                 (RAM or Cache)
+                              */
+                             @page is anonymous page => decrease MM_ANONPAGES counter of @mm
+                                           otherwise => decrease MM_FILEPAGES counter of @mm
+                             invoke set_pte_at() to reset PTE to the new entry
+                               "swp_entry_to_pte(make_hwpoison_entry(@page))"
+
+                     /* anonymous page */
+                     else if @page is anonymous page,then
+                             initialize a local variable named @entry is type of swp_entry_t,the type is defined
+                             in <linux/swap.h>.it is a structure contains only one member named @val is type of
+                             unsigned long.@entry is initialized from @page's private data.
+                
+                             if @page is swap cache(PG_swapcache is set),then
+                                     /* swap page */
+                                     if @entry is a duplicated swap entry,restore PTE from @pteval,set return value
+                                     to SWAP_FAIL,and goto label "out_unmap". /* it is flushed previously */
+
+                                     if @mmlist of @mm is empty,acquire @mmlist_lock and check again,if it still is
+                                     empty,add @mm->@mmlist to the @init_mm's @mmlist.release the lock.
+
+                                     decrease MM_ANONPAGES of @mm,increase MM_SWAPENTS of @mm.
+
+                             else if macro PAGE_MIGRATION is TRUE,then /* the macro is 1 if defined CONFIG_MIGRATION */
+                                     /* store the pfn of the page in a special migration pte,do_swap_page() will wait
+                                      * until the migration pte is removed and then restart fault handling.
+                                      */
+                                     do BUG test at first,it is a BUG if TUU_MIGRATION is not set in @flags.
+                                     reset @entry to the result of make_migration_entry(),pass it @page, pte_write(@pteval)
+                                     as the parameters.            /* makeup a new migration PTE,and enable Write flag */
+
+                             invoke set_pte_at() to use @entry set PTE,of course,have to convert swap entry to Page Table Entry.
+                             do BUG test again,if PTE is a file PTE,we can not swap it out.
+
+                     /* file page */
+                     else if PAGE_MIGRATION is TRUE AND TTU_MIGRATION is set in @flags,then
+                             use a swap_entry_t object @entry,set it to the result of make_migration_entry(@page, pte_write(@pteval)),
+                             use @entry to set PTE,also have to convert swap entry to Page Table Entry. /* page migration PTE */
+                     
+                     /* other case */
+                     else
+                             just decrease MM_FILEPAGES counter of @mm as well.
+                            
+                  5> call to page_remove_rmap() on @page.this routine atomic let @page->_mapcount -= 1,if @page is still mapped
+                     by someone,routine will return to caller without remove rmap.
+                     otherwise,for non-anonymous page OR (swap page AND dirty ),it clear PG_dirty for @page,and set PG_dirty again.
+                     next,if @page is anonymous page,it uncharge memory cgroup for @page,decrease NR_ANON_PAGES counter of the
+                     memory zone where this @page is come from;for file page,it decrease NR_FILE_MAPPED counter of the memory zone
+                     where this file page come from,then update memory cgroup stat "file mapped" about @page to -1.
+
+                     call to page_cache_release() on @page to decrease refcount. /* may trigger free page */
+
+                  "out_unmap":
+                  6> invoke pte_unmap_unlock(),it will kunmap_atomic() the PTE,release the spinlock acquired in step 1>.
+                            /**
+                             * because page_check_address() called pte_offset_map().
+                             */
+                  "out":
+                  7> return the result to caller.default is SWAP_AGAIN,and maybe changed to SWAP_FAIL.
+
+                  "out_mlock":
+                  8> invoke pte_unmap_unlock().
+                     try to lock @vma->vm_mm->mmap_sem for READ.
+                     if succeed to acqurie semaphore,then check @vma->vm_flags,if VM_LOCKED is set,invoke mlock_vma_page()
+                     on @page,reset return value to SWAP_MLOCK,release semaphore.                         /* will set PG_locked */
+                     return the result(default is SWAP_AGAIN) to caller.
+                     
+                     
