@@ -30178,6 +30178,7 @@ Chapter 15 : The Page Cache
          * @i_mmap_writable:
          *                 count VM_SHARED mappings
          * @i_mmap:        tree of private and shared mappings
+         *                 # priority search tree
          * @i_mmap_nolinear:
          *                 list of VM_NONLINEAR mappings
          * @i_mmap_lock:   lock used to protect i_mmap count,list,tree
@@ -37874,4 +37875,148 @@ Chapter 17 : Page Frame Reclaiming
                      on @page,reset return value to SWAP_MLOCK,release semaphore.                         /* will set PG_locked */
                      return the result(default is SWAP_AGAIN) to caller.
                      
-                     
+          Reverse Mapping for Mapped Pages :
+            reverse mapping for mapped pages based on a simple idea :
+              it's always possible to retrieve the Page Table entries that refer to a given page frame by
+              accessing the descriptors of the memory regions that include the corresponding mapped pages.
+
+            ! files usually are shared frequently,thus linear scanning is not a good idea for find out VMAs that sharing
+              the file page.as instead,use a "priority search tree" to handles the scanning for reduce time cost.
+            
+            The priority search tree(PST) :
+              introduced by Edward McCreight in 1985.PST is a hybrid of a heap and a balanced search tree,it is
+              used to perform queries on the set of intervals.
+              each interval in a PST corresponds to a node of the tree,and it is characterized by two indices :
+                radix index => corresponds to the starting pointer of the interval
+                heap index  => corresponds to the final point
+              PST essentially is a search tree on the radix tree,with the additional heap-like property that the
+              heap index of a node is never smaller than the heap indices of its children.
+
+              PST in Linux,the differences :
+                1> it is not always kept balanced.
+                2> it is adapted so as to store memory regions
+                   instead of linear intervals.
+                ! each memory region can be considered as an interval of file pages identified by the
+                  initial position in the file(radix inde) and the final position(heap index).
+                  VMA tend to start from the same pages,but McCreight tree cant store intervals have the
+                  very same starting point,thus,each node of a PST carries an additional size index.
+                    size index => corresponding to the size of the memory region in pages minus one
+                                  (number of pages this VMA covered - 1)
+                  size index allows the search program to distinguish different memory regions that 
+                  start at the same file position.
+
+                  disadvantage : increase significantly the number of different nodes that may end up
+                                 in a PST.PST could not contain all the nodes has same radix index but
+                                 different heap index.
+            
+                  solution : PST may include "overflow subtrees" rooted at the leaves of the PST and
+                             containing nodes having a common radix tree.
+                    
+                  for the case different processes mapped the same portion of the same file,kernel must
+                  insert the memory region descriptor in a doubly linked circular list rooted at the
+                  older PST node.  /* the node been existing */    
+
+                  Order : no child node has a heap index greater than the heap index of the parent.
+                          radix index of the left child of any node is never greater than the radix
+                          index of the right child.
+                          in case of tie between the radix indices,the ordering is given by the size
+                          index.(children's size index must less than parent's size index if they have
+                          the same radix index)
+
+              Index of PST in Linux about to VMA :
+                vm_pgoff => member @vm_pgoff
+                vm_size_in_pages => number of pages this VMA convered - 1
+                start_vm_pgoff => pgoff of file start
+                end_vm_pgoff => pgoff of file end
+
+
+                heap_index = vm_pgoff + vm_size_in_pages : end_vm_pgoff
+                radix_index = vm_pgoff : start_vm_pgoff
+                size_index = vm_size_in_pages
+
+                ! A regular radix-priority-search-tree indexes vmas using only heap_index and radix_index.
+                  Order :
+                    cur->heap_index >= cur->left->heap_index AND cur->heap_index >= cur->right->heap_index
+                    if cur->heap_index == cur->left->heap_index,then cur->radix_index < cur->left->radix_index
+                    if cur->heap_index == cur->right->heap_index,then cur->radix_index < cur->right->radix_index
+
+                    nodes are hashed to left or right subtree using radix_index similar to a pure binary radix tree.
+
+              Extended regular radix-priority-search-tree in Linux :
+                a regular radix-priority-search-tree is not suitable for vmas with same radix indices.
+                handling for the vmas with the same vm_pgoff :
+                  1> all vmas with the same radix _and_ heap indices are linked using vm_set.list
+                  2> if there are many vmas with the same radix index,but different heap indices and if
+                     the regular radix-priority-search-tree cannot index them all,build an overflow-sub-tree
+                     that indexes such vmas using heap and size indices instead of heap and radix indices.
+                     (overflow-tree resides on leave,the above is regular radix-priority-search-tree)
+
+              e.g. (radix index, size index, heap index)
+
+                                           (root)                                   -
+                                           0, 5, 5                                   |
+                                (left child)             (right child)               |
+                                0, 4, 4                  2, 3, 5                     | => regular 
+                      (leave)                                                        |
+                      0, 3, 3          1, 2, 4       1, 2, 3           2, 0, 2       |
+                                                                                    -
+                                                                                    -
+                    0, 2, 2           1, 1, 3                                        |
+                                                                                     | => overflow-sub-tree
+                  0, 1, 1            1, 0, 2                                         |
+                                                                                    -
+                    
+
+                PFRA needs the VMAs mapped file page has index 5(heap index) >
+                  root(0, 5, 5) => OK           (retrieve VMA)
+                  left child(0, 4, 4) => BAD
+                  right child(2, 3, 5) => OK    (retrieve VMA)
+                    left child(1, 2, 3) => BAD
+                    right child(2, 0, 2) => BAD
+
+              <linux/prio_tree.h>
+                /**
+                 * prio_tree_node - node of PST
+                 * @left:           left child
+                 * @right:          right child
+                 * @parent:         parent of this node
+                 * @start:          radix index
+                 * @last:           heap index
+                 */
+                struct prio_tree_node {
+                        struct prio_tree_node *left;
+                        struct prio_tree_node *right;
+                        struct prio_tree_node *parent;
+                        unsigned long start;
+                        unsigned long last;
+                };
+
+                /* raw PST node */
+                struct raw_prio_tree_node {
+                        struct prio_tree_node *left;
+                        struct prio_tree_node *right;
+                        struct prio_tree_node *parent;
+                };
+
+                /**
+                 * prio_tree_root - root of PST
+                 * @prio_tree_node: root node
+                 * @index_bits:     level of leave,for the
+                 *                  initial PST,this member is
+                 *                  initialized to 1
+                 *                  # current height of PST is "current level + 1"
+                 *                  # maximum number of leaves is 2^@index_bits
+                 *                  # in source file <lib/prio_tree.c>,an array named
+                 *                    @index_bits_to_maxindex is defined,size is
+                 *                    BITS_PER_LONG.the array stores [1, 2, 4, 8, 16, ..., ~0UL],
+                 *                    by use @index_bits as subscript of @index_bits_to_maxindex,
+                 *                    we can quickly get current maxindex of PST.
+                 *                      @index_bits_to_maxindex[@index_bits - 1] => 1 - 1 == 0 => 1
+                 * @raw:            0 => node is type of struct prio_tree_node
+                 *                  1 => node is type of struct raw_prio_tree_node
+                 */
+                struct prio_tree_root {
+                        struct prio_tree_node *prio_tree_node;
+                        unsigned short index_bits;
+                        unsigned short raw;
+                };
