@@ -16298,11 +16298,11 @@ Chapter 9 : Process Address Space
            *                    linkage into the address_space->i_mmap prio tree
            *                    linkage to the list of like vmas hanging off its node
            *                    linkage of vma in the address_space->i_mmap_nonlinear
-           * @vm_set:         set of vma which are shared with other
-           * @list:           doubly linked list for the vmas
+           * @vm_set:         set of vmas are shared file page
+           * @list:           doubly linked list for the vmas have same radix_index and heap_index
            * @parent:         aligns with @prio_tree_node parent
            * @head:           head of the linked vmas
-           * @prio_tree_node: raw priority tree node
+           * @prio_tree_node: raw priority tree node - PST associated with this VMA
            * @anon_vma_chain: chain of anonymous vmas
            *                  # serialized by @mmap_sem AND @page_table_lock
            * @anon_vma:       pointer to the struct anon_vma data structure
@@ -37945,7 +37945,7 @@ Chapter 17 : Page Frame Reclaiming
               Extended regular radix-priority-search-tree in Linux :
                 a regular radix-priority-search-tree is not suitable for vmas with same radix indices.
                 handling for the vmas with the same vm_pgoff :
-                  1> all vmas with the same radix _and_ heap indices are linked using vm_set.list
+                  1> all vmas with the same radix _and_ heap indices are linked using VMA.shared.vm_set.list
                   2> if there are many vmas with the same radix index,but different heap indices and if
                      the regular radix-priority-search-tree cannot index them all,build an overflow-sub-tree
                      that indexes such vmas using heap and size indices instead of heap and radix indices.
@@ -37974,7 +37974,7 @@ Chapter 17 : Page Frame Reclaiming
                     left child(1, 2, 3) => BAD
                     right child(2, 0, 2) => BAD
 
-              <linux/prio_tree.h>
+              <linux/prio_tree.h> /* general implementations of priority tree is in <lib/prio_tree.c> */
                 /**
                  * prio_tree_node - node of PST
                  * @left:           left child
@@ -38020,3 +38020,345 @@ Chapter 17 : Page Frame Reclaiming
                         unsigned short index_bits;
                         unsigned short raw;
                 };
+
+                /**
+                 * prio_tree_iter - iterator for PST
+                 * @cur:            current position
+                 * @mask:           mask for index
+                 * @value:          current value
+                 * @size_level:     current size level
+                 * @root:           tree root
+                 * @r_index:        target radix index
+                 * @h_index:        target heap index
+                 * # init routine : prio_tree_iter_init(*iter, *root, r_index, h_index)
+                 *   default @cur is NULL
+                 * # routine prio_tree_next() is defined in <lib/prio_tree.c>,it acts on
+                 *   a given iterator,get the next prio_tree_node that overlaps with the
+                 *   input interval in iterator.
+                 */
+                struct prio_tree_iter {
+                        struct prio_tree_node *cur;
+                        unsigned long mask;
+                        unsigned long value;
+                        int size_level;
+
+                        struct prio_tree_root *root;
+                        pgoff_t r_index;
+                        pgoff_t h_index;
+                };
+
+              <linux/mm.h>
+                #define vma_prio_tree_foreach(vma, iter, root, begin, end) \
+                        for (prio_tree_iter_init(iter, root, begin, end), vma = NULL; \
+                             (vma = vma_prio_tree_next(vma, iter)); )
+
+                /**
+                 * vma_nonlinear_insert - insert nonlinear file mapping priority tree node
+                 * @vma:                  the VMA contains nonlinear file mapping
+                 * @list:                 list used to collects nonlinear file mapping
+                 * # this routine set @vma->shared.vm_set.parent to NULL,then list_add_tail()
+                 *   @vm_set.list into @list
+                 */
+                static inline void vma_nonlinear_insert(struct vm_area_struct *vma, struct list_head *list);
+
+              <mm/prio_tree.c> /* PST for mapping->i_mmap,special implementations */
+                #define RADIX_INDEX(vma) ((vma)->vm_pgoff)
+                /* vm_size_in_pages */
+                #define VMA_SIZE(vma)    (((vma)->vm_end - (vma)->vm_start) >> PAGE_SHIFT)
+                /* avoid overflow */
+                #define HEAP_INDEX(vma)  ((vma)->vm_pgoff + (VMA_SIZE(vma) - 1))
+
+                /* Radix priority search tree for address_space->i_mmap */
+                                prio_tree_root
+                                      |
+                                      A       vm_set.head
+                                     / \      /
+                                    L   R -> H-I-J-K-M-N-O-P-Q-S /* same radix_index and heap_index */
+                                    ^   ^    <-- vm_set.list -->
+                                  tree nodes
+
+                /* there need some way to identify whether a VMA is a tree node,head of a vm_set list,
+                 * or just a member of a vm_set list.
+                 * ! cant use vm_flags,when replace head to tree node,require to held two mmap_sem,but
+                 *   actually we can not acquire the mmap_sem of head.
+                 * 
+                 * VMA radix priority search tree node rules :
+                 *   vma->shared.vm_set.parent != NULL ==> a tree node
+                 *     vma->shared.vm_set.head != NULL ==> list of others mapping same range
+                 *     vma->shared.vm_set.head == NULL ==> no others map the same range
+                 *
+                 *   vma->shared.vm_set.parent == NULL
+                 *     vma->shared.vm_set.head != NULL ==> list head of vmas mapping same range
+                 *     vma->shared.vm_set.head == NULL ==> a list node
+                 */
+
+                /**
+                 * vma_prio_tree_add - add a new vma known to map the same set of pages as the
+                 *                     old vma
+                 * @vma:               new vma
+                 * @old:               old vma
+                 * # @old is not tree node -> add @vma into @old->shared.vm_set.list
+                 *   @old is tree node AND others mapping same range -> add @vma into @old->shared.vm_set.head->shared.vm_set.list
+                 *   @old is tree node AND no others mapping same range -> @old become @vma->shared.vm_set.head,@vma become
+                 *                                                         @old->shared.vm_set.head
+                 *                    H-@old-...K => not tree node
+                 *                      \
+                 *                       add @vma
+                 *                  
+                 *                    \
+                 *                     @old -> H-I-J-...Q -- add @vma
+                 *
+                 *                    \
+                 *                     @old -> NULL
+                 *                      \       \
+                 *                       \       @vma as head
+                 *                        \      /
+                 *                         +--> head
+                 */
+                void vma_prio_tree_add(struct vm_area_struct *vma, struct vm_area_struct *old);
+
+                /**
+                 * vma_prio_tree_insert - insert new vma to the tree represented by root node
+                 * @vma:                  the new vma
+                 * @root:                 priority search tree's root
+                 * # this routine invoke raw_prio_tree_insert() attempts to find out a proper position
+                 *   for place @vma.if found,invoke vma_prio_tree_add() to add the @vma into the old
+                 *   vma retrieved through prio_tree_entry() on the pointer
+                 */
+                void vma_prio_tree_insert(struct vm_area_struct *vma, struct prio_tree_root *root);
+
+                /**
+                 * vma_prio_tree_remove - remove a given node from PST
+                 * @vma:                  the node is going to be removed
+                 * @root:                 PST root
+                 * # this routine relies on raw_prio_tree_remove() and raw_prio_tree_replace().
+                 *   if @vma is not a head,then list delete it if it is not a tree node,or raw_prio_tree_remove()
+                 *   it if it is a tree node.
+                 *   for the case @vma is a head,things get more complex.
+                 *   it is a head and also a tree node,we must adjust the head list and replace current tree node
+                 *   with a node from the others list,this rely on raw_prio_tree_replace(),then adjust the head of
+                 *   the old VMA which is the head of @vma,set its head to the new head.
+                 *     ! new head => next element in vm_set.list of @vma->shared.vm_set.head->shared.
+                 *                   new head is NULL if the list is empty.
+                 *   it is a head but is not a tree node,we replace it with another node in the list,and adjust
+                 *   head information.
+                 */
+                void vma_prio_tree_remove(struct vm_area_struct *vma, struct prio_tree_root *root);
+
+                /**
+                 * vma_prio_tree_next - return VMAs that at least map a single page in the given range of
+                 *                      contiguous file pages.
+                 * @vma:                the VMA at starting point
+                 * @iter:               PST iterator
+                 * return:              NULL OR next VMA
+                 * # if first call is with NULL vma,the next is retrieved by prio_tree_next(@iter) or NULL.
+                 *   if @vma is a tree node AND there is others mapping same range,next is head of @vma.
+                 *   if @vma is not a tree node,next is @vma's @vm_set.list.next if it is a list node.
+                 *   for other cases,invoke prio_tree_next() on @iter,if returned pointer is not NULL,next
+                 *   is the VMA corresponding to the pointer,or NULL if no next.
+                 */
+                struct vm_area_struct *vma_prio_tree_next(struct vm_area_struct *vma, struct prio_tree_iter *iter);    
+
+            The try_to_unmap_file() function :
+              <mm/rmap.c>
+                /**
+                 * try_to_unmap_file - unmap/unlock file page using the object-based rmap method
+                 * @page:              the page to unmap/unlock
+                 * @flags:             action and flags
+                 * return:             same as try_to_unmap(),except SWAP_SUCCESS
+                 */
+                static int try_to_unmap_file(struct page *page, enum ttu_flags flags);
+
+                what try_to_unmap_file() does :
+                  1> retrieve mapping of the file page through @page->mapping.
+                     calculate @pages pgoff through "@page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT)".
+                     /* if PAGE_CACHE_SHIFT == PAGE_SHIFT == 12 (4096kB),@page's index is its pgoff */
+                  2> acquire @i_mmap_lock of the address_space.
+                     invoke vma_prio_tree_foreach() pass it 
+                       @vma(local pointer), &@iter(local PST iter), @mapping->i_mmap, @pgoff(@page's pgoff),
+                       @pgoff                                                 #^the PST of mapping   #^begin
+                       #^end
+                     for each VMA mapped this file page { /* deal with linear file page mapping */
+                             invoke vma_address() on current VMA and the @page,continue to next if -EFAULT is
+                             returned by this routine.
+                             for the good VMA,invoke try_to_unmap_one() on it.
+                             if result of try_to_unmap_one() is not SWAP_AGAIN OR @page is not mapped,goto label
+                             "out".                             /* error */       /* page is no longer mapped,
+                                                                                   * @_mapcount is -1.
+                                                                                   */
+                     }
+                  3> check @i_mmap_nonlinear of @mapping,if the list is empty,goto label "out".
+                                                                        /* no nonlinear file mapping */
+                  4> /* the case @page is still mapped AND last result is SWAP_AGAIN AND @i_mmap_nonlinear is not empty,
+                      * we have to deal with nonlinear mapping.
+                      */
+                     if TTU_MUNLOCK is set,goto label "out",because we do not bother to try to find the munlocked page
+                     in nonlinears. /* TTU_MUNLOCK may called by try_to_unmap() and recover PG_mlocked lazily */
+                     traverse list @i_mmap_nonlinear of @mapping,the connector is @shared.vm_set.list {
+                             /* the goal of this traversing is to find out the maximum nonlinear mapping size,
+                              * and record the maximum nonlinear mapping cursor for further virtual scanning.
+                              */
+
+                             for current VMA,retrieve its @vm_private_data store in local variable @cursor,it is type of
+                             unsigned long.
+                             reset local variable @max_nl_cursor to @cursor,if @cursor is greater than @max_nl_cursor.
+                             /* default value of @max_nl_cursor is 0 */
+                             /* @max_nl_cursor => maxinum of nonlinear mapping cursor */
+                             reset @cursor to the result of VMA->vm_end - VMA->vm_start,the length of interval.
+                             reset @max_nl_size to @cursor,if @cursor is greater than @max_nl_size.
+                             /* default value of @max_nl_size is 0 */
+                             /* @max_nl_size => maximum of nonlinear mapping size */
+                     }
+                  5> if @max_nl_size is _zero_ => all nonlinears locked or reserved,set return value to SWAP_FAIL and
+                     goto "out".
+                     get map count of @page through page_mapcout(),store in @mapcount the local variable.
+                     if the value is 0 => no one is mapped it,then goto "out".
+                  6> check kernel preempt,but acquire @i_mmap_lock of the @mapping.
+                  7> reset @max_nl_size to the result of "@max_nl_size + CLUSTER_SIZE - 1) & CLUSTER_MASK".
+                     if @max_nl_cursor is _zero_,reset it to CLUSTER_SIZE. /* overflow */
+                     /**
+                      * CLUSTER_SIZE => min(32 * PAGE_SIZE, PMD_SIZE)
+                      * CLUSTER_MASK => (~(CLUSTER_SIZE - 1))
+                      */
+                  8> make use of a do-while cycle,stop condition is @max_nl_cursor > @max_nl_size {
+                             traverse list @mapping->i_mmap_nonlinear,connector is @shared.vm_set.list {
+                                     /* the next cluster cursor */
+                                     retrieve current VMA' @vm_private_data store in @cursor.
+                                     make use of a while-cycle,stop condition is "@cursor >= @max_nl_cursor OR
+                                     @cursor >= current VMA's @vm_end - @vm_start" {
+                                                              /* memory region length */
+
+                                             invoke try_to_unmap_cluster(),pass it current @cursor, &@mapcount,
+                                             current VMA, @page as the parameters.
+                                             if the result is SWAP_MLOCK,reset return value to SWAP_MLOCK.
+                                             update @cursor,let it add CLUSTER_SIZE.
+                                             /* once try_to_unmap_cluster() we only handle CLUSTER_SIZE
+                                              * chunk of memory in the memory region
+                                              * usually is 32 * 4096 = 131072kB(128MB)
+                                              */
+                                             modify current VMA's @vm_private_data to the updated @cursor.
+                                             /* record the cursor we have reached.
+                                              * if we restart virtual scanning on this VMA,we have to start
+                                              * at this cursor.
+                                              */
+                                             check @mapcount,if it is less than or equal to 0,goto label "out".
+                                                   /* page un-mapped */
+                                     }
+                                     modify current VMA's @vm_private_data to @max_nl_cursor.
+                                             /**
+                                              * if the while-cycle() is end,that means we have reached the
+                                              * maximum cursor,so we will reset the cursor of this VMA
+                                              * to the @max_nl_cursor.
+                                              */
+                             }
+                             check kernel preempt,but acquire @i_mmap_lock of @mapping.
+                             update @max_nl_cursor,let it add CLUSTER_SIZE. /* the maximum cursor we have reached */
+                               /* note,this updating is happens after we traversed all elements on the list,
+                                * so the next traversing(if have),virtual scanning will scan larger chunk of memory.
+                                * ! but never exceed the size of VMA.
+                                */
+                     }
+                  9> traverse @mapping->i_mmap_nonlinear,for each VMA,set its @vm_private_data to NULL.
+                  out:
+                 10> release @i_mmap_lock and return the return value to caller.
+
+            The try_to_unmap_cluster() function :
+
+                                                                 +--> min(32 * PAGE_SIZE, PMD_SIZE)
+                                                                 |
+                                          +--> floor((@address + CLUSTER_SIZE) / PAGE_SIZE)
+                                          |
+                    |<------------------- @ ----------------->|
+              +-----------------------------------------------------+
+              |     |        |        |        |     |        |     |
+              | ... | chunk0 | chunk1 | chunk2 | ... | chunkN | ... | => VMA
+              |     |        |        |        |     |        |     |
+              +-----------------------------------------------------+
+                    | |        |        |              |      |
+                    | p        p        p              p      |
+                    | a        a        a              a      |
+                    | g        g        g              g      |
+                    | e        e        e              e      |
+                    | 0        1        2              N      |
+                    |                                         |
+                    | ^        ^        ^              ^      |
+                    | |        |        |              |      +--> end <= @address + CLUSTER_SIZE
+                    | PTE0     PTE1     PTE2           PTE_N
+                    |
+                    +--> addres <= (current cursor + @vm_start) & CLUSTER_MASK
+
+              object-based rmap does not work for nonlinear VMAs because the assumption that offset-into-file
+              correlates with offset-into-virtual-addresses does not hold.
+              consequently,given a particular page and its @index,we can not locate the PTEs which are mapping
+              that page without an exhaustive linear search.
+              let @vm_private_data to holds the current cursor into the mini "virtual scan" of each nonliner
+              VMA which maps the file to which the target page belongs,successive searches will circulate
+              around the VMA's virtual address space.
+
+              mlocked pages : check VM_LOCKED under @mmap_sem held for read if we can acquire it without blocking.
+                              for VM_LOCKED VMAs,mlock the pages in the cluster ranther than unmapping them.
+
+              <mm/rmap.c>
+                /**
+                 * try_to_unmap_cluster - virtual scan and try to unmap file page in the memory region
+                 * @cursor:               current cursor
+                 * @mapcount:             file page's mapcount
+                 * @vma:                  the VMA
+                 * @check_page:           the page have to be checked
+                 * return;                same as try_to_unmap(),except SWAP_SUCCESS
+                 */
+                static int try_to_unmap_cluster(unsigned long cursor, unsigned int *mapcout, struct vm_area_struct *vma,
+                                                struct page *check_page);
+
+                what try_to_unmap_cluster() does :
+                  1> calculate address corresponding to current @cursor in @vma through "(@vm_start + @cursor) & CLUSTER_MASK".
+                     the end address of cluster is @address + CLUSTER_SIZE.
+                     if @address less than @vm_start,make use of @vm_start,and same as en address.
+                  2> get PGD,PUD,PMD corresponding to @address.either of them is not present,return SWAP_AGAIN.
+                     try to lock @mmap_sem of @vm_mm of @vma for READ.
+                     if we succeed to acquire the semaphore,then check VM_LOCKED for @vma,if it is set,let
+                     local variable @locked_vma to 1,and we would not release semaphore for now;otherwise,release semaphore,
+                     in this case,@locked_vma == 0.
+                  3> pte_offset_map_lock() on PMD and @address to map the PTE that corresponds to @address and lock the pt lock.
+                     invoke update_hiwater_rss() for @mm.
+                  4> for each chunk in PAGE_SIZE from @address to @end {
+                             /* before the next iteration starting,++@pte => next PTE
+                              *            (next,not the first)
+                              */
+
+                             check current *@pte if present,if it is not present,we skip current chunk.
+                             invoke vm_normal_page() on current @pte to get the page descriptor that associated with this
+                             @pte in @vma,store it in @page the local variable.
+                             do BUG test,it is a BUG if @page is NULL(but PTE is present) OR @page is anonymous page(we dealing with
+                             file page).
+
+                             if @locked_vma is TRUE,then
+                                     lock @page through mlock_vma_page().
+                                     if @page is equal to @check_page,our target,then set return value to SWAP_MLOCK.
+                                     continue to next chunk.
+
+                             /* @locked_vm is FALSE */
+                             invoke ptep_clear_flush_young_notify() on @pte,if result is 1 => we cleared _PAGE_ACCESSED,
+                             then continue to next chunk.
+
+                             /* we failed to clear _PAGE_ACCESSED */
+                             invoke flush_cache_page() on @pte => on x86,it is NOP.
+                             invoke ptep_clear_flush_notify() on @pte,the old value is stored in @pteval the local variable.
+
+                             check @page's @index,if it is not equal to linear_page_index() on @address,that means it is not
+                             an linear mapping,so call to set_pte_at() to use @page's @index to set current @pte.
+                                                                              /* pgoff_to_pte() */
+                                                                              /* @pte_high member of PTE structure */
+                             
+                             check if the old PTE is dirty(@pteval),then set PG_dirty for @page.
+                             
+                             /* last work */
+                             invoke page_remove_rmap() on @page.
+                             put page refcount of @page.
+                             decrease MM_FILEPAGES counter of @mm.
+                             decrease *@mapcount.
+                     }
+                  5> invoke pte_unmap_unlock() on "@pte - 1" because the cycle in step 4> will let PTE + 1 before stop condition
+                     checking is processed,and release pt lock.
+                     if @locked_vma is TRUE,that means we are holding @mmap_sem for READ,so release it.
+                     return the return value to caller.
