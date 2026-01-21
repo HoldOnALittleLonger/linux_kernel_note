@@ -33954,7 +33954,7 @@ Chapter 16 : Accessing Files
                                    *         if @inode->i_blkbits == PAGE_CACHE_SHIFT AND @map_bh has BH_Uptodate
                                    *         then we can just set @page PG_uptodate and return.
                                    *         else,invoke create_empty_buffers() to create buffers on @page,the block
-                                   *         size is 1 << @inode->i_blkbits,state is 0.
+                                   *         size is 1 << @inode->i_blkbits,state is 0. # call to alloc_buffer_pages()
                                    *         # a proper number of buffers will be created to cover the whole page.
                                    *           and,if the page is PG_uptodate or PG_dirty,then it will traverse
                                    *           buffers again;for each buffer,if page is dirty,set BH_Dirty for it,
@@ -38305,7 +38305,9 @@ Chapter 17 : Page Frame Reclaiming
                  * @mapcount:             file page's mapcount
                  * @vma:                  the VMA
                  * @check_page:           the page have to be checked
-                 * return;                same as try_to_unmap(),except SWAP_SUCCESS
+                 * return:                same as try_to_unmap(),except SWAP_SUCCESS
+                 * # try_to_unmap_cluster() may missing the page to be unmapped,in this case,@_mapcount of the page
+                 *   must be not -1,thus try_to_unmap() will detects this and return SWAP_AGAIN.
                  */
                 static int try_to_unmap_cluster(unsigned long cursor, unsigned int *mapcout, struct vm_area_struct *vma,
                                                 struct page *check_page);
@@ -38313,7 +38315,7 @@ Chapter 17 : Page Frame Reclaiming
                 what try_to_unmap_cluster() does :
                   1> calculate address corresponding to current @cursor in @vma through "(@vm_start + @cursor) & CLUSTER_MASK".
                      the end address of cluster is @address + CLUSTER_SIZE.
-                     if @address less than @vm_start,make use of @vm_start,and same as en address.
+                     if @address less than @vm_start,make use of @vm_start,and same as end address(@vm_end).
                   2> get PGD,PUD,PMD corresponding to @address.either of them is not present,return SWAP_AGAIN.
                      try to lock @mmap_sem of @vm_mm of @vma for READ.
                      if we succeed to acquire the semaphore,then check VM_LOCKED for @vma,if it is set,let
@@ -38341,7 +38343,7 @@ Chapter 17 : Page Frame Reclaiming
                              invoke ptep_clear_flush_young_notify() on @pte,if result is 1 => we cleared _PAGE_ACCESSED,
                              then continue to next chunk.
 
-                             /* we failed to clear _PAGE_ACCESSED */
+                             /* we failed to clear _PAGE_ACCESSED because it is not a young page */
                              invoke flush_cache_page() on @pte => on x86,it is NOP.
                              invoke ptep_clear_flush_notify() on @pte,the old value is stored in @pteval the local variable.
 
@@ -38362,3 +38364,78 @@ Chapter 17 : Page Frame Reclaiming
                      checking is processed,and release pt lock.
                      if @locked_vma is TRUE,that means we are holding @mmap_sem for READ,so release it.
                      return the return value to caller.
+
+      Implementing the PFRA :
+        PFRA is composed of a large number of functions,because it must take care of many kinds of pages owned by User Mode
+        processes,disk cache,and memory caches;moreover,it has to obey several heuristic rules.
+
+        figure : /* FROM THE BOOK,Figure 17-3 */
+
+                LOW ON MEMORY RECLAIMING                                HIBERNATION RECLAIMING                PERIODIC RECLAIMING
+               
+                low memory on           low memory on                   suspend to disk(hibernation)          kswapd   reap_work
+                buffer allocation       page allocation                                                                work queue
+                __getblk()
+                alloc_page_buffers()    __alloc_pages()                 pm_suspend_disk()
+                |                       |                               |
+                |                       |i                              |                                     kswapd() cache_reap()
+                |                       |n                              |                                     |        |
+                |                       |v                              |                                     |        |
+                V                       |o                              |                                     |        |
+                free_more_memory()      |k                              |      +------------------------------+        |
+                     |                  |e                              |      |                                       |
+                     |                  V                               V      V                                       |
+                     +----------> try_to_free_pages()                   balance_pgdat()                                |
+                                  |     |     |                            |   |                                       |
+                                  |     |     |                            |   |                                       |
+                                  |     |     |                            |   |                                       V
+                        +---------+     |     |                            |   |                                      slab_destroy()
+                        |               |     +---------> shrink_slab() <--+   |
+                        |               V                                      |
+                        V             shrink_caches()                          |
+                     out_of_memory()    |                                      |
+                                        |                                      |
+                                        |                                      V
+                                        +--------------------------------> shrink_zone()
+                                                                            |      |
+                                                                            |      |
+                                                                            |      +----> shrink_cache()
+                                                                            |                |
+                                                                            |                |
+                                                                +-----------+                |
+                                                                |                            V
+                                                                |                         shrink_list() ----+
+                                                                V                         |                 |
+                                                           refill_inactive_zone()         |                 |
+                                                                    |                     |                 |
+                                                                    |                     V                 V
+                                                                    +----> page_referenced()              pageout()
+
+                !! LINUX 2.6.34.1 HAS NO FUNCTION pm_suspend_disk().INSTEAD,WHEN SUSPEND TO DISK,FUNCTION hibernate() IS
+                   CALLED,WHICH IS DEFINED IN <kernel/power/hibernate.c>.THE FUNCTION CALL TO create_basic_memory_bitmaps(),
+                   AND WHICH IS DEFINED IN <kernel/power/snapshot.c>.THE GOAL OF THIS FUNCTION IS TO CREATE BITMAPS NEEDED FOR
+                   MARKING PAGE FRAMES THAT SHOULD NOT BE SAVED AND FREE PAGE FRAMES.
+                   WHEN KERNEL RESUME FROM HIBERNATION,FUNCTION free_basic_memory_bitmaps() IS INVOKED,THEN THE PAGE FRAMES MARKED
+                   NEED TO BE FREED IS RECLAIMED BY memory_bm_free() THROUGH __free_page().
+
+
+        Page frame reclaiming is performed on essentially three occasions :
+          1> Low on memory reclaiming
+               kernel detects a "low on memory" condition.
+          2> Hibernation reclaiming
+               kernel must free memory because it is entering in the suspend-to-disk state.
+          3> Periodic reclaiming
+               a kernel thread is activated periodically to perform memory reclaiming,if necessary.
+
+        Low on Memory reclaiming cases :
+          1> grow_buffers() fails to allocate a new buffer page.
+          2> alloc_page_buffers() fails to allocate the temporary buffer heads for a page.
+          3> __alloc_pages() fails in allocating a group of contiguous page frames in a given list of
+             memory zones.
+
+        Periodic reclaiming is activatd by two different kthreads :
+          1> the "kswapd" kernel threads,which check whether the number of free page frames in some
+             memory zone has fallen below the "pages_high" watermark.
+          2> the "events" kernel threads,which are the worker threads of the predefined work queue.
+             PFRA periodically schedules the execution of a task in the predefined work queue to
+             reclaim all free slabs included in the memory caches handled by the slab allocator.
