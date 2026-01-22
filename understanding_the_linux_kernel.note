@@ -6592,6 +6592,7 @@ Chapter 5 : Kernel Synchronization
             /*  __get_cpu_var - select the per-CPU variable @var in local CPU.  */
             #define __get_cpu_var(var)  \
               (*SHIFT_PERCPU_PTR(&(var), my_cpu_offset))
+                                      /* ^__per_cpu_offset[raw_smp_processor_id()]
 
             #else
             #define PER_CPU_BASE_SECTION  ".data"
@@ -12049,6 +12050,10 @@ Chapter 8 : Memory Management
             /**
              * page - structure page represent a physical page
              * @flags:        atomic flags,32 flags describe the status of the page frame
+             *                # layout :
+             *                          |       NODE     | ZONE | ... | FLAGS | => no sparsemem or sparsemem vmemmap
+             *                          | SECTION | NODE | ZONE | ... | FLAGS | => classic sparse with space for node
+             *                          | SECTION |     ZONE    | ... | FLAGS | => classic sparse no space for node
              * @_count:       usage count
              *                # this field would decrease whenever a process releases this page frame
              *                  or COW is executed on it
@@ -12084,12 +12089,12 @@ Chapter 8 : Memory Management
              * @mapping:      if low bit clear,points to inode address_space,or NULL
              *                if page mapped as anonymous memory,low bit is set,and
              *                it points to anon_vma object
-             * @ptl:          split pt lock
+             * @ptl:          split Page Table lock
              * @slab:         SLUB: pointer to slab
              * @first_page:   compound tail pages
              * @index:        offset within mapping
              * @freelist:     SLUB: freelist req. slab lock
-             * @lru:          pageout list
+             * @lru:          pageout list,used to link this page in a memory zone's LRU list
              * @virtual:      kernel virtual address,NULL if not kmapped
              * @debug_flags:  atomic bitops,page debug flags
              * @shadow:       pointer to a status block,NULL if not tracked
@@ -12164,8 +12169,8 @@ Chapter 8 : Memory Management
                       PG_referenced,
                       PG_uptodate,
                       PG_dirty,
-                      PG_lru,
-                      PG_active,
+                      PG_lru,                   /* page is in a LRU list */
+                      PG_active,                /* page is in an active LRU list */
                       PG_slab,
                       PG_owner_priv_1,          /* owner use.if pagecache,fs may use */
                       PG_arch_1,
@@ -12342,44 +12347,87 @@ Chapter 8 : Memory Management
 
         struct zone :
           <linux/mmzone.h>
+            /* enumeration offset,used to LRU type arithmetic */
+            #define LRU_BASE 0    /* denotes inactive lru anon */
+            #define LRU_ACTIVE 1
+            #define LRU_FILE 2
+            
+            /* LRU lists enumeration */
+            enum lru_list {
+                    /* inactive anonymous pages */
+                    LRU_INACTIVE_ANON = LRU_BASE,
+
+                    /* active anonymous pages */
+                    LRU_ACTIVE_ANON = LRU_BASE + LRU_ACTIVE,
+
+                    /* inactive file mapped pages */
+                    LRU_INACTIVE_FILE = LRU_BASE + LRU_FILE,
+
+                    /* active file mapped pages */
+                    LRU_ACTIVE_FILE = LRU_BASE + LRU_FILE + LRU_ACTIVE,
+
+                    /* for pages marked PG_unevicatable */
+                    LRU_UNEVICATABLE,
+
+                    /* number of LRU lists */
+                    NR_LRU_LISTS
+            };
+
             /**
              * zone - structure zone represent memory zone inside a memory node
-             * @watermark:        zone watermarks,access with *_wmark_page(zone) macros
-             * @lowmem_reserve:   low memory reserve used to avoid totally wasting several GB of ram
-             *                    when going to allocate will be freeable or/and it will be released
-             *                    eventually
-             *                    this array is recalculated at runtime if the sysctl_lowmem_reserve_ratio
-             *                    sysctl changes
-             *                    (low-on-memory critical situations)
-             * @node:             NUMA node id
-             * @min_unmapped_pages:        minimum number of pages unmapped
-             * @min_slab_pages:            minimum number of pages for slab allocator
-             * @pageset:                   per-CPU pageset
-             *                             used to implement special caches of single page frames
-             * @lock:                      concurrent protection
-             * @all_unreclaimable:         all pages pinned
-             * @span_seqlock:              memory hotplug support
-             * @free_area:                 blocks of free page frames in this zone,
-             *                             used by buddy system
-             * @lru_lock:                  LRU mechanism lock
-             * @lru:                       LRU zones to represent inactive pages and active pages
-             *                             for memory cache
-             * @pages_scanned:             since last reclaim,how many pages scanned
-             * @flags:                     zone flags
-             * @vm_stat:                   zone statistics
-             * @prev_priority:             holds the scanning priority for this zone([12, 0])
-             * @wait_table:                holding the hash table of wait queues of processes waiting
-             *                             for one of the pages of the zone
-             * @wait_table_hash_nr_entries:        size of the hash table
-             * @wait_table_bits:                   power-of-2 order of the size of the wait queue
-             *                                     hash table
-             *                                     @wait_table_size == (1 << wait_table_bits)
-             * @zone_pgdat:                which node this zone belongs to
-             * @zone_start_pfn:            page frame number of the start of this zone
-             * @spanned_pages:             total size of zone in pages,including holes
-             * @present_pages:             amount of memory(excluding holes)
-             * @name:                      rarely used,the conventional name are "DMA",
-             *                             "Nonrmal",or "HighMem"
+             * @watermark:       
+             *        zone watermarks,access with *_wmark_page(zone) macros
+             * @lowmem_reserve:
+             *        low memory reserve used to avoid totally wasting several GB of ram
+             *        when going to allocate will be freeable or/and it will be released
+             *        eventually
+             *        this array is recalculated at runtime if the sysctl_lowmem_reserve_ratio
+             *        sysctl changes
+             *        (low-on-memory critical situations)
+             * @node: NUMA node id
+             * @min_unmapped_pages:
+             *        minimum number of pages unmapped
+             * @min_slab_pages:
+             *        minimum number of pages for slab allocator
+             * @pageset:
+             *        per-CPU pageset used to implement special caches of single page frames
+             * @lock: concurrent protection
+             * @all_unreclaimable:
+             *        all pages pinned
+             * @span_seqlock: 
+             *        memory hotplug support
+             * @free_area:   
+             *        blocks of free page frames in this zone,used by buddy system
+             * @lru_lock:
+             *        LRU mechanism lock
+             * @lru:  LRU zones to represent inactive pages and active pages
+             *        for memory cache
+             * @pages_scanned: 
+             *        since last reclaim,how many pages scanned
+             * @flags:  
+             *        zone flags
+             * @vm_stat:
+             *        zone statistics
+             * @prev_priority:
+             *        holds the scanning priority for this zone([12, 0])
+             * @wait_table: 
+             *        holding the hash table of wait queues of processes waiting
+             *        for one of the pages of the zone
+             * @wait_table_hash_nr_entries:
+             *        size of the hash table
+             * @wait_table_bits:
+             *        power-of-2 order of the size of the wait queue hash table
+             *        @wait_table_size == (1 << wait_table_bits)
+             * @zone_pgdat:
+             *        which node this zone belongs to
+             * @zone_start_pfn:
+             *        page frame number of the start of this zone
+             * @spanned_pages:
+             *        total size of zone in pages,including holes
+             * @present_pages:
+             *        amount of memory(excluding holes)
+             * @name: 
+             *        rarely used,the conventional name are "DMA","Nonrmal",or "HighMem"
              */
             struct zone {
                     unsigned long watermark[NR_WMARK];
@@ -12439,39 +12487,39 @@ Chapter 8 : Memory Management
              */
 
            <linux/mm.h>
-           static inline struct zone *page_zone(struct page *page)
-           {
-                   return &NODE_DATA(page_to_nid(page))->node_zones[page_zonenum(page)];
-                          /**
-                           * page_to_nid() retrieve @nid from @page->flags
-                           * NODE_DATA() retrieve node structure from @nid
-                           * page_zonenum() retrieve @zonenum from @page->flags
-                           */
-           }
-
-           ! memory allocation function must determines which memory zone should be selected by
-             zone class indicator ZONE_DMA / ZONE_NORMAL / ZONE_HIGH .
-             select DMA if only if ZONE_NORMAL have no free space to available.
-             pg_data_t.@zonelists linked zone descriptors,one allocation request operates on a 
-             zonelist,the first one is the 'goal' of the allocation,the other zones are fallback
-             zones,in decreasing priority.
+             static inline struct zone *page_zone(struct page *page)
+             {
+                     return &NODE_DATA(page_to_nid(page))->node_zones[page_zonenum(page)];
+                            /**
+                             * page_to_nid() retrieve @nid from @page->flags
+                             * NODE_DATA() retrieve node structure from @nid
+                             * page_zonenum() retrieve @zonenum from @page->flags
+                             */
+             }
+  
+             ! memory allocation function must determines which memory zone should be selected by
+               zone class indicator ZONE_DMA / ZONE_NORMAL / ZONE_HIGH .
+               select DMA if only if ZONE_NORMAL have no free space to available.
+               pg_data_t.@zonelists linked zone descriptors,one allocation request operates on a 
+               zonelist,the first one is the 'goal' of the allocation,the other zones are fallback
+               zones,in decreasing priority.
+               /**
+                * Page Allocator selected ZONE1,and found out the page frames presented can not
+                * satisfied the requestion,then go to search the fallback zones via @zonelists.
+                * # Number of free page frames currently is less than required.
+                */
+  
              /**
-              * Page Allocator selected ZONE1,and found out the page frames presented can not
-              * satisfied the requestion,then go to search the fallback zones via @zonelists.
-              * # Number of free page frames currently is less than required.
+              * structure zonelist and structure zoneref are defined in <linux/mmzone.h>.
+              * struct zoneref has two members :
+              *         struct zone *zone /* actual zone */
+              *         int zone_idx      /* idx in zonelist (/
+              * struct zonelist has several members :
+              *         struct zonelist_cache *zlcache_ptr /* zonelist traversing speedup cache */
+              *         struct zoneref _zonerefs[MAX_ZONES_PER_ZONELIST + 1]
+              *                        /* zone reference objects in this zonelist */
+              *         struct zonelist_cache zlcache /* #ifdefined CONFIG_NUMA */
               */
-
-           /**
-            * structure zonelist and structure zoneref are defined in <linux/mmzone.h>.
-            * struct zoneref has two members :
-            *         struct zone *zone /* actual zone */
-            *         int zone_idx      /* idx in zonelist (/
-            * struct zonelist has several members :
-            *         struct zonelist_cache *zlcache_ptr /* zonelist traversing speedup cache */
-            *         struct zoneref _zonerefs[MAX_ZONES_PER_ZONELIST + 1]
-            *                        /* zone reference objects in this zonelist */
-            *         struct zonelist_cache zlcache /* #ifdefined CONFIG_NUMA */
-            */
 
       The Pool of Reserved Page Frames :
         memory allocation requests can be satisfied in two different ways :
@@ -17654,6 +17702,14 @@ Chapter 9 : Process Address Space
               @mm->mmap.
               drain pages out of the CPU's pagevecs through lru_add_drain().
                                      /* per-CPU page vectors */
+                                     /* <linux/pagevec.h>
+                                      *   struct pagevec {
+                                      *           unsigned long nr;   # number of pages in vector
+                                      *           unsigned long cold; # cold or hot
+                                      *           struct page *pages[PAGEVEC_SIZE]; # array
+                                      *                             #^value is 14
+                                      *   }; # total length is (2 + 14 = 16) * sizeof(unsigned long)
+                                      */
               retrieve TLB cache object,it is type of pointer to struct mmu_gather.
                                      /* from per-CPU variable named "mmu_gathers" */
                                      /**
@@ -38416,7 +38472,7 @@ Chapter 17 : Page Frame Reclaiming
                    AND WHICH IS DEFINED IN <kernel/power/snapshot.c>.THE GOAL OF THIS FUNCTION IS TO CREATE BITMAPS NEEDED FOR
                    MARKING PAGE FRAMES THAT SHOULD NOT BE SAVED AND FREE PAGE FRAMES.
                    WHEN KERNEL RESUME FROM HIBERNATION,FUNCTION free_basic_memory_bitmaps() IS INVOKED,THEN THE PAGE FRAMES MARKED
-                   NEED TO BE FREED IS RECLAIMED BY memory_bm_free() THROUGH __free_page().
+                   NEED TO BE FREED ARE RECLAIMED BY memory_bm_free() THROUGH __free_page().
 
 
         Page frame reclaiming is performed on essentially three occasions :
@@ -38439,3 +38495,127 @@ Chapter 17 : Page Frame Reclaiming
           2> the "events" kernel threads,which are the worker threads of the predefined work queue.
              PFRA periodically schedules the execution of a task in the predefined work queue to
              reclaim all free slabs included in the memory caches handled by the slab allocator.
+
+        The Least Recently Used(LRU) Lists :
+          all pages belonging to the User Mode address space of processes or to the page cache are grouped
+          into two lists - "active list" and "inactive list"(LRU lists).
+
+          (doubly linked)
+          active list : include the pages that have been accessed recently.
+          inactive list : include the pages that have not been accessed for some time.
+                          pages should be stolen from the inactive list.
+
+          LRU lists of a memory zone is stored in the array member @lru[] of struct zone.
+
+          LRU Helpers :
+            <linux/mm_inline.h>
+              /* page_is_file_cache - return !PageSwapBacked(@page) */
+              static inline int page_is_file_cache(struct page *page);
+
+              /**
+               * add_page_to_lru_list - list add @page->@lru into LRU list @zone->@lru[@l],increase
+               *                        @zone->@vm_stat[NR_LRU_BASE + @l],add @page to memory cgroup's
+               *                        LRU list record.
+               */
+              static inline void add_page_to_lru_list(struct zone *zone, struct page *page, enum lru_list l);
+
+              /* del_page_from_lru_list - do the reverse to add_page_to_lru_list() */
+              static inline void del_page_from_lru_list(struct zone *zone, struct page *page, enum lru_list l);
+
+              /**
+               * page_lru_base_type - return the base LRU type this @page be on,if @page is file cache,
+               *                      LRU_INACTIVE_FILE is returned,otherwise,LRU_INACTIVE_ANON is returned.
+               *                      the real LRU type @page belonging is
+               *                        "the result + (PG_active) ? LRU_ACTIVE : 0"
+               */
+              static inline enum lru_list page_lru_base_type(struct page *page);
+
+              /**
+               * del_page_from_lru - remove @page from LRU list of @zone.
+               * # this routine first list_del() @page->lru.if PG_unevictable is set,clear the flag,and
+               *   decrease @zone->vm_stat[NR_LRU_BASE + LRU_UNEVICTABLE],remove @page from memory cgroup's
+               *   LRU list record.
+               *   if no PG_unevictable is set,this routine get the base LRU_type through page_lru_base_type(),
+               *   next,calculate the real type through PG_active flag,then clear PG_active flag,decrease and
+               *   remove the corresponding vm_stat and memory cgroup LRU list record.
+               */
+              static inline void del_page_from_lru(struct zone *zone, struct page *page);
+
+              /**
+               * page_lru - return the real LRU type this @page belonging to.
+               *            if @page is PG_unevictable,LRU_UNEVICTABLE is returned;
+               *            otherwise,return page_lru_base_type(@page) + PG_active ? LRU_ACTIVE : 0.
+               */
+              static inline enum lru_list page_lru(struct page *page);
+
+            <mm/swap.c>
+              /**
+               * activate_page - activate a given page,set PG_active for it,add it to the right LRU list
+               *                 of its memory zone,count VM event about PGACTIVATE,update page reclaim stat
+               *                 of the memory zone.
+               * # routine automatically acquire @lru_lock and release it later.
+               * # if @page is not been on a LRU list OR it is PG_active OR it is PG_unevictable,this routine returns
+               *   with do nothing.
+               */
+              void activate_page(struct page *page);
+
+              /**
+               * __lru_cache_add - add a page into LRU list
+               * @page:            the page
+               * @lru:             LRU list type
+               * # linux would not add the page into LRU list immediately,it rather put this page in
+               *   per-CPU variable named @lru_add_pvecs,it is an array of struct pagevec objects.
+               *   this function retrieve the pagevec object at @lru_add_pvecs[@lru],get @page,
+               *   place @page at the next position of the pagevec.if the pagevec is full,invoke
+               *   ____pagevec_lru_add() to drain the vector and add the pages into the specified
+               *   LRU list of page's zone.
+               *   put @page before return to caller.
+               */
+              void __lru_cache_add(struct page *page, enum lru_list lru);
+
+              /**
+               * lru_cache_add_lru - clear PG_active or PG_unevictable of @page,then invoke
+               *                     __lru_cache_add() on @page with type @lru.
+               * # it is a BUG if
+               *     @page is PG_active AND PG_unevictable
+               *     @page is PG_unevictable AND PG_active
+               *     @page is PG_lru OR PG_active OR PG_unevictable after flag clearing
+               */
+              void lru_cache_add_lru(struct page *page, enum lru_list lru);
+
+              /**
+               * ____pagevec_lru_add - add the passed pages to the LRU,then drop the caller's
+               *                       refcount on them,reinitialises the caller's pagevec.
+               * @pvec:                page vector
+               * @lru:                 LRU type
+               */
+              void ____pagevec_lru_add(struct pagevec *pvec, enum lru_list lru);
+
+              brief description for ____pagevec_lru_add() :
+                first,process BUG test,it is a BUG if @lru is unevictable LRU.
+                next,for each page in @pvec,do {
+                        get current page's memory zone.
+                        if current memory zone is not equal to the last memory zone,then
+                                unlock @zone->lru_lock and enable IRQ if @zone is not NULL.
+                                set @zone to current_zone.
+                                acquire @lru_lock of @zone and disable IRQ.
+                        VM BUG TEST :
+                                it is a BUG,if current page is PG_active.
+                                it is a BUG,if current page is PG_unevictable.
+                                it is a BUG,if current page is PG_lru.
+
+                        set PG_lru for current page.
+                        if @lru is an active LRU,set PG_active for current page.
+                        invoke update_page_reclaim_state(),pass it 
+                          @zone, @page, is_file_lru(@lru), is_active_lru(@lru)
+                        as parameters.
+                        
+                        finally,invoke add_page_to_lru_list() to add current page to
+                        the LRU list @zone->lru[@lru].
+                }
+                unlock @lru_lock of @zone,if it is not NULL.
+                invoke release_pages(),this routine processes decrements for the reference count
+                on all the passed pages,if the page fell to zero refcount,then remove it from
+                the LRU and free it.
+                invoke pagevec_reinit() on @pvec,this routine will reset @pvec->nr to 0.
+                
