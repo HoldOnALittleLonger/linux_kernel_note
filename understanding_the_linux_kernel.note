@@ -12166,7 +12166,7 @@ Chapter 8 : Memory Management
               enum pageflags {
                       PG_locked,                /* page is locked,do not touch */
                       PG_error,
-                      PG_referenced,
+                      PG_referenced,            /* page is accessed recently */
                       PG_uptodate,
                       PG_dirty,
                       PG_lru,                   /* page is in a LRU list */
@@ -18314,7 +18314,7 @@ Chapter 9 : Process Address Space
               would be unchanged,and page frame cache would be released,finally,unmap and unlock
               PTE,return 0 to caller./* label unlock */
               
-              ! rmap - physical to virtual reverse mappings
+              ! rmap - reverse mapping "PTE -> Page" to "Page -> PTE".
 
               increase counter in @mm with kind MM_ANONPAGES,establish new anonymous rmap between
               the new zero @page, @vma, @address.
@@ -30658,6 +30658,8 @@ Chapter 15 : The Page Cache
            * # if @mapping has capability of swap-backed,then set SwapBacked for @page
            *   in this case,the page becomes swap entry,routine add it to anonymous LRU
            *   list instead to add it into file LRU list
+           *   (by invoke lru_cache_add_file() OR lru_cache_add_anon() depends on page's
+           *    type,but both of them add the page into inactive list)
            * # routine add the page to page cache by call to add_to_page_cache(),thus
            *   the page will resulted in PG_locked is set
            */
@@ -30774,7 +30776,7 @@ Chapter 15 : The Page Cache
            * @data:            data for @filler
            * return:           page descriptor OR -EIO
            * # EXPORT_SYMBOL
-           * # routine actuall call to wait_on_page_read(),argument for the function is
+           * # routine actually call to wait_on_page_read(),argument for the function is
            *   get from read_cache_page_async()
            * # routine wait_on_page_read() first checks if the page pointer is a valid
            *   pointer(IS_ERR() returned FALSE),then wait for the page to be unlocked,
@@ -33567,7 +33569,6 @@ Chapter 16 : Accessing Files
 
             if anything is OK,return the number readed bytes,otherwise,return error code.
 
-
             /**
              * <linux/fs.h>
              *   typedef struct {
@@ -35558,7 +35559,7 @@ Chapter 16 : Accessing Files
              *                             the mapping can be used to map the file in tmpfs.
              */
 
-          function do_mmap_pgof() will invoke mmap_region(),if we are mapping a file,the function
+          function do_mmap_pgoff() will invoke mmap_region(),if we are mapping a file,the function
           would invoke the mmap() method in the @f_op of that file.
           it usually implemented by generic_file_mmap().
 
@@ -35625,7 +35626,7 @@ Chapter 16 : Accessing Files
               the main task should be handled by this routine is :
                 find out the page that corresponds to the fault linear address.
                 if it has been cached,then commit readahead on it.
-                if it has not been cached,invoke page_cache_read() for allocarte
+                if it has not been cached,invoke page_cache_read() for allocate new page
                 and add it into page cache,then readpage() on it.
                 if it has no PG_uptodate,then we have to update it.
                 /**
@@ -38618,4 +38619,67 @@ Chapter 17 : Page Frame Reclaiming
                 on all the passed pages,if the page fell to zero refcount,then remove it from
                 the LRU and free it.
                 invoke pagevec_reinit() on @pvec,this routine will reset @pvec->nr to 0.
+
+          Moving pages across the LRU lists :
+            PFRA scan inactive list for find out page frames will to be reclaimed.pages should move
+            from the inactive list to the active list,and back,according to whether they are being
+            accessed.pages should not change their status on every single access.
                 
+            flag PG_referenced is used to double the number of accesses required to move a page from
+            the inactive list to the active list;it also is used to double the number of "missing accesses"
+            required to move a page from the active list to the inactive list.
+              PG_referenced = 0, inactive list(PG_active = 0)
+              1th access -> set PG_referenced = 1, inactive list(PG_active = 0)
+              ... /* time interval */ /* PFRA may clear this flag before next accessing come */
+              2th access -> PG_referenced been set to 1, move page from inactive list to active list
+                                                                                         (PG_active = 1)
+
+            <mm/swap.c>
+              /**
+               * mark_page_accessed - mark a page as having seen activity
+               * @page:               page descriptor
+               * # inactive, unreferenced -> inactive, referenced
+               *   inactive, referenced   -> active, unreferenced
+               *   active, unreferenced   -> active, referenced
+               * # if @page have to be activated,kernel invoke activate_page() on @page,then clear
+               *   PG_referenced for it.
+               *   otherwise,just set PG_referenced for it as well.
+               */
+              void mark_page_accessed(struct page *page);
+
+            the cases mark_page_accessed() is invoked :
+              1> when loading on demand an anonymous page of a process.
+              2> when loading on demand a page of a memory mapped file.
+              !! I DID NOT FIND OUT INVOCATION TO mark_page_accessed() APPEARS ON
+                 "Anonymous Page Fault" KERNEL CONTROL PATH AND ON "File mmap Page Fault"
+                 KERNEL CONTROL PATH,IN KERNEL VERSION 2.6.34.1.
+                 ACTUALLY,SINCE LINUX 2.6.29,mark_page_accessed() IS NO LONGER BE CALLED
+                 IN FAULT PATH.
+                 /**
+                  * The log message of commit    bf3f3bc5e734706730c12a323f9b2068052aa1f0
+                  *   mm: don't mark_page_accessed in fault path
+                  *   Doing a mark_page_accessed at fault-time, then doing SetPageReferenced at
+                  *   unmap-time if the pte is young has a number of problems.
+                  *
+                  *    mark_page_accessed is supposed to be roughly the equivalent of a young pte
+                  *    for unmapped references. Unfortunately it doesn't come with any context:
+                  *    after being called, reclaim doesn't know who or why the page was touched.
+                  *
+                  *    So calling mark_page_accessed not only adds extra lru or PG_referenced
+                  *    manipulations for pages that are already going to have pte_young ptes anyway,
+                  *    but it also adds these references which are difficult to work with from the
+                  *    context of vma specific references (eg. MADV_SEQUENTIAL pte_young may not
+                  *    wish to contribute to the page being referenced).
+                  *    
+                  *    Then, simply doing SetPageReferenced when zapping a pte and finding it is
+                  *    young, is not a really good solution either. SetPageReferenced does not
+                  *    correctly promote the page to the active list for example. So after removing
+                  *    mark_page_accessed from the fault path, several mmap()+touch+munmap() would
+                  *    have a very different result from several read(2) calls for example, which
+                  *    is not really desirable.
+                  */
+
+              3> when loading on demand a page of an IPC shared memory region.
+              4> when reading a page of data from a file.
+              5> when swapping in a page.
+              6> when looking up a buffer page in the page cache.
