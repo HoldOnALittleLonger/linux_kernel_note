@@ -1,4 +1,5 @@
                                                 Understanding the Linux Kernel (Third Edition)
+                                                         /* Kernel version 2.6.11 */
 Linux kernel version : 2.6.34.1
 
 Chapter 1 : Introducation
@@ -756,6 +757,7 @@ Chapter 2 : Memory Addressing
       Accessed flag :
         page unit set each time accesses the corresponding page frame.(page unit never reset it,OS have to do this)
         OS may be use it when selecting pages to be swapped out.
+        /* such in page_referenced() */
         
       Dirty flag :
         Page Table entry only,it is set each time a write operation is performed on the page frame.
@@ -38683,3 +38685,138 @@ Chapter 17 : Page Frame Reclaiming
               4> when reading a page of data from a file.
               5> when swapping in a page.
               6> when looking up a buffer page in the page cache.
+
+            The page_referenced() function :
+              the page_referenced() function is invoked once for every page scanned by the PFRA,it 
+              returns 1 if either the PG_referenced flag or some of the Accessed bits in the PTE was
+              set;returns 0 otherwise.
+              !! BUT DIFFERENT FROM THE BOOK,IN LINUX 2.6.34.1,FUNCTION page_referenced() DO NOT
+                 MANIPULATES FLAG PG_referenced OF PAGE DESCRIPTOR,IT ONLY MANIPULATES THE FLAG
+                 Accessed OF THE Page Table Entry ASSOCIATED WITH THE TARGET PAGE.
+
+              <mm/rmap.c>
+                /**
+                 * page_referenced - test if the page was referenced,clear the flag if it was set
+                 * @page:            the page
+                 * @is_locked:       is called holds lock on the @page
+                 * @mem_cont:        target memory controller
+                 * @vm_flags:        collect encountered VMA->vm_flags who actually referenced the @page
+                 * return:           number of PTEs which referenced the @page
+                 *                   
+                 * # for different type of @page,this routine invoke corresponding helper to deal with
+                 *   main works.
+                 * # if @page is mapped AND @page has rmapping(invoke page_rmapping() on @page),then
+                 *           if @is_locked is FLASE AND (@page is not anonymous OR @page is KSM)
+                 *                   then we have to try lock @page at first.
+                 *                   if we failed to acquire lock,that means someone is holding the
+                 *                   lock,so we increase @referenced(default is 0),next,invoke
+                 *                   page_test_and_clear_young() on @page,this function will clear
+                 *                   Accessed flag of the PTE of @page.if we succeed to clear young,
+                 *                   increase @referenced again.finally,return @referenced(value is 2).
+                 *           if we acquired lock OR @page been locked by caller,then we continue
+                 *                   for KSM @page,let @referenced += page_referenced_ksm() 
+                 *                   for Anon @page,let @referenced += page_referenced_anon()
+                 *                   for File mapped @page,let @referenced += page_referenced_file()
+                 *                   # pass these routines same parameters except @is_locked.
+                 *           because,we acquired lock before,unlock @page.(do not touch caller lock)
+                 *           invoke page_test_and_clear_young() on @page,and increase @referenced if needed.
+                 *           return @referenced.
+                 *   @page is not mapped OR @page has not rmapping,then
+                 *           just invoke page_test_and_clear_young() on @page,increase @referenced if needed.
+                 *           return @referenced.
+                 *   !! for x86 platform,page_test_and_clear_young() always returns _zero_.
+                 * # page_rmapping() => @page->mapping & ~(PAGE_MAPPING_ANON | PAGE_MAPPING_KSM)
+                 *                                         ^1                  ^2
+                 *                                        |<-------- PAGE_MAPPING_FLAGS ------>|
+                 *   page_rmapping() might retrieves anon_vma object's address,or address_space object's address,
+                 *   or other.the result is converted to void * .                        
+                 */
+                int page_referenced(struct page *page, int is_locked, struct mem_cgroup *mem_cont,
+                                    unsigned long *vm_flags);
+
+                /* page_referenced_file - called from page_referenced(),referenced check for object-based rmap
+                 *                        return number of referenced have found.
+                 */
+                static int page_referenced_file(struct page *page, struct mem_cgroup *mem_cont, unsigned long *vm_flags);
+
+                description for page_referenced_file() :
+                  called from page_referenced() for object-based file pages.
+                  this routine can not be called on anonymous page,and caller must lock the page before calling.
+                  function first get pgoff of @page through its @index member,then acquire @i_mmap_lock of @page->mapping.
+                  get @_mapcount of @page.
+                  invoke vma_prio_tree_foreach() to traverse PST of @page->mapping,that is @i_mmap,to find out VMA 
+                  associated with this @page(the pgoff of this @page) {
+                          for current VMA,invoke vma_address() on it with @page to get the linear address.
+                          if linear address is -EFAULT,skip current VMA.
+
+                          if we are reclaiming on behalf of a cgroup,skip counting on behalf of references from
+                          different cgroups.this is test through @mem_cont and mm_match_cgroup() routine.
+                          if @mem_cont is not NULL AND mm_match_cgroup() on VMA->vm_mm with @mem_cont returned FALSE,
+                          that means we encountered a different cgroup,so skip this VMA.
+
+                          let @referenced(default is 0) += page_referenced_one(),pass @page, current VMA, the linear address,
+                          local variable @mapcount, and @vm_flags to the routine as parameters.
+                          /* stores @_mapcount of @page */
+
+                          if @mapcount become _zero_,break cycle,that means @page is un-mapped.
+                  }
+                  finally,release @i_mmap_lock and return @referenced.
+
+                /* page_referenced_anon - called from page_referenced() for deal with anonymous pages.similar to
+                 *                        page_referenced_file(),but works on anon_vma,so it traverse list
+                 *                        anon_vma->head for each @same_anon_vma.
+                 *                        also skip different cgroup behalf counting.
+                 *                        rely on page_referenced_one().
+                 *                        return number of found references.
+                 * # function call to page_lock_anon_vma() on @page to retrieves anon_vma of this @page.
+                 */
+                static int page_referenced_anon(struct page *page, struct mem_cgroup *mem_cont, unsigned long *vm_flags);
+
+                /**
+                 * page_referenced_one - called repeatedly from either page_referenced_anon() or page_referenced_file().
+                 *                       check/clear reference on a given page.
+                 *                       return number of found references.
+                 */
+                int page_referenced_one(struct page *page, struct vm_area_struct *vma, unsigned long address,
+                                        unsigned int *mapcount, unsigned long *vm_flags);
+                  
+                description for page_referenced_one() :
+                  first,invoke page_check_address() to get PTE that corresponding to @page in @vma->vm_mm,of course,
+                  acquire page table lock of the memory descriptor. /* pass @sync = 0 */
+                  if NULL PTE,goto label "out".
+
+                  /* VMA is locked,mlock page */
+                  if @vma is VM_LOCKED,we will return early,because we do not want to elevate referenced from mlocked page
+                  that gets this far,in order that it progresses to try_to_unmap() and is moved to the unevictable list.
+                  so set *@mapcount to 1,let *@vm_flags |= VM_LOCKED,goto label "out_unmap".
+                  /**
+                   * we set @mapcount to 1 at there,it would be decreased to _zero_ in label "out_unmap",so the loop
+                   * of page_referenced_anon() or of page_referenced_file() will stoped early.
+                   */
+
+                  /* clear _PAGE_ACESSED,notify MMU update cache */
+                  invoke ptep_clear_flush_young_notify() on PTE,if we succeed to clear young,if the result is TRUE,then
+                          check whether @vma is sequential read through VM_SequentialReadHint(),increase @referenced if
+                          it is not the case.                                                            (default is 0)
+                          /* do not treat a reference through a sequentially read mapping as such.
+                           * if the page has been used in another mapping,we will catch it;if this 
+                           * other mapping is already gone,the unmap path will have set PG_referenced
+                           * or activated the page.
+                           */
+
+                  next,check if @vma->vm_mm is not @current's @mm AND @vma->vm_mm has_swap_token() AND
+                  @vma->vm_mm->mmap_sem is locked(through rwsem_is_locked()),then let @referenced increase.
+                  /* @vma->vm_mm != @current->mm => not the owner of VMA
+                   * @vma->vm_mm has swap token => page swap
+                   * @@mmap_sem is locked => in the middle of a page fault
+                   *
+                   * pretend the page is referenced if the task has the swap token and is in the middle of
+                   * a page fault.
+                   */
+
+                  "out_unmap":
+                    decrease *@mapcount.
+                    unmap PTE and release page table lock.
+                    if @referenced is not _zero_,then set the corresponding flags of @vma->vm_flags in @vm_flags.
+                  "out":
+                    return @referenced to caller.
