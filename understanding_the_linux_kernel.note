@@ -12411,7 +12411,7 @@ Chapter 8 : Memory Management
              * @vm_stat:
              *        zone statistics
              * @prev_priority:
-             *        holds the scanning priority for this zone([12, 0])
+             *        holds the previous scanning priority for this zone([12, 0])
              * @wait_table: 
              *        holding the hash table of wait queues of processes waiting
              *        for one of the pages of the zone
@@ -38820,3 +38820,196 @@ Chapter 17 : Page Frame Reclaiming
                     if @referenced is not _zero_,then set the corresponding flags of @vma->vm_flags in @vm_flags.
                   "out":
                     return @referenced to caller.
+
+            The scan_control structure :
+              structure scan_control is widely used by PFRA,it contains information about the ongoing reclaiming
+              operation.
+
+              <mm/vmscan.c>
+                /**
+                 * scan_control - structure used to store informations about the ongoing reclaiming operation
+                 * @nr_scanned:   number of scanned inactive pages
+                 * @nr_reclaimed: number of pages freed so far during a call to shrink_zones()
+                 * @nr_to_reclaim:
+                 *                number of pages shrink_list() should reclaim
+                 * @hibernation_mode:
+                 *                is in hibernation_mode?
+                 * @gfp_mask:     this context's GFP mask,passed from calling function
+                 * @may_writepage:
+                 *                can it writepage?
+                 * @may_unmap:    can mapped pages be reclaimed?
+                 * @may_swap:     can pages be swapped as part of reclaim?
+                 * @swappiness:   swappiness,0 .. 100 
+                 *                administrator can modify the value by write a new value into
+                 *                "/proc/sys/vm/swappiness",or use "sysctl" to change value of
+                 *                term "vm_swappiness",default value is 60
+                 * @all_unreclaimable:
+                 *                is all unreclaimable?
+                 * @order:        order of pages
+                 * @nodemask:     nodemask of nodes allowed by the caller,NULL means
+                 *                scan all nodes
+                 * @isolate_pages:
+                 *                pluggable isolate pages callback                
+                 *                usually is isolate_pages_global(),which is defined in the same
+                 *                file
+                 *                function isolate_pages_global() invoke isolate_lru_pages() on
+                 *                @z->lru[LRU_BASE + active ? LRU_ACTIVE : 0 + file ? LRU_FILE : 0]
+                 *                # @nr:        number of pages have to be scanned
+                 *                  @dst:       list used to collects pages satisfied condition
+                 *                  @scanned:   store number of scanned pages
+                 *                  @order:     page's order for buddy system
+                 *                  @mode:      isolate mode
+                 *                              ISOLATE_INACTIVE 0 => isolate inactive pages
+                 *                              ISOLATE_ACTIVE   1 => isolate active pages
+                 *                              ISOLATE_BOTH     2 => isolate both active and inactive pages
+                 *                              # this flag is used by __isolate_lru_page(@page, @mode, @file).
+                 *                                the routine attempts clear PG_lru of @page and increase
+                 *                                @page->_count,if @_count is not _zero_.
+                 *                                return 0 means succeed,otherwise return -EINVAL or -EBUSY.
+                 *                                -EBUSY => failed to get @page because @_count is 0
+                 *                  @z:         memory zone
+                 *                  @mem_cont:  vm cgroup
+                 *                  @active:    active lru?
+                 *                  @file:      file lru?
+                 */
+                struct scan_control {
+                        unsigned long nr_scanned;
+                        unsigned long nr_reclaimed;
+                        unsigned long nr_to_reclaim;
+                        unsigned long hibernation_mode;
+                        gfp_t gfp_mask;
+                        int may_writepage;
+                        int may_unmap;
+                        int may_swap;
+                        int all_unreclaimable;
+                        int order;
+                        struct mem_cgroup *mem_cgroup;
+                        nodemask_t *nodemask;
+                        unsigned long (*isolate_pages)(unsigned long nr, struct list_head *dst,
+                                                       unsigned long *scanned, int order, int mode,
+                                                       struct zone *z, struct mem_cgroup *mem_cont;
+                                                       int active, int file);                        
+                };
+
+            The shrink_active_list() : /* Linux 2.6.34.1 has no refill_inactive_zone(),instead,shrink_active_list()
+                                        * take charge of the refill work.
+                                        */
+              <mm/vmscan.c>
+                /* lru_to_page - use @lru member retrieve the page descriptor */
+                #define lru_to_page(_head) (list_entry((_head)->prev, struct page, lru))
+
+                /**
+                 * isolate_lru_pages - scan and isolate pages from zone LRU lists to destination list
+                 * @nr_to_scan:        number of pages have to be scanned
+                 * @src:               list to scan
+                 * @dst:               list to store pages
+                 * @scanned:           number of scanned pages
+                 * @order:             page's order for buddy system
+                 * @mode:              isolate mode
+                 * @file:              file pages(1) or anonymous pages(0)
+                 * return:             number of pages were moved
+                 */
+                static unsigned long isolate_lru_pages(unsigned long nr_to_scan, struct list_head *src, struct list_head *dst,
+                                                       unsigned long *scanned, int order, int mode, int file);
+
+                description for isolate_lru_pages() :
+                                                                         /* @nr_to_scan */        /* list_empty() */
+                  make use of a for-cycle to scan @src,stop condition is scanned enough or all things in @src have been moved {
+                          retrieve the last page in @src. /* invoke lru_to_page(),traverse order is last to head */
+                          prefetch it.
+                          do BUG test,it is a BUG if current page has no PG_lru.
+
+                          invoke __isolate_lru_page() on current page with @mode and @file.
+                          if return value is 0
+                                  invoke list_move(),to move current page to @dst.
+                                  invoke mem_cgroup_del_lru() on the page.
+                                  increase number of moved pages.
+                          else if return value is -EBUSY
+                                  /* @_count is 0,it is being freed elsewhere */
+                                  invoke list_move(),to move current page to @src.(restore)
+                                  invoke mem_cgroup_rotate_lru_list() on current page with base LRU type of this page.
+                                  continue to next page.
+                          else
+                                  invoke BUG().       
+
+                          check @order,if it is _zero_,that means we only handle one page as well.
+                          if it is not _zero_,that means we have handles total "1 << @order" contiguous pages.
+                          so,we get pfn of current page,traverse pages from pfn of current page + 1 to
+                          then end pfn(starting pfn + (1 << @order)) {
+                                  if detected holes - no page associated with current pfn,stop traversing.
+
+                                  if the page associated with current pfn it not in the same memory zone,
+                                  skip it.
+
+                                  if we do not have enough swap space AND the page is anonymous page AND
+                                  it is not swapped,we have to skip it.
+
+                                  if __isolate_lru_page() on the page returned 0,we move it to @dst,
+                                  delete it from memory cgroup,increase moved number and scanned number.
+                          }
+                  }
+                  finally,return number of moved pages(do not count restore pages--move to @src).                
+
+                /**
+                 * shrink_active_list - scan and shrink active list
+                 * @nr_pages:           number of pages have to be scanned
+                 * @zone:               memory zone
+                 * @sc:                 scan control
+                 * @priority:           scan priority
+                 * @file:               file page?
+                 */
+                static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
+                                               struct scan_control *sc, int priority, int file);
+
+                what shrink_active_list() does :
+                  1> initialize three lists @l_hold, @l_active, @l_inactive.
+                     get zone_reclaim_stat object of @zone,the member @reclaim_stat.but,if @sc specified
+                     memory cgroup,invoke mem_cgroup_get_reclaim_stat() to get the reclaim stat in mem cgroup
+                     of @zone instead the @reclaim_stat member.
+                     /* this is done by get_reclaim_stat(@zone, @sc). */
+                  2> invoke lru_add_drain(),this routine is defined in <mm/swap.c>.it flush LRU pagevec of current
+                     CPU.
+                     acquire @lru_lock of @zone.
+                     invoke @sc->isolate_pages(),the return value stored in local variable @nr_taken,
+                     number of scanned pages stored in local variable @pgscanned,the @dst list is @l_hold,
+                     mode is ISOLATE_ACTIVE,@active is 1.
+                  3> invoke scanning_global_lru(),if @sc has not specified memory cgroup,update @zone->pages_scanned,
+                     let it += @pgscanned.
+                     let @reclaim_stat(pointer to @zone->reclaim_stat)->recent_scanned[@file] += @nr_taken.
+                     count a VM EVENT PGREFILL on @zone with number @pgscanned.
+                     if @file is not _zero_,modify @zone's page state NR_ACTIVE_FILE,decreaase @nr_taken,
+                     otherwise,let NR_ACTIVE_ANON decrease @nr_taken.
+                     modify @zone's page state "NR_ISOLATED_ANON + @file",set it to @nr_taken.
+                     release @lru_lock.
+                  4> traverse list @l_hold until it become empty {
+                             check kernel preempt.
+                             retrieve page through lru_to_page() from @l_hold.
+                             delete current page from list.
+
+                             check,if current page is not evictable--PG_unevictable,then putback the page
+                             to the appropriate LRU list.(we moved it in isolate_pages()),continue to next page.
+
+                             invoke page_referenced() on current page.if the result is not _zero_,that means
+                             it have been referenced {
+                                     increase local variable @nr_rotated.
+                                     check the VM flag,if VM_EXEC is set and the page is a file page,
+                                     move it to @l_active,and continue to next page.
+                                     /* page mapped a file containing executable code */
+                                     /* anon page => heap / stack */
+                             }
+                             clear PG_active for current page,move it to @l_inactive.
+                     }
+                  5> acquire @lru_lock,because we are going to modify LRU lists.
+                     update @recent_rotated[@file] of @reclaim_stat the reclaim stat of @zone,let it += @nr_rotated.
+                  6> call to move_active_pages_to_lru(),to move pages on @l_active list to
+                     @zone->lru[LRU_ACTIVE + @file * LRU_FILE].
+                     /* if @file is 0,the pages are moved to LRU_ACTIVE_ANON LRU list,
+                      * if @file is 1,the pages are moved to LRU_ACTIVE_FILE LRU list.
+                      */
+                     call to move_active_pages_to_lru(),to move pages on @l_inactive to
+                     @zone->lru[LRU_BASE + @file * LRU_FILE].
+                     /* if @file is 0,the pages are moved to LRU_INACTIVE_ANON LRU list,
+                      * if @file is 1,the pages are moved to LRU_INACTIVE_FILE LRU list.
+                      */
+                  7> update "NR_ISOLATED_ANON + @file" state counter of @zone,let it -= @nr_taken.
+                     release @lru_lock.
