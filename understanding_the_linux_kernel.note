@@ -38821,6 +38821,30 @@ Chapter 17 : Page Frame Reclaiming
                   "out":
                     return @referenced to caller.
 
+            The zone_reclaim_stat structure :
+              <linux/mmzone.h>
+                /**
+                 * zone_reclaim_stat - structure used to record memory reclaiming state of a memory zone
+                 * @recent_rotated:    number of pages that are referenced in recent scanning,
+                 *                     for unfreeable pages,they will be putbacked to LRU lists
+                 *                     [0] => anon page
+                 *                     [1] => file page
+                 * @recent_scanned:    number of recent scanned pages
+                 *                     [0] => anon page
+                 *                     [1] => file page
+                 * @nr_saved_scan:     accumulated for batching
+                 * # the pageout code in <mm/vmscan.c> keep track of how many of the mem/swap backed
+                 *   and file backed pages are referenced.
+                 *   the higher the rotated/scanned ratio,the more valuable that cache is.
+                 * # each memory zone associated a zone_reclaim_stat object,which is the member
+                 *   @zone_reclaim_stat member.
+                 */
+                struct zone_reclaim_stat {
+                        unsigned long recent_rotated[2];
+                        unsigned long recent_scanned[2];
+                        unsigned long nr_saved_scan[NR_LRU_LISTS];
+                };
+
             The scan_control structure :
               structure scan_control is widely used by PFRA,it contains information about the ongoing reclaiming
               operation.
@@ -39013,3 +39037,185 @@ Chapter 17 : Page Frame Reclaiming
                       */
                   7> update "NR_ISOLATED_ANON + @file" state counter of @zone,let it -= @nr_taken.
                      release @lru_lock.
+
+            The get_scan_ratio() function :
+              this function is used to determine how many pages in a given memory zone have to be scanned in PFRA.
+              usually,if no swap space remainiing,then kernel do not waste time to processes scanning,because we
+              can not swap out the anonymous pages for get more free pages in the memory zone.
+
+              <mm/vmscan.c>
+                /**
+                 * get_scan_ratio - determine how aggressively the anon and the file LRU lists should be scanned
+                 * @zone:           memory zone
+                 * @sc:             scanning control
+                 * @percnet:        pointer points to an array is unsigned long [2]
+                 *                  [0] => how much pressure to put on ram/swap backed memory(anon pages)
+                 *                  [1] => determines pressure on the file LRUs
+                 * # the relative value of each set of LRU lists is determined by looking at the fraction of
+                 *   the pages scanned we did rotate back onto the active list instead of evict.
+                 */
+                static void get_scan_ratio(struct zone *zone, struct scan_control *sc, unsigned long *percent);
+
+                description for get_scan_ratio() :
+                  first,get @zone_reclaim_stat member of @zone through get_reclaim_stat(),if memory cgroup is
+                  not NULL,use the stat of memory cgroup as instead.
+
+                  calculate anonymous pages in @zone -
+                    result is LRU_ACTIVE_ANON pages + LRU_INACTIVE_ANON pages
+                  calculate file pages in @zone 
+                    result is LRU_ACTIVE_FILE pages + LRU_INACTIVE_FILE pages
+                  /* rely on zone_nr_lru_pages(),which invoke zone_page_state(),or mem_cgroup_zone_nr_pages()
+                   * if specified memory cgroup.
+                   * zone_page_state() is defined in <linux/vmstat.h>,which return @zone->vm_stat[@item].
+                   */
+
+                  next,check memory cgroup if specified in @sc(through scanning_global_lru()).
+                  if no specified,then
+                    retrieve free pages by use item NR_FREE_PAGES.
+                    if file pages + free pages <= @zone's high watermark of pages,then
+                            force scan anonymous pages -
+                              set @percent[0] to 100
+                              set @percent[1] to 0
+                              and return to caller
+                  otherwise,we may have to scan both kinds of pages.
+                  for anonymous pages :
+                          check @recent_scanned[0] of reclaim stat of @zone.
+                          if it is greater than "anonymous pages / 4",we let both
+                          @recent_scanned[0] and @recent_rotated[0] /= 2.
+                          /* of course, need @lru_lock of @zone */
+                  for file pages :
+                          similar,but operates on @recent_scanned[1] and @recent_rotated[1].
+                          condition checking use number of file pages.
+                  calculate anon priority and file priority :
+                    /* if swappiness is 100,anon and file have the same priority,
+                     * this scanning priority is essentially the inverse of I/O cost
+                     */
+                    anon priority is @sc->swappiness
+                    file priority is 200 - @sc->swappiness
+                    
+                    /* the amount of pressure on anon VS file pages is inversely
+                     * proportional to the fraction of recently scanned pages on
+                     * each list that were recently referenced and in active use.
+                     */
+                    final anon priority is
+                            (anon priority + 1) * (@recent_scanned[0] + 1) /
+                            ((anon priority + 1) * (@recent_scanned[0] + 1) + 1)
+
+                    final file priority is
+                            (file priority + 1) * (@recent_scanned[1] + 1) /
+                            ((file priority + 1) * (@recent_scanned[1] + 1) + 1)
+                  the ratioes are
+                    anon => @percent[0] := 100 * final_anon_priority / (final_anon_priority + final_file_priority + 1)
+                    file => @percent[1] := 100 - @percent[0]
+
+                  ! after we get the relative ratioes,we can compute the number of the corresponding evictable pages to be
+                    scanned in PFRA.
+
+            The shrink_zone() function :
+              function shrink_zone() is a basic per-zone page freer,it is used by both kswapd and
+              direct reclaim.
+              /* direct reclaim => process PFRA during page allocating if no free pages available.
+               *                   the entry point is zone_reclaim().
+               */
+
+              <mm/vmscan.c>
+                /**
+                 * nr_scan_try_batch - smallish @nr_to_scan's are deposited in @nr_saved_scan,until
+                 *                     we collected @swap_cluster_max pages to scan.
+                 * @nr_to_scan:        number of pages to be scanned in this time
+                 * @nr_saved_scan:     saved number of pages to be scanned(accumulating)
+                 * return:             number of pages should to be scanned in this time
+                 * # this routine let *@nr_saved_scan += @nr_to_scan.
+                 *   the final nr_scan is 0 OR a value >= SWAP_CLUSTER_MAX.
+                 *   SWAP_CLUSTER_MAX is defined in <linux/swap.h>,its value is 32,that means we will
+                 *   processes page scanning when there at least have 32 pages accumulated.
+                 */
+                static unsigned long nr_scan_try_batch(unsigned long nr_to_scan, unsigned *nr_saved_scan);
+
+                /**
+                 * shrink_zone - shrink a memory zone for get more free pages
+                 * @priority:    priority,usually is how much of the queues we will scan in one go
+                 * @zone:        memory zone
+                 * @sc:          scanning control
+                 */
+                static void shrink_zone(int priority, struct zone *zone, struct scan_control *sc);
+
+                what shrink_zone() does :
+                  1> get @zone->zone_reclaim_stat through get_reclim_stat().
+                     check if @may_swap of @sc is _zero_ OR @nr_swap_pages is less than or equal to _zero_
+                     /* scanning control have forbiden swap,or no swap space */
+                             we set local array @percent[0] to 0 - we do not scan anon pages,and set
+                             @percent[1] to 100 - we forcus on file pages.
+                     otherwise,we must invoke get_scan_ratio() to calculate scanning percentages.
+                  2> for_each_evictable_lru(@l) /* active,inactive anon/file */ {
+                             get current pages in @zone that corresponding to current @l -- the LRU list type.
+                             /* by invoke zone_nr_lru_pages(),result stored in local variable @scan */
+                             if @priority is not _zero_ OR no swap - @may_swap is 0 OR no swap space,
+                             then
+                                     let @scan -- the number of pages on current LRU list /= @priority
+                                     let @scan := @scan * percent[anon/file] / 100
+                                                                 #^depends on current @l
+                             next,set @nr[@l] to the result of nr_scan_try_batch(),pass it @scan and
+                             @zone_reclaim_stat->nr_saved_scan[@l].
+                             /* @nr is an array of unsigned long [NR_LRU_LISTS],by invoke nr_scan_try_batch()
+                              * we can delay the scanning until amount of pages is reached SWAP_CLUSTER_MAX.
+                              */
+                     }
+                  3> make use of a while-cycle,the stop condition is @nr[LRU_INACTIVE_ANON] is 0 AND
+                     @nr[LRU_ACTIVE_FILE] is 0 AND @nr[LRU_INACTIVE_FILE] is 0 {
+                     /* @nr[] store scanning numbers */
+
+                     /* the reason why do not wait @nr[LRU_ACTIVE_ANON] become _zero_ :
+                      *         Linux is a multiple tasks operating system,there must be a lot of active
+                      *         anonymous pages(heap/stack).
+                      *         and @nr[LRU_ACTIVE_ANON] must be greater than others.
+                      *         we do not need to scan all of them and try to shrink the list.
+                      *         because that will cause system performance degradation.
+                      *         
+                      * for active file pages,we try to find out file pages that have accessed at a long time ago.
+                      */
+                             for_each_evictable_lru(@l) {
+                                     set local variable @nr_to_scan to the one has minimum value between
+                                     @nr[@l] and SWAP_CLUSTER_MAX.
+                                     /* this means we scan at mostly SWAP_CLUSTER_MAX pages in a round */
+                                     update @nr[@l],let it -= @nr_to_scan.
+                                     invoke shrink_list(),pass it @l, @nr_to_scan, @zone, @sc, @priority as
+                                     parameters,store the result in local variable @nr_reclaimed.
+                                     /* this routine will call to one of either shrink_active_list() or
+                                      * shrink_inactive_list().
+                                      * if @l is active lru AND inactive list for current LRU type is low,
+                                      * shrink_active_list() is called,this will refill inactive list.
+                                      * in this case,the return value is 0 - shrink_active_list() no return value.
+                                      * otherwise,return to caller by call to shrink_inactive_list().
+                                      * this routine will free some pages on the inactive list,return the number
+                                      * of pages have reclaimed.
+                                      *
+                                      * inactive list is not low => free some pages on it
+                                      * inactive list is low     => refill it with some pages been on active list
+                                      */
+                             }
+
+                             check @nr_reclaimed,if @nr_reclaimed >= @nr_to_reclaim - default is the @sc->nr_to_reclaim
+                             member AND @priority is less than DEF_PRIORITY - default is 12,then break the while-cycle.
+                             because,we have accomplished our mission. /* priority starting from 12 as usually,
+                                                                        * and decrease to 0.
+                                                                        */
+                     }
+                  4> the while-cycle in step 3> stopped,because we reclaimed enough pages OR all pages to scan counter
+                     have reached _zero_.
+                     so we update @sc->nr_reclaimed to @nr_reclaimed.
+                  5> check if inactive anon LRU list is low AND @nr_swap_pages > 0 - free swaphandles is not 0,
+                     then we invoke shrink_active_list() on @zone with SWAP_CLUSTER_MAX as the number of pages going to be
+                     scanned,the target is anon page.
+                     /* even if we did not try to evict anon pages at all,we want to rebalance the anon LRU active/inactive
+                      * ratio.
+                      */
+                     invoke throttle_vm_writeout() with parameter @sc->gfp_mask.
+                     /* this function will wait for a backing_dev(any backing dev) to become uncongested,that means some
+                      * writeback tasks have finished.the sync mode is BLK_RW_ASYNC,timeout is "HZ / 10".
+                      * # rely on function congestion_wait(),which is defined in <mm/backing-dev.c>.
+                      * # function throttle_vm_writeout() is defined in <mm/page-writeback.c>.
+                      */
+        
+
+                    
