@@ -39239,8 +39239,20 @@ Chapter 17 : Page Frame Reclaiming
                              * otherwise,leave the page on the LRU so it is swappable.
                              */
                         it has mapping but we succeed to remove mapping for it via __remove_mapping()
-                           /* page cache page,and @_count is not 1 */
+                           /* page cache page OR swap cache,and @_count is not 1 */
+                           /* for swap cache,__delete_from_swap_cache() is called by __remove_mapping().
+                            * for page cache,__remove_from_page_cache() is called by __remove_mapping().
+                            */
                                 page has no mapping OR page has mapping but failed to remove mapping -> keep in list
+                                   /* ^neither page cache page nor anon_vma page.
+                                    *  may allocated through page allocator by kernel control path.
+                                    *  @mapping & 0x01 => TRUE => anon_vma -- handled in do_anonymous_page()
+                                    *  @mapping & 0x01 => FALSE AND @mapping & ~0x01 => TRUE => address_space
+                                    *                                                           page_cache_alloc()
+                                    *  @mapping == NULL => general page,can be used as buffer of kernel thread or
+                                    *                      for other purpose.
+                                    *                      it is not User Mode page.
+                                    */
 
             The get_scan_ratio() function :
               this function is used to determine how many pages in a given memory zone have to be scanned in PFRA.
