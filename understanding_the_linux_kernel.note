@@ -31428,7 +31428,11 @@ Chapter 15 : The Page Cache
                  * <fs/buffer.c>
                  *   static void free_more_memory(void);
                  *   - kick the writeback threads then try to free up some ZONE_NORMAL memory.
-                 *   # in alloc_page_buffers(),free more memory and try again.
+                 *   # size of dirty pages have to be writeback is 1024.
+                 *   # after triggered writeback,it invoke yield() to give up CPU time.
+                 *     when switch back,it start try to free memory zones,this rely on
+                 *     for_each_online_node() and try_to_free_pages().
+                 *   # in alloc_page_buffers(),if failed to allocate memory,it will free more memory and try again.
                  */
 
             ! as the description,we can understand that no more page is allocated,just split the page
@@ -39003,6 +39007,7 @@ Chapter 17 : Page Frame Reclaiming
                      mode is ISOLATE_ACTIVE,@active is 1.
                   3> invoke scanning_global_lru(),if @sc has not specified memory cgroup,update @zone->pages_scanned,
                      let it += @pgscanned.        /* if has mem cgroup,update mem cgroup as instead */
+                                                  /* scanning_global_lru() => !@sc->mem_cgroup */
                      let @reclaim_stat(pointer to @zone->reclaim_stat)->recent_scanned[@file] += @nr_taken.
                      count a VM EVENT PGREFILL on @zone with number @pgscanned.
                      if @file is not _zero_,modify @zone's page state NR_ACTIVE_FILE,decreaase @nr_taken,
@@ -39200,7 +39205,7 @@ Chapter 17 : Page Frame Reclaiming
                      return @nr_reclaimed to caller,the number of pages have been reclaimed.
 
                   ! @sc->nr_scanned is updated in shrink_page_list().
-                  ! pages are freeable in shrink_page_list() :
+                  ! pages are freeable in shrink_page_list() : /* these page freed in this function through __pagevec_free() */
                       if the page - (AND)
                         /* may_enter_fs => __GFP_FS in @sc OR (page is swap cache AND __GFP_IO in @sc) */
                                                  /* ^@gfp_mask member */
@@ -39465,3 +39470,173 @@ Chapter 17 : Page Frame Reclaiming
                                |               + -> pagevec_release()
                                V
                             throttle_vm_writeout()
+
+          Low On Memory Reclaiming :
+            low on memory reclaiming is activated when a memory allocation fails.
+            function free_more_memory() is called when allocate VFS buffer or buffer head failed,and in which,
+            function try_to_free_pages() is invoked on the memory zones.
+
+            macro function for_each_online_node(@nid) is defined in <linux/nodemask.h>.
+              for_each_online_node(@nid) => for_each_node_state(@nid, N_ONLINE)
+                                         => for_each_node_mask((@nid), node_states[N_ONLINE])
+                                                                       #^@mask
+                                         => for ((@nid) = first_node(@mask); (@nid) < MAX_NUMNODES;
+                                                 (@nid) = next_node((@nid), (@mask)))
+            this macro is used by free_more_memory() to traverse memory NUMA nodes.
+            and for each online NUMA node,free_more_memory() invoke first_zones_zonelist() on it,if the returned
+            first zone is not NULL,try_to_free_pages() is invoked on it with the same zonelist,order 0,the same
+            gfp flags,and NULL nodemask.
+
+            static inline function
+              struct zoneref *first_zones_zonelist(struct zonelist *zonelist, enum zone_type highest_zoneidx,
+                                                   nodemask_t *nodes, struct zone **zone);
+            is defined in <linux/mmzone.h>,it returns the first zone at or below highest_zoneidx within
+            the allowed nodemask in a zonelist.
+            free_more_memory() pass it zonelist "node_zonelist(@nid, GFP_NOFS)",this zonelist is used to
+            search for a suitable zone.
+            the @highest_zoneidx is "gfp_zone(GFP_NOFS)",@nodes is NULL,@zone is a local struct zone pointer's
+            address,the first suitable zone found is returned in this parameter.
+            about the return value of this function,it can be used as a cursor for iterate the zonelist with
+            next_zones_zonelist() by advancing it by one before calling.
+
+            ! but in free_more_memory() we only search the first zone in the zonelist.
+            ! gfp_zone() is defined in <linux/gfp.h> and it will return a value is type of enum zone_type.
+              in the case GFP_NOFS,zone type is ZONE_NORMAL.
+              /* suppose only ZONE_DMA ZONE_NORMAL ZONE_HIGHMEM is defined.
+               *              0        1           2
+               * gfp_zone(GFP_NOFS)
+               *   GFP_NOFS => __GFP_WAIT | __GFP_IO => 0x50
+               *   GFP_ZONEMASK => 0x0f
+               *   expression => (GFP_ZONE_TABLE >> ((GFP_NOFS & GFP_ZONEMASK) * ZONES_SHIFT)) &
+               *                 ((1 << ZONES_SHIFT) - 1)
+               * ZONES_SHIFT => 2
+               * GFP_ZONE_TABLE => (ZONE_NORMAL << 0 * ZONES_SHIFT) | (ZONE_DMA << __GFP_DMA * ZONES_SHIFT) |
+               *                   (ZONE_HIGHMEM << __GFP_HIGHMEM * ZONES_SHIFT)
+               * __GFP_DMA => 0x01
+               * __GFP_HIGHMEM => 0x02
+               * GFP_ZONE_TABLE => 1 << 0 * 2 | 0 << 1 * 2 | 2 << 2 * 2
+               *                => 1 | 0 | 32
+               *                => 00000001 | 00100000
+               *                => 00100001
+               * expression result => (00100001 >> 0) & ((1 << 2) - 1)
+               *                   => 00100001 & 00000011
+               *                   => 00000001
+               *                   => 1 => ZONE_NORMAL
+               */
+
+            The try_to_free_pages() function :
+              <mm/vmscan.c>
+                /**
+                 * try_to_free_pages - try to free some pages of the zones on a given zonelist
+                 *                     with specified order and masks
+                 * @zonelist:          zones list
+                 * @order:             page order
+                 * @gfp_mask:          GFP mask
+                 * @nodemask:          NUMA node mask
+                 * return:             0 => if no pages reclaimed
+                 *                     positive value => the number of pages reclaimed
+                 */
+                unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
+                                                gfp_t gfp_mask, nodemask_t *nodemask);
+
+                brief description for try_to_free_pages() :
+                  this function hand over the main work to do_try_to_free_pages().
+                  it pass a local scan_control object @sc to the helper.
+                  @sc is initialized to {
+                          .gfp_mask = @gfp_mask,
+                          /* if we are not in laptop mode,then we can write page out */
+                          .may_writepage = !laptop_mode,
+                          .nr_to_reclaim = SWAP_CLUSTER_MAX,
+                          .may_unmap = 1,
+                          .may_swap = 1,
+                          /* @vm_swappiness is defined in the same file,default value is 60 */
+                          .swappiness = @vm_swappiness,
+                          /* order is 0,means we at mostly can reclaim SWAP_CLUSTER_MAX pages */
+                          .order = @order,
+                          .mem_cgroup = NULL,
+                          .isolate_pages = isolate_pages_global,
+                          .nodemask = @nodemask,
+                  }
+                  next,return to caller by call to do_try_to_free_pages() on @zonelist with this @sc.
+
+                /**
+                 * do_try_to_free_pages - deal with pages free
+                 * @zonelist:             where memory zones come from
+                 * @sc:                   scanning control
+                 * return:                have described in try_to_free_pages()
+                 * # this routine is the main entry point to direct page reclaim.
+                 * # if a full scan of the inactive list fails to free enough memory,then we are
+                 *   out-of-memory,and something needs to be killed.
+                 * # if the caller is !__GFP_FS then the probability of a failure is reasonably high,
+                 *   because the zone may be full of dirty or under-writeback pages,which this caller can
+                 *   not do much about.
+                 *   thus,function will try to kick writeback threads,but if the allocating task holds
+                 *   filesystem locks which prevent writeout,this might not work,and the allocation attempt
+                 *   will fail.
+                 */
+                static unsigned long do_try_to_free_pages(struct zonelist *zonelist, struct scan_control *sc);
+
+                description for do_try_to_free_pages() :
+                  retrieve @current's @reclaim_state member.
+                  get the @high_zoneidx,this is retrieved through gfp_zone(@sc->gfp_mask),same as free_more_memory().
+                  call to delayacct_freepages_start() to trigger a delay work about accounting freepages.
+
+                  if @sc have not specified memory cgroup,we have to count ALLOCSTALL VM event.if we come from
+                  try_to_free_pages(),the @mem_cgroup should be NULL.
+
+                  if no memory cgroup have specified,for each zone in the @zonelist below @high_zoneidx,we
+                  have to accumulate reclaimable pages of them.this is done by retrieve reclaimable pages
+                  of current zone via zone_reclaimable_pages(),and accumulate them in local variable
+                  @lru_pages.for zone that is not allowed hardwall with GFP_KERNEL,we skip it.
+
+                  make use of a for-cycle to traverse each priority in range [DEF_PRIORITY, 0] {
+                          /* for current @priority */
+
+                          we set @sc->nr_scanned to 0.
+                          if @priority is _zero_,we have to disable_swap_token(),this will prevent swap out.
+                          next,invoke shrink_zones() on current @priority with the @zonelist and @sc,this function
+                          will invoke shrink_zone() on each zone in the @zonelist.
+
+                          if no @mem_cgroup,then
+                                  /* call the shrink functions to age shrinkable caches */
+                                  /* this routine return the number of slab objects have shrunk */
+                                  invoke shrink_slab(),pass it @sc->nr_scanned, @sc->gfp_mask, @lru_pages as
+                                  parameters.
+                                  if @current has @reclaim_state,then
+                                          let @sc->nr_reclaimed += @reclaim_state->reclaimed_slab
+                                          reset @reclaim_state->reclaimed_slab to 0
+
+                          accumulate the number of scanned pages in local variable @total_scanned.
+                          at every time that shrink_zones() accomplished,use @sc->nr_scanned to update it.
+    
+                          if we have reclaimed enough memory,that @sc->nr_reclaimed >= @sc->nr_to_reclaim,then
+                          we break this loop early,in this case,the return value is @sc->nr_reclaimed.
+                    
+                          /* otherwise,we have to continue because there is remaining some memory must to be
+                           * reclaimed.
+                           */
+
+                          update local variable @writeback_threshold,set it to
+                            @sc->nr_to_reclaim + @sc->nr_to_reclaim / 2
+                          we have to trigger writeback task if @total_scanned is greater than @writeback_threshold.
+                          /* rely on wakeup_flusher_threads(@laptop_mode ? 0 : @total_scanned).
+                           * after we kick writeback,set @sc->may_writepage to 1.
+                           *
+                           * scanned enough,but loop is not end because we have not reclaimed enough memory.
+                           */
+
+                                     /* triggered by wakeup_flusher_threads() */
+                          we have to wait I/O complete,if we are not in hibernation mode(!@sc->hibernation_mode) AND
+                          we have scanned something AND current @priority is less than 10.
+                          /* invoke congestion_wait(BLK_RW_ASYNC, HZ / 10) */
+                  }
+                  when the for-cycle stopped,we check @all_unreclaimable of @sc,if it is FALSE AND no @mem_cgroup,
+                  set return value to @sc->nr_reclaimed. -- we exactly reclaimed something,not OOM.
+
+                  proceeding to update zones' @prev_priority member.
+                  if @priority is less than 0,that means we have traversed each priority,so the previous priority is 0.
+                  we update zone's @prev_priority through @priority,if no @mem_cgroup;otherwise,update memory cgroup's
+                  reclaim priority as instead.
+
+                  finally,make the delay work freepages end through delayacct_freepages_end().
+                  return the return value to caller. /* 0 OR number of pages been reclaimed */
