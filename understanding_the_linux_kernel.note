@@ -12411,8 +12411,13 @@ Chapter 8 : Memory Management
              * @vm_stat:
              *        zone statistics
              * @prev_priority:
-             *        holds the previous scanning priority for this zone([12, 0])
-             *        # initial is DEF_PRIORITY -- 12
+             *        holds the previous scanning priority for this zone([12, 0]),
+             *        it is defined as the scanning priority at which we achieved our
+             *        reclaim target at the previous try_to_free_pages() or balance_pgdat()
+             *        invocation.
+             *        # a measure of how much stress page reclaim is under.
+             *          drives the swappiness descision -- whether to unmap mapped pages.
+             *        # initial is DEF_PRIORITY -- 12 (the lowest)
              * @wait_table: 
              *        holding the hash table of wait queues of processes waiting
              *        for one of the pages of the zone
@@ -39069,7 +39074,7 @@ Chapter 17 : Page Frame Reclaiming
                  * @max_scan:             maximum number of pages to be scanned
                  * @zone:                 memory zone
                  * @sc:                   scanning control
-                 * @priority:             priority,determines length of queue
+                 * @priority:             priority,determines number of queues
                  * @file:                 forcus on file pages?
                  * return:                number of reclaimed pages
                  */
@@ -39451,6 +39456,20 @@ Chapter 17 : Page Frame Reclaiming
                       */
 
             ! The invocation flow :
+
+                                           free_more_memory()
+                                                |
+                                                |
+                                                V
+                do_try_to_free_pages() <-- try_to_free_pages() <-- __alloc_pages_direct_reclaim()
+                   |      |                     ^
+                   |      |                     |
+                   |      |                     +-- ...
+                   |      |
+                   |      |
+                   |      +--> shrink_slab()
+                   |
+                   V
                 shrink_zones() -> shrink_zone() -> get_scan_ratio()
                                   |           |
                                +--+           + -> nr_scan_try_batch()
@@ -39532,6 +39551,7 @@ Chapter 17 : Page Frame Reclaiming
                  * @zonelist:          zones list
                  * @order:             page order
                  * @gfp_mask:          GFP mask
+                 *                     # the GFP flags that were used for allocate memory but failed.
                  * @nodemask:          NUMA node mask
                  * return:             0 => if no pages reclaimed
                  *                     positive value => the number of pages reclaimed
@@ -39588,6 +39608,13 @@ Chapter 17 : Page Frame Reclaiming
                   have to accumulate reclaimable pages of them.this is done by retrieve reclaimable pages
                   of current zone via zone_reclaimable_pages(),and accumulate them in local variable
                   @lru_pages.for zone that is not allowed hardwall with GFP_KERNEL,we skip it.
+                  /* reclaimable pages :
+                   *   active file pages
+                   *   inactive file pages
+                   *   if @nr_swap_pages > 0
+                   *     active anon pages
+                   *     inactive anon pages
+                   */
 
                   make use of a for-cycle to traverse each priority in range [DEF_PRIORITY, 0] {
                           /* for current @priority */
@@ -39603,6 +39630,11 @@ Chapter 17 : Page Frame Reclaiming
                                   invoke shrink_slab(),pass it @sc->nr_scanned, @sc->gfp_mask, @lru_pages as
                                   parameters.
                                   if @current has @reclaim_state,then
+                                          /* when we entered the slow path of __alloc_pages() the __alloc_pages_direct_reclaim(),
+                                           * @current task's @reclaim_state member is set to a local object's address.
+                                           * next,try_to_free_pages() is invoked.
+                                           */
+
                                           let @sc->nr_reclaimed += @reclaim_state->reclaimed_slab
                                           reset @reclaim_state->reclaimed_slab to 0
 
@@ -39618,7 +39650,9 @@ Chapter 17 : Page Frame Reclaiming
 
                           update local variable @writeback_threshold,set it to
                             @sc->nr_to_reclaim + @sc->nr_to_reclaim / 2
+                            /* 32 + 32 / 2 = 48 */
                           we have to trigger writeback task if @total_scanned is greater than @writeback_threshold.
+                                                                              /* at least 49 scanned > 48 */
                           /* rely on wakeup_flusher_threads(@laptop_mode ? 0 : @total_scanned).
                            * after we kick writeback,set @sc->may_writepage to 1.
                            *
@@ -39627,7 +39661,7 @@ Chapter 17 : Page Frame Reclaiming
 
                                      /* triggered by wakeup_flusher_threads() */
                           we have to wait I/O complete,if we are not in hibernation mode(!@sc->hibernation_mode) AND
-                          we have scanned something AND current @priority is less than 10.
+                          we have scanned something AND current @priority is less than 10 -- starting from the fourth iteration.
                           /* invoke congestion_wait(BLK_RW_ASYNC, HZ / 10) */
                   }
                   when the for-cycle stopped,we check @all_unreclaimable of @sc,if it is FALSE AND no @mem_cgroup,
@@ -39638,5 +39672,65 @@ Chapter 17 : Page Frame Reclaiming
                   we update zone's @prev_priority through @priority,if no @mem_cgroup;otherwise,update memory cgroup's
                   reclaim priority as instead.
 
-                  finally,make the delay work freepages end through delayacct_freepages_end().
+                  finally,make the delay work freepages accounting end through delayacct_freepages_end().
                   return the return value to caller. /* 0 OR number of pages been reclaimed */
+
+            The shrink_zones() function :
+              this function is in the direct reclaim path,for page-allocating processes.
+              we only try to reclaim pages from zones which will satisfy the caller's allocation request.
+
+              reclaim even if that zone is over high_wmark_pages(@zone),
+              reasons :
+                1> the caller may be trying to free "extra" pages to satisfy a high-order allocation.
+                2> or the target zone may be at high_wmark_pages(@zone) but the lower zones must go
+                   "over" high_wmark_pages(@lower_zone) to satisfy the "incremental min" zone defense
+                   algorithm.
+                
+              ! zone is deemed to be full of pinned pages,process a light scan then give up on it.
+
+              <mm/vmscan.c>
+                /**
+                 * shrink_zones - shrink_zone() on each zone which satisfied conditions in a given list
+                 * @priority:     priority
+                 * @zonelist:     zones
+                 * @sc:           scanning contorl
+                 */
+                static void shrink_zones(int priority, struct zonelist *zonelist, struct scan_control *sc);
+
+                brief description for shrink_zones() :
+                  for each zone in @zonelist below specified zone idx that belongs to specified NUMA node(@sc->nodemask),
+                  we may invoke shrink_zone() on it.
+                  the iteration rely on for_each_zone_zonelist_nodemask(),the high zone idx is get by call gfp_zone()
+                  on @sc->gfp_mask,same as free_more_memory(),and the nodemask is stored in @sc->nodemask.
+                  we can invoke shrink_zone() on the @zone if it satisfied these conditions :
+                    @zone is not populated. /* populated => @zone->present_pages is _zero_ -- no pages */
+                    the case1 no @mem_cgroup :
+                      @zone is allowed hardwall with GFP_KERNEL flag.
+                      /* rely on cpuset_zone_allowed_hardwall().
+                       * the static function is defined in <linux/cpuset.h>,and which is
+                       * call to "__cpuset_node_allowed_hardwall(NUMA ID of @zone, GFP flag)".
+                       * function __cpuset_node_allowed_hardwall(@node, @gfp_flag) is defined in <kernel/cpuset.c>,
+                       * this function is used to test whether we can allocate on a memory node.
+                       * it is allowed if (OR)
+                       *   in interrupt context
+                       *   at "this" NUMA node -- @gfp_flag & __GFP_THISNODE
+                       *   current NUMA node is in @current->mems_allowed -- @current can use memory in this node
+                       *   TIF_MEMDIE is set in thread flag (been OOM killed)
+                       */
+
+                      @zone->all_unreclaimable is not 1 OR current @priority is DEF_PRIORITY(lowest priority).
+                    the case2 has @mem_cgroup:
+                      no more conditions,just need to note reclaim priority on the @mem_cgroup with current @priority.
+                                              /* similar to note_zone_scanning_priority(),but operates on memory cgroup */
+
+                  if we can call to shrink_zone() at least one zone,@sc->all_unreclaimable is set to 0.
+
+                  ! this function will invoke note_zone_scanning_priority() on the zone with @priority in case1,if
+                    cpuset hardwall is passed.
+                    about note_zone_scanning_priority(),it is a static function with void return.
+                    it set @zone->prev_priority to current @priority if @prev_priority is greater than or equal to
+                    this time's.
+                    /* this is done so that when the next process comes in to scan this zone,it will immediately start
+                     * out at this priority level rather than having to build up its own scanning priority.
+                     *                                                               # priority: 12 --> 0
+                     */
