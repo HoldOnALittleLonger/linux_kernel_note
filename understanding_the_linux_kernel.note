@@ -12418,6 +12418,10 @@ Chapter 8 : Memory Management
              *        # a measure of how much stress page reclaim is under.
              *          drives the swappiness descision -- whether to unmap mapped pages.
              *        # initial is DEF_PRIORITY -- 12 (the lowest)
+             * @inactive_ratio:
+             *        the target ratio of ACTIVE_ANON to INACTIVE_ANON pages on
+             *        this zone's LRU
+             *        # maintained by the pageout() code.
              * @wait_table: 
              *        holding the hash table of wait queues of processes waiting
              *        for one of the pages of the zone
@@ -12468,6 +12472,7 @@ Chapter 8 : Memory Management
                     atomic_long_t vm_stat[NR_VM_ZONE_STAT_ITEMS];
 
                     int prev_priority;
+                    unsigned int inactive_ratio;
 
                     ...
 
@@ -38937,8 +38942,8 @@ Chapter 17 : Page Frame Reclaiming
                  * isolate_lru_pages - scan and isolate pages from zone LRU lists to destination list
                  * @nr_to_scan:        number of pages have to be scanned
                  * @src:               list to scan
-                 * @dst:               list to store pages
-                 * @scanned:           number of scanned pages
+                 * @dst:               list to store isolated pages
+                 * @scanned:           store the number of scanned pages
                  * @order:             page's order for buddy system
                  * @mode:              isolate mode
                  * @file:              file pages(1) or anonymous pages(0)
@@ -39006,7 +39011,7 @@ Chapter 17 : Page Frame Reclaiming
                      /* this is done by get_reclaim_stat(@zone, @sc). */
                   2> invoke lru_add_drain(),this routine is defined in <mm/swap.c>.it flush LRU pagevec of current
                      CPU.
-                     acquire @lru_lock of @zone.
+                     acquire @lru_lock of @zone.     /* real moved */
                      invoke @sc->isolate_pages(),the return value stored in local variable @nr_taken,
                      number of scanned pages stored in local variable @pgscanned,the @dst list is @l_hold,
                      mode is ISOLATE_ACTIVE,@active is 1.
@@ -39131,6 +39136,7 @@ Chapter 17 : Page Frame Reclaiming
                              and if we are kswapd,count zone VM event PGSCAN_KSWAPD on @zone with number @nr_scan;
                              otherwise,count zone VM event PGSCAN_DIRECT.
                 
+                             /* shrink_inactive_list() need to isolate pages from inactive list to free pages list */
                              if @nr_taken is _zero_,that means we have moved nothing,so goto label "done".
 
                              invoke clear_active_flags() on @page_list,@count as the second parameter passed to it.
@@ -39151,7 +39157,7 @@ Chapter 17 : Page Frame Reclaiming
                              release @lru_lock and enable local IRQ.
                     
                              let @nr_scanned += @nr_scan. /* update recorder */
-
+                                                                                     /* we do not want to wait I/O complete */
                              invoke shrink_page_list() on @page_list,pass it @sc and PAGEOUT_IO_ASYNC as the second and
                              the third parameters.result is stored in local variable @nr_freed.
                              /* this routine handles the real page reclaiming,only pages have passed some checkings can
@@ -39184,20 +39190,32 @@ Chapter 17 : Page Frame Reclaiming
                              acquire @lru_lock.
                         
                              make use of a while-cyle,stop condition is @page_list become empty {
-                                     for each page remained in @page_list -
+                                     /* for each page remained in @page_list - */
 
                                      /* release @lru_lock and acquire again */
                                      /* local IRQ enable and disable again */
                                      page is not evictable,putback it to @zone's LRU list.
                                                            /* do not modify @recent_rotated */
+                                     /**
+                                      * rely on function page_evictable(@page, @vma),defined in the same file.
+                                      * page might not be evictable -
+                                      *   1> page's mapping marked unevictable -- AS_UNEVICTABLE
+                                      *   2> page is part of an mlocked VMA
+                                      *
+                                      * in function shrink_inactive_list(),@vma is NULL,thus,if @page's mapping
+                                      * is not evictable,then this @page is not evictable.
+                                      */
                                                         
                                      page is evictable but have not freed by shrink_page_list(),
+                                                                /* shrink_page_list() might activated it */
                                      set PG_lru for it,add it to the @zone's LRU list corresponding to its LRU type.
                                      update the relative @recent_rotated counter of @zone because we re-linked current page.
                                                 /* file or anon => is_file_lru() */
                                      put it in to @pvec,and when @pvec is full,release @lru_lock,invoke __page_release()
-                                     on the @pvec to free these pages then acquire @lru_lock again.
-                                     /* local IRQ enable and disable again */
+                                     on the @pvec to free these pages then acquire @lru_lock again. /* local IRQ enable and disable again */
+                                                /* __page_release() invoke release_pages(),if the page's @_count fell to 0,
+                                                 * it would be freed even PG_active is set on it -- set by shrink_page_list()
+                                                 */
                              }
 
                              modify @zone's page state NR_IOSLATED_ANON and NR_ISOLATED_FILE,the corresponding deltas are
@@ -39211,7 +39229,7 @@ Chapter 17 : Page Frame Reclaiming
 
                   ! @sc->nr_scanned is updated in shrink_page_list().
                   ! pages are freeable in shrink_page_list() : /* these page freed in this function through __pagevec_free() */
-                      if the page - (AND)
+                      if the page passed these tests -
                         /* may_enter_fs => __GFP_FS in @sc OR (page is swap cache AND __GFP_IO in @sc) */
                                                  /* ^@gfp_mask member */
                         it can be locked
@@ -39222,14 +39240,22 @@ Chapter 17 : Page Frame Reclaiming
                                 @may_unmap is FALSE AND it is mapped -> keep in list
                         it is not in writeback status
                                 in writeback status but PAGEOUT_IO_SYNC is not specified OR !@may_enter_fs -> keep in list
+                                                                   /* we do not wait writeback,caller should check it again later */
+                                in writeback status and PAGEOUT_IO_SYNC is specified AND @may_enter_fs is TRUE -> wait writeback
+                                                                   /* continue to the remaining tests after writeback finished */
                         page_check_references() on it returned PAGEREF_RECLAIM or PAGEREF_RECLAIM_CLEAN
                                 PAGEREF_KEEP -> keep in list
+                                PAGEREF_ACTIVATE -> activate it
                         it is anonymous page but swappable OR anonymous page and been swapped out OR not anonymous page
                                 anonymous page and have not swapped out
                                         no __GFP_IO in @sc -> keep in list
-                        it is mapped but try_to_unmap() returned SWAP_SUCCESS /* User Mode process referenced to it */
-                                SWAP_AGAIN -> keep in list
-                                SWAP_MLOCK -> putback LRU
+                                anonymous page and have not swapped out AND has __GFP_IO in @sc
+                                        try to add the page to swap
+                                                failed -> activate it
+                        it is mapped and its mapping is not NULL,try_to_unmap() on it returned SWAP_SUCCESS /* User Mode process referenced to it */
+                                try_to_unmap() returned SWAP_FAIL  -> activate it
+                                try_to_unmap() returned SWAP_AGAIN -> keep in list
+                                try_to_unmap() returned SWAP_MLOCK -> putback LRU
                         it is not dirty OR "dirty but pageout() returned PAGE_CLEAN or (PAGE_SUCCESS AND it is no longer dirty and
                         in writeback status)"
                                 dirty
@@ -39237,6 +39263,7 @@ Chapter 17 : Page Frame Reclaiming
                                         !@may_enter_fs -> keep in list
                                         !@sc->may_writepage -> keep in list /* page is dirty,but we can not writeback it */
                                         PAGE_KEEP returned by pageout() -> keep in list
+                                        PAGE_ACTIVATE returned by pageout() -> activate it
                                         PAGE_SUCCESS
                                                 but page stay in writeback OR stay in dirty status -> keep in list
                                                 try to lock page failed -> keep in list
@@ -39248,6 +39275,19 @@ Chapter 17 : Page Frame Reclaiming
                              * address space (page_count() == 1) it can be freed.
                              * otherwise,leave the page on the LRU so it is swappable.
                              */
+                            page has private -- buffer page
+                                    try_to_release_page() on it failed -> activate it
+                                    try_to_release_page() on it succeed,its mapping is NULL and its @_count is 1
+                                            we unlock it -- because we locked after get it from @page_list,
+                                            and put its counter,if @_count become _zero_,we can free it -> add it to free list
+                                                    its @_count is not become _zero_ -> just increase @nr_reclaimed and skip it
+                                                    /* rare race with speculative reference.
+                                                     * the speculative reference will free this page shortly,
+                                                     * so we may increment @nr_reclaimed,and leave it off the LRU
+                                                     */
+                                    otherwise -> continue to next test
+                                                                   |
+                                                                   V
                         it has mapping but we succeed to remove mapping for it via __remove_mapping()
                            /* page cache page OR swap cache,and @_count is not 1 */
                            /* for swap cache,__delete_from_swap_cache() is called by __remove_mapping().
@@ -39263,6 +39303,43 @@ Chapter 17 : Page Frame Reclaiming
                                     *                      for other purpose.
                                     *                      it is not User Mode page.
                                     */
+
+                    !! add to free list -
+                               increase @nr_reclaimed
+                               add it to page vector stored freeable pages /* if the vector is full,we need to free pages and
+                                                                            * reinit the vector.
+                                                                            */
+                               /* each freeable page is found in the loop,these operations would be done on it.
+                                * before function return,if this page vector is not empty,shrink_page_list()
+                                * must free pages in the vector.
+                                */
+                               /* in this case,the page is no longer in @page_list */
+
+                    !! keep in list -
+                               keep in @page_list
+                                
+                    !! putback LRU -
+                               because the page is mlocked or its mapping is AS_UNEVICTABLE
+                               /* in this case,the page is no longer in @page_list,rather in the right LRU list */
+
+                    !! activate it -
+                               if the page is swap cache AND swap is full -> invoke try_to_free_swap() on the page
+                               next,activate it -- set PG_active /* it is a VM BUG if the page been PG_active */
+                               increase accounting about page activate,because we need to count a VM event PGACTIVATE
+                               before we return to caller.
+                               /* in this case,the page will be remained in @page_list */
+
+                    !! try_to_free_swap() IS CALLED BEFORE WE PUT THE PAGE BACK TO THE APPROPRIATE LRU LIST,OR BEFORE
+                       WE ACTIVATE IT.
+
+                    !! @sc->nr_scanned IS INCREASED IN THE SEACH LOOP,IT RIGHT AFTER WE LOCKED THE PAGE.
+                       AND,IF THE PAGE IS MAPPED OR IT IS A SWAP CACHE,WE NEED TO INCREASE IT AGAIN FOR
+                       DOUBLE THE SLAB PRESSURE.
+                    !! AT THE BEGINNING OF SEARCH LOOP OF @page_list,shrink_page_list() WILL CHECK KERNEL PREEMPT.
+                       # STOP CONDITION OF THE LOOP IS @page_list BECOME EMPTY.
+                       # THIS FUNCTION RETURN THE NUMBER OF PAGE HAVE BEEN RECLAIMED -- @nr_reclaimed(default is 0).
+                    !! FOR PAGES IN THE FREE LIST IN shrink_page_list(),THEY WILL BE FREED BY shrink_page_list().
+                       FOR PAGES IN THE ORIGINAL LIST,THE CALLER OF shrink_page_list() HAVE TO TAKE CARE OF THEM.
 
             The get_scan_ratio() function :
               this function is used to determine how many pages in a given memory zone have to be scanned in PFRA.
@@ -39374,11 +39451,16 @@ Chapter 17 : Page Frame Reclaiming
                              @percent[1] to 100 - we forcus on file pages.
                      otherwise,we must invoke get_scan_ratio() to calculate scanning percentages.
                   2> for_each_evictable_lru(@l) /* active,inactive anon/file */ {
-                             get current pages in @zone that corresponding to current @l -- the LRU list type.
+                             get current number of pages in @zone that corresponding to current @l -- the LRU list type.
                              /* by invoke zone_nr_lru_pages(),result stored in local variable @scan */
-                             if @priority is not _zero_ OR no swap - @may_swap is 0 OR no swap space,
+
+                             if @priority is not _zero_(not highest priority) OR
+                                (no swap -- @may_swap is 0 OR can swap but no swap space),
                              then
-                                     /* if we have lower priority,then we will scan more pages */
+                                     /* if we have higher priority,then we will scan more pages.
+                                      * DEF_PRIORITY 12 -- lowest,0 -- highest.
+                                      */
+
                                      let @scan -- the number of pages on current LRU list /= @priority
                                      let @scan := @scan * percent[anon/file] / 100
                                                                  #^depends on current @l
@@ -39401,7 +39483,9 @@ Chapter 17 : Page Frame Reclaiming
                      }
                   3> make use of a while-cycle,the stop condition is @nr[LRU_INACTIVE_ANON] is 0 AND
                      @nr[LRU_ACTIVE_FILE] is 0 AND @nr[LRU_INACTIVE_FILE] is 0 {
-                     /* @nr[] store scanning numbers */
+                     /* @nr[] store scanning numbers.
+                      * if the value is 0,we will skip the corresponding LRU list.
+                      */
 
                      /* the reason why do not wait @nr[LRU_ACTIVE_ANON] become _zero_ :
                       *         Linux is a multiple tasks operating system,there must be a lot of active
@@ -39417,7 +39501,7 @@ Chapter 17 : Page Frame Reclaiming
                                      @nr[@l] and SWAP_CLUSTER_MAX.
                                      /* this means we scan at mostly SWAP_CLUSTER_MAX pages in a round */
                                      update @nr[@l],let it -= @nr_to_scan.
-                                     invoke shrink_list(),pass it @l, @nr_to_scan, @zone, @sc, @priority as
+                                     invoke "shrink_list()",pass it @l, @nr_to_scan, @zone, @sc, @priority as
                                      parameters,store the result in local variable @nr_reclaimed.
                                      /* this routine will call to one of either shrink_active_list() or
                                       * shrink_inactive_list().
@@ -39427,9 +39511,16 @@ Chapter 17 : Page Frame Reclaiming
                                       * otherwise,return to caller by call to shrink_inactive_list().
                                       * this routine will free some pages on the inactive list,return the number
                                       * of pages have reclaimed.
+                                      * # if @l is file LRU,it call to these two functions with @file = 1.
                                       *
                                       * inactive list is not low => free some pages on it
                                       * inactive list is low     => refill it with some pages been on active list
+                                      * 
+                                      * # no memory cgroup case.
+                                      * inactive file page is low -
+                                      *   number of active file pages is greater than number of inactive file pages
+                                      * inactive anon page is low -
+                                      *   number of inactive anon pages * @zone->inactive_ratio is less than number of active anon pages
                                       */
                              }
 
@@ -39441,6 +39532,9 @@ Chapter 17 : Page Frame Reclaiming
                      }
                   4> the while-cycle in step 3> stopped,because we reclaimed enough pages OR all pages to scan counter
                      have reached _zero_.
+                     /* rarely happens when User Mode processes have no page frames allocated,
+                      * then no shrink_list() is invoked at step 3> .
+                      */
                      so we update @sc->nr_reclaimed to @nr_reclaimed.
                   5> check if inactive anon LRU list is low AND @nr_swap_pages > 0 - free swaphandles is not 0,
                      then we invoke shrink_active_list() on @zone with SWAP_CLUSTER_MAX as the number of pages going to be
