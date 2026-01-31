@@ -12189,6 +12189,10 @@ Chapter 8 : Memory Management
                       PG_swapcache,             /* swap page: swp_entry_t in private */
                       PG_mappedtodisk,          /* has blocks allocated on-disk */
                       PG_reclaim,               /* to be reclaimed asap */
+                                                /* PG_readahead is defined as PG_reclaim.
+                                                 * PG_readahead is only used for file reads,
+                                                 * PG_reclaim is only for writes
+                                                 */
                       PG_buddy,                 /* page is free,on buddy lists */
                       PG_swapbacked,            /* page is backed by RAM/swap */
                       PG_unevicatable,          /* page is "unevictable" */
@@ -34833,6 +34837,7 @@ Chapter 16 : Accessing Files
                                                       * owned by the mapping.
                                                       */
             reset @current's backing_dev_info to the mapping's backing_dev_info of that inode.
+                  /* this will be test by PFRA for determines whether we are doing __generic_file_aio_write() */
             invoke generic_write_checks(). /* this routine can adjust writing position or amount of
                                             * bytes to write.return 0 if passed checkings,or error code
                                             * if failed
@@ -39828,3 +39833,108 @@ Chapter 17 : Page Frame Reclaiming
                      * out at this priority level rather than having to build up its own scanning priority.
                      *                                                               # priority: 12 --> 0
                      */
+
+            The pageout() function :
+              this routine is called by shrink_page_list() when a dirty page must be written to disk.
+              and this routine returns a enumerator to describe how to deal with the page passed to it.
+
+              <vmscan.c>
+                /* enumerators for pageout() */
+                typedef enum {  
+                        PAGE_KEEP,          /* failed to write page out,page is locked */
+                        PAGE_ACTIVATE,      /* move page to the active list,page is locked */      # unlocked by writepage
+                        PAGE_SUCCESS,       /* page has been sent to the disk successfully,page is unlocked */
+                        PAGE_CLEAN,         /* page is clean and locked */
+                } pageout_t;
+
+                enum pageout_io {
+                        PAGEOUT_IO_ASYNC,   /* tell pageout() do not wait I/O complete */
+                        PAGEOUT_IO_SYNC,    /* tell pageout() wait I/O complete */
+                };
+
+                /**
+                 * pageout - write page back to disk through address_space_operation's writepage method 
+                 * @page:    the page
+                 * @mapping: page cache of @page
+                 * @sync_writeback:
+                 *           whether wait for I/O complete
+                 * return:   pageout_t enumerator
+                 * # if the page is dirty,only perform writeback if that write will be non-blocking.
+                 *   if this process is currently in __generic_file_aio_write() against this page's queue,
+                 *   we can perform writeback even if that will block.
+                 *   if the page is swapcache,write it back even if that would block,for some throttling.
+                 */
+                static pageout_t pageout(struct page *page, struct address_space *mapping, enum pageout_io sync_writeback);
+
+                description for pageout() :
+                  check is @page a freeable page cache page,this rely on is_page_cache_freeable() which is defined in
+                  the same file.if this @page is not a freeable page cache page or a freeable swap cache page,return PAGE_KEEP.
+                  /* test @page->@_count - page_has_private(@page) == 2
+                   * a freeable page cache page is referenced only by the caller that isolated the page,
+                   * the page cache radix tree and optional buffer heads at @page-private.
+                   * suppose page_referenced() on @page is _zero_.
+                   * __isolate_lru_page() get it once.
+                   * page cache / swap cache get it once.
+                   * if page_has_private() is TRUE,that means this page is used by a buffer,in this case,
+                   * 2 - 1 == 1.
+                   * otherwise, 2 - 0 == 2.
+                   */
+                  next,test @mapping,if it is NULL,then
+                          test whether is has private data.
+                          if @mapping is NULL,but it has private data,then we need to free buffers on it.
+                          /* some data journaling orphaned pages can have @mapping is NULL. */
+                          so,try_to_free_buffers() on it,if succeed,clear PG_dirty and report kernel msg,
+                          return PAGE_CLEAN to caller.
+                          otherwise,we failed,return PAGE_KEEP to caller.
+                  because we need call to writepage() method of mapping,so it must been implemented,otherwise,
+                  return PAGE_ACTIVATE.
+                  invoke may_write_to_queue() on @mapping's BDI,if result is FALSE,return PAGE_KEEP.
+                  /* this function is used to check whether we can put this writeback to current BDI queue.
+                   * if @current->flags set PF_SWAPWRITE,that means this process is allowed to do swap write,so
+                   * we can writeback this @page. # kswapd and BDI threads always can issue write request.
+                   * if the BDI is not write congested,we also can writeback it. # normal process.
+                   * if @mapping's BDI is equal to @current's @backing_dev_info,that means this process is
+                   * in __generic_file_aio_write(),so we can writeback it. # congested,but we are in file write path.
+                   * other case,we can not writeback it,return FALSE to caller.
+                   */
+                  invoke clear_page_dirty_for_io() on @page,this routine is defined in <mm/page-writeback.c>.
+                  this routine clear PG_dirty on a given page,and return the old state to caller.
+                    /* this routine also clear PG_reclaim on the page */
+                  if it returned FLASE,that means the page is not dirty,so we do not need to writeback it,just
+                  return PAGE_CLEAN to caller.                  
+                  if it returned 1,then
+                          we need to writeback this page.
+                          so,initialize a local writeback_control object @wbc = {
+                                  .sync_mode = WB_SYNC_NONE,
+                                  .nr_to_write = SWAP_CLUSTER_MAX, /* because we want to reclaim such much pages */
+                                  .range_start = 0,
+                                  .range_end = LLONG_MAX,
+                                  .nonblocking = 1,                /* async */
+                                  .for_reclaim = 1,                /* PFRA request */
+                          }
+                          set PG_reclaim on @page again.
+                          invoke writepage() method of @mapping.
+                          if result is less than 0,that mean we have encountered a matter,so,need to invoke
+                          handle_write_error(),pass it @mapping, @page, and the result.
+                          next,check whether result is AOP_WRITEPAGE_ACTIVATE,if it is the case,we clear PG_reclaim
+                          on it,and return PAGE_ACTIVATE to caller.
+                                /* AOP_WRITEPAGE_ACTIVATE - inform caller page writeback has completed,but it still
+                                 * locked,and should be considered active.
+                                 */
+
+                          we have issued writeback,so check current status of @page,if it is PG_writeback AND caller
+                          specified PAGEOUT_IO_SYNC -- wait I/O complete,then we need call to wait_on_page_writeback()
+                          to wait I/O.
+
+                                                                                 /* PG_reclaim for writes */
+                          proceeding test PG_writeback,if the flag is clear,then we clear PG_reclaim on it.
+                          /* if we did wait_on_page_writeback() on it,PG_writeback must been cleared,and we
+                           * are woken up by mpage_end_io_write() -- usually case.
+                           * if we do not wait I/O,and the page still in PG_writeback,the flag should be
+                           * cleared in a short future,because writeback() succeed,the page should have been added into
+                           * a BIO for writeback,so mpage_end_io_write() will clear it.
+                           */
+
+                          increase 1 to the page's zone's vm_stat counter NR_VMSSCAN_WRITE.
+                          return PAGE_SUCCESS to caller.
+
