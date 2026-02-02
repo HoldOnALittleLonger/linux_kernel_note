@@ -6708,6 +6708,7 @@ Chapter 5 : Kernel Synchronization
               atomic_dec(v)                 ->       --*v
               atomic_dec_and_test(v)        ->       return (--*v) ? 0 : 1
               atomic_inc_and_test(v)        ->       return (++*v) ? 0 : 1
+              atomic_dec_and_lock(v, l)     ->       return (--*v) ? 0, no lock @l : 1,lock @l
               atomic_add_negative(i, v)     ->       return ((*v += @i) < 0) ? 1 : 0
               atomic_inc_return(v)          ->       return ++*v
               atomic_dec_return(v)          ->       return --*v
@@ -38330,7 +38331,7 @@ Chapter 17 : Page Frame Reclaiming
                                               * to the @max_nl_cursor.
                                               */
                              }
-                             check kernel preempt,but acquire @i_mmap_lock of @mapping.
+                             check kernel preempt,drop @i_mmap_lock of @mapping and acquire again.
                              update @max_nl_cursor,let it add CLUSTER_SIZE. /* the maximum cursor we have reached */
                                /* note,this updating is happens after we traversed all elements on the list,
                                 * so the next traversing(if have),virtual scanning will scan larger chunk of memory.
@@ -39937,4 +39938,315 @@ Chapter 17 : Page Frame Reclaiming
 
                           increase 1 to the page's zone's vm_stat counter NR_VMSSCAN_WRITE.
                           return PAGE_SUCCESS to caller.
+
+          Reclaiming Pages of Shrinkable Disk Caches :
+            PFRA will check whether the disk caches such dentry caches and inode caches can be shrunk.
+            every disk cache that is considered by the PFRA must have a "shrinker function" registered at
+            initialization time.
+            shrinker function is usually is embedded in a structure named shrinker,which describe a disk cache
+            shrinker.
+
+            <linux/mm.h>
+              /**
+               * shrinker - a disk cache shrinker
+               * @shrink:   callback used by PFRA to shrink disk cache
+               *            # @nr_to_scan:    number of page frames have to be scanned
+               *              @gfp_mask:      GFP allocation flags
+               * @seeks:    seeks to recreate an object
+               *            # indicate how much it costs to re-create one item of the cache once it is removed
+               * @list:     list connector used to link a registered shrinker into the global list
+               *            @shrinker_list
+               * @nr:       number of objects pending delete
+               */
+              struct shrinker {
+                      int (*shrink)(int nr_to_scan, gfp_t gfp_mask);
+                      int seeks;
+                      struct list_head list;
+                      long nr;
+              };
+
+              #define DEFAULT_SEEKS 2 /* a good number if dont know better */
+
+            <mm/vmscan.c>
+              /* the global shrinker list */
+              static LIST_HEAD(shrinker_list);
+             
+              /* @shrinker_list protection */
+              static DECLARE_RWSEM(shrinker_rwsem);
+
+              /**
+               * register_shrinker - add @shrinker to the tail of @shrinker_list,@shrinker->nr is set to 0
+               * # EXPORT_SYMBOL
+               * # Write Operation
+               */
+              void register_shrinker(struct shrinker *shrinker);
+
+              /**
+               * unregister_shrinker - just unlink @shrinker from @shrinker_list only
+               * # EXPORT_SYMBOL
+               * # Write Operation
+               */
+              void unregister_shrinker(struct shrinker *shrinker);
+
+            !! IN LINUX 2.6.11,BESIDES THE DENTRY CACHE AND THE INODE CACHE,ONLY THE DISK QUOTA LAYER,THE FILESYSTEM
+               META INFORMATION BLOCK CACHE,AND THE XFS JOURNALING FILESYSTEM REGISTER SHRINKER FUNCTIONS.
+               # LINUX 2.6.34.1: ADD GFS2, NFS, UBIFS, SUNRPC
+
+            PFRA function shrink_slab() handles shrink disk caches,and except disk caches,it also has little to do
+            with the slab allocator caches.
+            shrink_slab() tries to balance the cost of reclaiming from shrinkable disk cache with the cost of
+            reclaiming from the LRU list -- performed by shrink_list().
+            essentially,this function walks the @list in the shrinker descriptors to invoke the shrinker functions,
+            and get the total number of reclaimable pages in the disk caches.
+
+            <mm/vmscan.c>
+              #define SHRINK_BATCH 128 /* batch handling for shrinkable caches */
+
+              /**
+               * shrink_slab - call the shrink functions to age shrinkable caches
+               * @scanned:     number of page frames been scanned
+               * @gfp_mask:    GFP flags
+               * @lru_pages:   number of pages in LRU lists of all the zones which are eligible for
+               *               the caller's allocation attempt
+               * return:       number of slab objects which we shrunk
+               * # if the VM encountered mapped pages on the LRU,it increase the pressure on slab to
+               *   avoid swapping.
+               * # we assume it costs one seek to replace a lru page and that it also takes a seek to
+               *   recreate a cache object.with this,we age equal percentages of the lru and ageable caches.
+               *   this should balance the seeks generated by these structures.
+               */
+              unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask, unsigned long lru_pages);
+
+              description for shrink_slab() :
+                the main work is traverse @shrinker_list,but before this,we need to test something.
+                if @scanned is _zero_,we return SWAP_CLUSTER_MAX -- do not balance them.
+                before we traverse @shrinker_list,we need READ semaphore @shrinker_rwsem,so we try to
+                get it,return 1 if failed -- assume we will be able to shrink next time.
+                @shrinker_list traversing {
+                        /* @shrinker: current shrinker */
+                        invoke @shrink(0, @gfp_mask) of @shrinker,result stored in @max_pass,a local variable.
+                                                                  /* number of entries current remaining */
+                        calculate delta of @shrinker->nr -                                     #^unused
+                                delta := 4 * @scanned / @shrinker->seeks
+                                delta *= @max_pass
+                                delta /= (@lru_pages + 1) /* rely on do_div(),but we do not use remainder */
+                                /* suppose @lru_pages is 512
+                                 *         @scanned   is SWAP_CLUSTER_MAX
+                                 *         @max_pass  is 16
+                                 * @delta is
+                                 *         4 * 32 = 128
+                                 *         128 * 16 = 2048
+                                 *         2048 /= (512 + 1)
+                                 *         3
+                                 * for newly registered shrinker,@nr is 0.
+                                 * so the @shrinker->nr is 3.
+                                 * we need to batch it.
+                                 */
+
+                        update @shrinker->nr,let it += @delta.
+                        if @nr become a negative value,we report this and reset it to @max_pass.
+
+                        /* avoid risking looping forever due to too large @nr value,never try to free more than
+                         * twice the estimate number of freeable entries.
+                         */
+                        let @nr := @max_pass * 2,if @nr is greater than @max_pass * 2.
+
+                        /* @nr stores the number object pending delete,we batch them */
+                        set local variable @total_scan to @shrinker->nr,and reset @shrinker->nr to 0.
+
+                        make use a nested while-cycle,stop condition is @total_scan less than SHRINK_BATCH {
+                                /* this means we accumulate objects until the total number is reached SHRINK_BATCH,
+                                 * and delay the real freeing.
+                                 */
+
+                                first,invoke @shrinker->shrink(),pass 0 as its first parameter,this will let this
+                                method returns number of current remaining entries.
+                                next,invoke the method again,but pass it SHRINK_BATCH as the first parameter,it returns
+                                number of current remaining entries -- unused.
+                                /* because,we passed a positive value to the method,this will trigger shrinking */
+                                we check result,because we have tried to free 128 objects in the cache.
+                                        result is -1 => break,we freed nothing.
+                                        /* bad GFP flags,for dcache,no __GFP_FS -- shrink a dentry may trigger an operation
+                                         * on a disk-based filesystems.
+                                         */
+                                        result less than before => we freed something,we update local variable @ret,
+                                                                   it is the return value used to accumulate the number
+                                                                   of shrunk objects.
+                                count VM events SLABS_SCANNED,number is SHRINK_BATCH.
+                                update @total_scan,let it -= SHRINK_BATCH.
+                            
+                                check kernel preempt.
+                        }
+                        we let @shrinker->nr += @total_scan.if we did batch handling,@total_scan should been updated in the
+                        nested cycle,if we exactly freed something;or unchanged,because the first shrinking returned -1.
+                        /* if we skipped this @shrinker because the disk cache is not enough for shrinking,we can accumulate
+                         * the pending delete objects in @nr member,and we can shrink this cache at next time enter shrink_slab().
+                         */
+                }
+
+                finally,release semaphore and return @ret to caller.
+
+            Reclaiming page frames from the dentry cache :
+              dentry cache registered shrinker @dcache_shrinker,which is defined in <fs/dcache.c>.
+              <fs/dcache.c>
+                static struct shrinker dcache_shrinker = {
+                        .shrink = shrink_dcache_memory, /* callback */
+                        .seeks = DEFAULT_SEEKS, /* 2 */
+                };
+
+              so,PFRA invoke shrink_dcache_memory() when handling dentry cache.
+              this callback is very simple :
+                if @nr is not _zero_,check @gfp_mask to determine whether the zone of this cache is
+                suit for allocation attempt.
+                bad => return -1 -- no __GFP_FS
+                good => invoke prune_dcache() with @nr
+                return the number of the remaining unused entries in this cache.
+                /* (@dentry_stat.nr_unused / 100) * @sysctl_vfs_cache_pressure */
+                                                    #^ /proc/sys/vm/vfs_cache_pressure -- default 100
+                                                       smaller than 100 => reclaim fewer pages from the dcache(and inode cache)
+                                                       -- respect to the pages reclaimed from the LRU lists of zones
+                                                       greater than 100 => reclaim more pages from the dcache(an inode cache)
+                                                       -- respect to the pages reclaimed from the LRU lists of zones
+
+              function prune_dcache() shrink the cache rely on __shrink_dcache_sb().
+              ! dentry cache is associated with all super blocks that registered in the system.
+
+              !! UNUSED DENTRY OBJECT => THE OBJECT IS CREATED BUT NOT REFERENCED BY ANY PROCESS.
+                 WHEN A DENTRY OBJECT IS RELEASED,THE PAGES STORING THE CORRESPONDING INODE MAY
+                 BECOME UNUSED.
+
+              <fs/dcache.c>
+                /**
+                 * prune_dcache - shrink the dcache
+                 * @count:        number of entries to try to free
+                 * # called by PFRA,or when we need to unmount something(need to unuse all dentries)
+                 */
+                static void prune_dcache(int count);
+            
+                description for prune_dcache() :
+                  return with do nothing,if @dentry_stat.nr_unused is 0 OR @count is 0.
+                                            /* nothing need to be freed */
+                  lock: @dcache_lock => need when operating on dcache
+                        @sb_lock     => need when operating on super blocks
+                        @s_umount    => need when operating on the exact super block
+
+                  restart:
+                  this routine need to calculate prune ratio,if @count is greater than or equal to unused,it is 1;
+                  otherwise,it is "unused / @count".
+                  when traverse @super_blocks list,need @sb_lock,walk through super blocks via @s_list member.
+                  for current super block @sb {
+                          if it is full used -- unused dentries == 0,we have to skip it.
+                          when we decided to handle @sb,have to increase @s_count member of it.
+                                                                /* this will be decreased in __put_super_and_need_restart() */
+                          unlock @sb_lock.
+                          test @prune_ratio -
+                            != 1 => w_count is (@sb->s_nr_dentry_unused / @prune_ratio) + 1
+                            == 1 => w_count is all unused dentries -- @sb->s_nr_dentry_unused
+                                    /* local variable pass to __shrink_dcache_sb() */
+                          local variable @pruned records old value of @w_count.
+                                         /* @w_count maybe updated later */
+                          next,we need try to shrink dentries on this @sb,so try to acquire @s_umount to avoid
+                          umount.
+                                  we invoke __shrink_dcache_sb() only if
+                                          we got @s_umount for READ.
+                                          @s_root is not NULL => mounted.
+                                          @s_dentry_lru is not empty => recently accessed.
+                                  before call to this function,release @dcache_lock and acquire it again after this
+                                  function returned.
+                                  /* arguments to __shrink_dcache_sb() : @sb, &@w_count, DCACHE_REFERENCED */
+                                  use @w_count to update @pruned,let @pruned -= @w_count.
+                          release @s_umount if we got it before,acquire @sb_lock again.
+                          let @count -= @pruned.
+                          invoke __put_super_and_need_restart(),it the result is TRUE -- need restart,and @count still
+                          greather than 0 -- we have not freed so much entries,we unlock @sb_lock,and restart from
+                          calculate @prune_ratio;otherwise,we continue to next super block.
+                                 /* need restart if super block is removed -- @s_list is empty */
+                                                    # because we released @s_umount,in this case,__put_super() is called,
+                                                      and this super block will be destroyed if @s_count become 0.
+                  }
+
+                /**
+                 * __shrink_dcache_sb - shrink the dentry LRU on a given super block
+                 * @sb:                 super block
+                 * @count:              number of entries try to free
+                 * @flags:              behavior control
+                 *                      # non-zero,we need to do special processing based on
+                 *                        which flags are set,this means we dont need to maintain
+                 *                        multiple similar copies of this loop.
+                 */
+                static void __shrink_dcache_sb(struct super_block *sb, int *count, int flags);
+
+                description for __shrink_dcache_sb() :
+                  BUG tests : NULL @sb is a BUG
+                              DCACHE_REFERENCED is specified AND @count is NULL,is a BUG
+                              the dentry's @d_sb is not @sb,is a BUG
+                  locks     : @dcache_lock     => need when operating on dcache
+                              @dentry->d_lock  => need when operating on a exact dentry object
+
+                  restart:
+                  if @count is NULL,we need to unused all entries,that is use @sb->s_dentry_lru whole list.
+                  otherwise,we need to traverse @sb->s_dentry_lru,from tail to head.
+                  and for each dentry,do BUG test,acquire @d_lock,then check its @d_flags.
+                    DCACHE_REFERENCED => @flags and @d_flags of current dentry are set DCACHE_REFERENCED
+                                                 clear it for the dentry
+                                                 move it from to a local list named @referenced,connector
+                                                 is @d_lru.
+                    else              => move current dentry to a local list named @tmp,connector is @d_lru.
+                                         it is the dentry we need to free.
+                                         decrease local variable @cnt,if @count is not NULL,it is set to *@count.
+                                         when @cnt become _zero_,we need break the loop.
+                    check kernel preempt at end of this iteration,drop @dcache_lock when we are switched out,and
+                    acquire the lock again when we resumed.
+
+                  /* if we use the whole @s_dentry_lru list,@tmp is spliced from @s_dentry_lru */
+                  for list @tmp,it collects dentries will be freed {
+                          for current dentry.
+                          delete it from the list,connector is @d_lru.
+                          /* rely on dentry_lru_del_init(),this routine will adjust the super block's
+                           * @s_nr_dentry_unused and @nr_unused of @dentry_stat.
+                           * # decrease them by 1,because this dentry will be destroyed.
+                           */
+                          acquire @d_lock of it.
+                          check its @d_count,if couter is not _zero_,skip it -- it is "in-use".
+                          /* we found an "in-use" dentry which was not removed from the LRU because of
+                           * laziness during lookup,do not free it -- just keep it off the LRU list.
+                           */
+                          invoke prune_one_dentry() on it to destroy this dentry.
+                          /**
+                           * static void prune_one_dentry(*@dentry);
+                           * - throw away a dentry -- free the inode,dput the parent.
+                           *   requires that the LRU list has already been removed.
+                           *   try to prune ancestors as well.
+                           *
+                           * - __d_drop(@dentry),remove it from dcache hashtable,if it is hashed.
+                           *   d_kill(@dentry),free this dentry,and return its parent,stored in @dentry.
+                           *   acquire @dcache_lock.                           # NULL means root of the dentry tree.
+                           *   use a while-cycle,stop condition is @dentry become NULL
+                           *           # prune ancestors on path "/d0/d1/d2/d3/.../dX/@dentry" .
+                           *           atomic decrease @d_count of @dentry /* atomic_dec_and_lock(@dentry, @d_lock) */
+                           *                           # decrease @d_count,because a user -- its child is freed
+                           *           if @d_count is not become 0,return to caller -- this @dentry is "in-use"
+                           *
+                           *           # @d_count become 0,it is not "in-use"
+                           *           call to @dentry->d_op->d_delete(),if the method is implemented.
+                           *           invoke dentry_lru_del_init() on @dentry.
+                           *           __d_drop() this @dentry.
+                           *           d_kill() this @dentry,its parent stored in @dentry.
+                           *           acquire @dcache_lock
+                           */
+
+                          check kernel preempt,drop @dcache_lock and acquire again.
+                  }
+
+                  next,check whether need restart :;
+                    if @count is NULL AND @sb->s_dentry_lru is not empty,goto restart.
+                    because @count is NULL means we need "unused" all entries.
+
+                    if @count isn ot NULL,use @cnt to reset @count,because @count will be used by the caller.
+                    if local list @referenced is not empty,that means there is not referenced dentries,so we
+                    need put them back to super block via list_splice() to splice @referenced to @sb->s_dentry_lru.
+
+                  finally,release @dcache_lock,we acquired at the function beginning.
+                  
+                  
 
