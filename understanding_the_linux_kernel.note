@@ -22084,13 +22084,15 @@ Chapter 12 : The Virtual Filesystem
        /**
         * Other states :
         *   I_NEW - new inodes set I_NEW,if two processes both create the same inode,one of
-        *           them will release its inode and wait for I_NEW to be released before
+        *   (8)     them will release its inode and wait for I_NEW to be released before
         *           returning
+        *           # __I_NEW => 3, I_NEW => 1 << __I_NEW
         *   I_WILL_FREE - set when calling write_inode_now() if @i_count is _zero_,
-        *                 I_FREEING must be set when I_WILL_FREE is cleared
+        *   (16)          I_FREEING must be set when I_WILL_FREE is cleared
         *   I_FREEING - the inode is about to be freed but still has dirty pages or buffers
-        *               attached or the inode itself is still dirty
+        *   (32)        attached or the inode itself is still dirty
         *   I_CLEAR - the inode is clean and can be destroyed
+        *   (64)
         */
 
       header <linux/writeback.h> extern declared a variable named @inode_unused,it is type of
@@ -32114,7 +32116,7 @@ Chapter 15 : The Page Cache
            *   state to unused
            *   then process a SMP memory barrier through smp_mb_after_clear_bit()
            *   finally,invoke wake_up_bit() to wake up processes that waiting
-           *   for WS_USED_B of @work->state to be cleared
+           *   for WS_USED_B of @work->state is cleared
            */
           static void bdi_work_clear(struct bdi_work *work);
 
@@ -40247,6 +40249,136 @@ Chapter 17 : Page Frame Reclaiming
                     need put them back to super block via list_splice() to splice @referenced to @sb->s_dentry_lru.
 
                   finally,release @dcache_lock,we acquired at the function beginning.
+
+            Reclaiming page frames from the inode cache :
+              similar to dcache,the icache has a shrinker named @icache_shrinker,which is defined in <fs/inode.c> as
+              a static object.
+              its @shrink is shrink_icache_memory(),and its @seeks is DEFAULT_SEEKS.
+
+              function shrink_icache_memory() almost similar to shrink_dcache_memory(),it also receive two parameters.
+              one is @nr -- number of inodes to scan,another is @gfp_mask -- the GFP flags of allocation attempt;it return
+              the number of unused inodes -- (@inodes_stat.nr_unused / 100) * sysctl_vfs_cache_pressure.
+              if @nr is not _zero_,it will invoke prune_icache().but if __GFP_FS is not set in @gfp_mask,-1 will be returned
+              and without invocation to prune_icache().
                   
-                  
+              <fs/inode.c>
+                /**
+                 * iprune_sem - provides exclusion between the kswapd or try_to_free_pages()
+                 *              icache shrinking path,and the umount path.
+                 *              without this exclusion,by the time prune_icache() calls iput for
+                 *              the inode whose pages it has been invalidating,or by the time
+                 *              it calls clear_inode() and destroy_inode() from its final dispose_list(),
+                 *              the struct super_block they refer to may already have been freed and reused.
+                 */
+                static DECLARE_RWSEM(iprune_sem);
+
+                /**
+                 * prune_icache - scan unused inodes to shrink inode cache
+                 * @nr_to_scan:   number of inodes to scan
+                 * # any inodes which are pinned purely because of attached page cache have their
+                 *   page cache removed.
+                 *   if the inode has metadata buffers attached to mapping->private_list,then try to remove them.
+                 */
+                static void prune_icache(int nr_to_scan);                  
+
+                description for prune_icache() :
+                  use a local list named @freeable,this list is used to collect the freeable inodes during
+                  scanning.
+                  acquire @iprune_sem for get exclusion.
+                  lock @inode_lock is required to holding when operating on the global inode lists,and this lock
+                  also have to be got when changing the @i_state of an inode while it is in use.
+                  make use a for-cycle,starting index is 0,stop when we have scanned @nr_to_scan inodes {
+
+                          if @inode_unused is empty,we break the loop early,because no freeable inodes.
+                          otherwise,retrieve from the tail of @inode_unused the inode.
+
+                          for @inode->i_state is not _zero_ OR its @i_count is not _zero_,we have to skip it,
+                          thus,move it to the front of @inode_unused.
+                                       /* we retrieved it from the tail */
+
+                          /* check buffers and page cache */
+                          if @inode has buffers OR its @i_data.nrpages is not _zero_,then we need to remove them at first.
+                          /* inode_has_buffers() => !list_empty(@i_data.private_list)
+                           * @i_data => inode's address_space
+                           * @nrpages => pages in the page cache
+                           */
+                          so,we get the @inode via __iget(),and release @inode_lock.
+                          try to remove_inode_buffers() on @inode,if succeed,we proceeding invoke invalidate_mapping_pages(),
+                          range is [0, -1 => overflow to LLONG_MAX],use local variable @reap to accumulate the values returned
+                          from invalidate_mapping_pages().
+                          /**
+                           * int remove_inode_buffers(*@inode) => defined in <fs/buffer.c>
+                           * - this routine retrieve the address_space of @inode through @i_data member.
+                           *   next,retrieve @mapping->private_list -- store in @list variable and @mapping->assoc_mapping.
+                           *   lock @mapping->assoc_mapping->private_lock.
+                           *   make use a cycle,stop condition is @list is empty.
+                           *           for each buffer head on @list -- @list as a header.
+                           *           if the buffer is dirty,we stop the loop,because we can not remove dirty buffer.
+                           *           otherwise,invoke __remove_assoc_queue() on the buffer.
+                           *                            # this routine unlink buffer from the list,connector is member
+                           *                              @b_assoc_buffers,and set @b_assoc_map member to NULL.
+                           *                              if buffer_write_io_error() on the buffer is TRUE,set AS_EIO
+                           *                              in the @flags member of the associated mapping -- @b_assoc_map.
+                           *   unlock.
+                           *   return 0 => dirty buffer found OR 1 => all removed
+                           *
+                           * unsigned long invalidate_mapping_pages(*@mapping, @start, @end) => defined in <mm/truncate.c>
+                           * - this function traverse pages in the page cache @mapping has index in [@start, @end].
+                           *   for each found page,lock it,and invoke invalidate_inode_pages() on it,unlock it,invoke
+                           *   release_pages() on each page vector -- these pages are batched in a page vector.
+                           *   when a batching pages have been handled,check kernel preempt and continue to next iteration.
+                           *   this function finally return the number of pages been invalidated.
+                           *   # invalidate_inode_page() finally end up invocation to remove_mapping() --> __remove_mapping().
+                           *   # this function only invalidate unlocked pages.
+                           */
+                           next,iput() the @inode,because we __iget() it previously.
+                           acquire @inode_lock again.
+                           check whether iput() moved this @inode to the front of @inode_unused.
+                           /**
+                            * this should happens when generic_forget_inode() is called,then in function generic_detach_inode(),
+                            * this @inode is moved to the front of @inode_unused if it is hashed and no I_DIRTY AND | I_SYNC.
+                            * function generic_detach_inode() may return 0 if MS_ACTIVE is set in the super block's flags,and
+                            * in this case,generic_forget_inode() would not destroy this inode.
+                            * thus,we check it -- the @inode at there.
+                            * it is not the next of @inode_unused,that means it been detached and should been destroyed by iput(),
+                            * otherwise,that means iput() did not destroy it,so we might need put it into @freeable list.
+                            */
+                           check can_unuse() on @inode,if it can be unuse,then continue to next iteration.
+                           /* can_unuse()
+                            *   => FALSE if @i_state is not _zero_ OR has buffers OR @i_count is not _zero_ OR @i_data.nrpages is not _zero_
+                            *   => TRUE others
+                            */
+
+                           /* we removed buffers and invalidate page caches,but the inode still have to put into @freeable list,
+                            * or the @inode has no buffers associated.
+                            */
+
+                           move @inode into @freeable list,report warning if I_NEW is set in its state.
+                           set I_FREEING in its state.
+                           increase local variable @nr_pruned,its default value is 0.
+                           
+                           /* to next iteration */
+                  }
+                  after scanning,we let @inodes_stat.nr_unused -= @nr_pruned,because we moved them.
+                  cout VM events KSWAPD_INODESTEAL,number is @reap,if we are kswapd.
+                  otherwise,count VM events PGINODESTEAL,number is @reap.
+                  finally,unlock @inode_lock,call to dispose_list() on @freeable,release @iprune_sem READ.
+
+                  /**
+                   * static void dispose_list(struct list_head *head) => defined in the same file.
+                   * - for each inode in the list @head
+                   *     delete it from the list.
+                   *     truncate its pages if @i_data.nrpages is not _zero_.
+                   *     clear_inode() on it.
+                   *     delete it from the hash list,connector is @i_hash.
+                   *     delete it from the super block's inode list,connector is @i_sb_list.
+                   *     wake up processes waiting on inode state I_NEW -- bit number __I_NEW. # clear_inode() set state to I_CLEAR.
+                   *     invoke destroy_inode() to destroy it.                                 # I_NEW is cleared.
+                   *     increase destroyed inodes counter.
+                   *   decrease @inodes_stat.nr_inodes by the destroyed inodes counter.
+                   * # destroy_inode(*@inode) - destroy @inode through @inode->i_sb->s_op->destroy_inode() or
+                   *                            through kmem_cache_free() on @inode_cachep,depends whether
+                   *                            s_op->destroy_inode() is implemented.
+                   *
+                   */
 
