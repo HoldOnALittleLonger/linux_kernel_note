@@ -2628,7 +2628,7 @@ Chapter 3 : Processes
                     DEFINE_WAIT(__wait);                                         \
                                                                                  \
                     for (;;) {                                                   \
-                            prepare_to_wait(wq, &__wait, TASK_UNINTERRUPTIBLE);  \
+                            prepare_to_wait (wq, &__wait, TASK_UNINTERRUPTIBLE);  \
                             if (condition)                                       \
                                     break;                                       \
                             schedule();                                          \
@@ -12278,7 +12278,7 @@ Chapter 8 : Memory Management
              * @node_present_pages:     total number of physical pages
              * @node_spanned_pages:     total size of physical page range,including holes
              * @node_id:                node id
-             * @kswapd_wait:            kernel thread kswapd wait queue
+             * @kswapd_wait:            kernel thread kswapd wait queue head
              * @kswapd:                 task structure for kswapd
              * @kswapd_max_order:       logarithmic size of free blocks to be created by kswapd
              */
@@ -12384,6 +12384,7 @@ Chapter 8 : Memory Management
              * zone - structure zone represent memory zone inside a memory node
              * @watermark:       
              *        zone watermarks,access with *_wmark_page(zone) macros
+             *        # WMARK_MIN = 0, WMARK_LOW = 1, WMARK_HIGH = 2, NR_WMARK = 3
              * @lowmem_reserve:
              *        low memory reserve used to avoid totally wasting several GB of ram
              *        when going to allocate will be freeable or/and it will be released
@@ -18742,7 +18743,7 @@ Chapter 9 : Process Address Space
               is a kernel BUG.
               then,exit_mm() acquires task lock on @tsk,reset its @mm to NULL,release @mmap_sem,and put the
               processor that executing exit_mm() in lazy TLB mode,thus the Page Table entries would not be
-              flushed immediately.
+              flushed immediately.                                               # is freezing for suspend.
               proceed call to clear_freeze_flag() on @tsk,this routine would clear TIF_FREEZE flag,and next,
               release task lock,call to mm_update_next_owner() try to find out a process which needs this
               memory descriptor(adpot this address space);if unfound,set @mm's owner to NULL.
@@ -20906,7 +20907,7 @@ Chapter 11 : Signals
           /*
            * routine thaw_process() in <kernel/freezer.c> is used to thaw the frozen process.
            * it clear TIF_FREEZE and PF_FROZEN,then wake up the proces - wake up from refrigerator().
-           * flag PF_FREEZING is enabled and disabled in refrigerator().
+           * flag PF_FREEZING is enabled(before schedule()) and disabled(before leave refrigerator) in refrigerator().
            */
           next,acquires spinlock @current->sighand->siglock.
           if @current->signal->flags enabled SIGNAL_CLD_MASK,disable the flag,if the process is traced by
@@ -39805,7 +39806,7 @@ Chapter 17 : Page Frame Reclaiming
                   the iteration rely on for_each_zone_zonelist_nodemask(),the high zone idx is get by call gfp_zone()
                   on @sc->gfp_mask,same as free_more_memory(),and the nodemask is stored in @sc->nodemask.
                   we can invoke shrink_zone() on the @zone if it satisfied these conditions :
-                    @zone is not populated. /* populated => @zone->present_pages is _zero_ -- no pages */
+                    @zone is not populated. /* populated => @zone->present_pages is not _zero_ -- 0 => no pages */
                     the case1 no @mem_cgroup :
                       @zone is allowed hardwall with GFP_KERNEL flag.
                       /* rely on cpuset_zone_allowed_hardwall().
@@ -40382,3 +40383,271 @@ Chapter 17 : Page Frame Reclaiming
                    *
                    */
 
+        Periodic Reclaiming :
+          PFRA performs periodic reclaiming by using two different mechanisms :
+            1> the kswapd kernel threads
+                 it invoke shrink_zone() and shrink_slab()
+            2> the cache_reap() function
+                 it is invoked periodically to reclaim unused slabs from the
+                 slab allocator
+
+          The kswapd kernel threads :
+            the goal of kswapd,ensure interrupt handler and exception handler is able to get free memory,in which
+            blocking is not allowed;for the case kernel control path can not trigger writeout,such it have already
+            acquired exclusive access to critical resources and that,therefore,can not activate I/O data transfers;
+            in the infrequent case in which all memory allocation requests are done by such sorts of kernel control
+            paths,the kernel is never able to free memory,...
+    
+            there is a different kswapd kernel thread for each memory node,each such thread is usually sleeping in the
+            wait queue headed at the @kswapd_wait field of the node descriptor -- struct pglist_data.
+            and,__alloc_pages() will wake up the kswapd thread on current node when it found number of free pages in the zone
+            below a "warning" threshold.
+
+
+            The kswapd() function :
+              this function is the "main" of kswapd kernel threads.
+
+              <mm/vmscan.c>
+                /**
+                 * kswapd - "main" for kswapd kernel threads.
+                 * @p:      private data for this thread
+                 * return:  0
+                 * # the background pageout daemon,started as a kernel thread from the init process.
+                 */
+                static int kswapd(void *p);
+
+                what kswapd() does :
+                  1> convert @p to node descriptor pointer,the pg_data_t *,store in local variable
+                     @pgdat.
+                     save @current in local variable @tsk.
+                     define a wait queue named @wait.
+                     define @reclaim_state is type of struct reclaim_state,member @reclaimed_slab is
+                     initialised to 0.
+                     get @cpumask from NUMA node descriptor @pgdat through cpumask_of_node().
+                     /* we need to know which CPU is allowed access to this NUMA node */
+                  2> set @current->lockdep_reclaim_gfp to GFP_KERNEL through lockdep_set_current_reclaim_state(),
+                     but this is valid only when lockdep is configured.
+                     check @cpumask,if it is empty,change the CPU's affinity of @tsk(this kswapd) to a proper
+                     CPU and schedule it away if the CPU it's excuting on is removed from the allowed bitmask.
+                     this might cause task migration.
+                     let @current->reclaim_state points to the local variable @reclaim_state.
+                  3> enable PF_MEMALLOC | PF_SWAPWRITE | PF_KSWAPD in @tsk's @flags.
+                            /* PF_MEMALLOC - allocating memory
+                             * PF_SWAPWRITE - allowed to write to swap
+                             * PF_KSWAPD - I am kswapd
+                             */
+                     and set @current is freezable. /* disable PF_NOFREEZE */
+                     /* tell the memory management that we are a "memory allocator",and that if we need more
+                      * memory we should get access to it regardless.
+                      * and kswapd should never get caught in the normal page freeing logic -- try_to_free_pages().
+                      * # kswapds sometimes need a small amount of memory in order to be able to page out something,
+                      *   this flag essentially protects us from recursively trying to free more memory as we are
+                      *   trying to free the first piece of memory in the first place.
+                      * # __alloc_pages_slowpath() check to PF_MEMALLOC.
+                      */
+                  4> enter a infinity for-cycle,this is kswapd's work loop {
+                             invoke prepare_to_wait() on @pgdat's @kswapd_wait,the wait queue is local object @wait,
+                             task state is TASK_INTERRUPTIBLE.
+                             use a local variable named @new_order to save current @kswapd_max_order of @pgdat.
+                             reset @kswapd_max_order to 0.
+                
+                             check,if @order(a local variable,default is 0) is less than @new_order,if it is the case,
+                             we reset @order to @new_order. /* do not sleep if someone wants a larger 'order' allocation.
+                                                             * in this case,we might need to balance_pgdat().
+                                                             */
+                             /* @order >= @new_order */
+                             otherwise,check whether @current is not freezing(no TIF_FREEZE) AND this kernel thread should not stop.
+                             if it is the case,we need to sleep a while.
+                                        call to sleeping_prematurely(),pass it @pgdat, @order, and @remaining(default is 0).
+                                        /* this function check whether kswapd is sleeping prematurely.
+                                         * if @remaining is not 0,return TRUE.
+                                         * for each zone in this node,if any zone's high watermark is not watermark ok,
+                                         * return TRUE.                                  # free pages below watermark.
+                                         * all other cases return FALSE.
+                                         */
+                                        if we are not in sleeping prematurely,then
+                                                invoke schedule_timeout(),timeout value is HZ / 10,remaining is stored in @remaining.
+                                                /* we try to sleep for a short interval */
+                                                invoke finish_wait() on @wait.
+                                                invoke prepare_to_wait() on @wait again,state stay is TASK_INTERRUPTIBLE.
+                                        next,invoke sleeping_prematurely() again.if we are not in sleeping,then relinquish CPU
+                                        by call to schedule() -- go fully to sleep until explicitly woken up.
+                                        if @remaining is not _zero_,that means we are early woken up during schedule_timeout(),
+                                        when @remaining is not _zero_,the result of this function is FALSE,so we need to count
+                                        VM event.
+                                        @remaining is not _zero_ => KSWAPD_LOW_WMARK_HIT_QUICKLY
+                                        @remaining is _zero_     => KSWAPD_HIGH_WMARK_HIT_QUICKLY
+
+                                        after we have woken up or we are in sleeping prematurely,set @order to @kswapd_max_order.
+
+                                        !! WE SLEEP A WHILE IF NEW ALLOCATION ORDER IS LESS THAN THE PREVIOUS ALLOCATION ORDER.
+
+                             invoke finish_wait() on @wait. /* back to TASK_RUNNING */
+                             try_to_freeze() ourselves.
+                             
+                             /* thaw */
+                             we are thawed,so first to check whether we need to stop -- kthread_should_stop(),if needed,we break
+                             this infinity cycle.
+                             otherwise,proceeding check the result of try_to_freeze().
+                             if we were put into refrigerator before,and thawed now,the result is 1;if we were not put into
+                             refrigerator,that means no TIF_FREEZE is set in thread flag,in this case,result is 0.
+
+                             /* real memory reclaiming */
+                             if we are not freezing,then invoke balance_pgdat() on @pgdat with @order.
+                     }
+
+            The balance_pgdat() function :
+              this function is called by kswapd,for reclaim some pages in the zones of the NUMA node.
+              this function only stopped when all zones are ok,that means free pages above high water mark.
+              for the zone which is all unreclaimable,it would be skipped,the direction of scanning over zones
+              is HighMem->Normal->DMA.
+              and for the zone its free pages is above high watermark,also would be skipped.
+              once a zone is found under high water mark,we scan that zone and the lower zones regardless of
+              the number of free pages in the lower zones.this interoperates with the page allocator fallback
+              scheme to ensure that aging of pages is balanced across the zones.
+             
+              <mm/vmscan.c>  
+                /**
+                 * balance_pgdat - reclaim memory on zones of given NUMA node
+                 * @pgdat:         node descriptor
+                 * @order:         allocation order
+                 * return:         number of page frames have reclaimed
+                 * # for kswapd,balance_pgdat() will work across all this node's zones until they are
+                 *   all at high_wmark_pages(@zone).
+                 * # in the case all pages in the zone have been scanned twice and there has been zero
+                 *   successful reclaim,mark the zone as dead and from now on,only perform a short scan.
+                 *   basically we are polling the zone for when the problem goes away.
+                 */
+                static unsigned long balance_pgdat(pg_data_t *pgdat, int order);
+
+                what balance_pgdat() does :
+                  /* this function actually used several cycles to hanlde balancing. */
+                  1> retrieve @reclaim_state of @current,if we are kswapd,this should is the local object in
+                     function kswapd().
+                     create a scanning control named @sc,initialize it {
+                             .gfp_mask = GFP_KERNEL
+                             .may_unmap = 1
+                             .may_swap = 1
+                             .nr_to_reclaim = ULONG_MAX
+                             .swappiness = @vm_swappiness
+                             .order = @order
+                             .mem_cgroup = NULL,
+                             .isolate_pages = isolate_pages_global
+                     }
+                     declare an array named @temp_priority is type of int [MAX_NR_ZONES],this array is used to
+                     saves priority of reclaiming,and its elements will be used for update @prev_priority of each
+                     zone later.
+
+                  loop_again:
+                  2> set @total_scanned to 0. /* local variable */
+                     set @sc.nr_reclaimed to 0.
+                     set @sc.may_writepage to !@laptop_mode.
+                     count VM event PAGEOUTRUN.
+                  3> the first loop,for each zone of this node,set the corresponding element in @temp_priority to DEF_PRIORITY.
+                  4> the second loop,for priority in [DEF_PRIORITY, 0] {
+                             /* this loop handle scanning,and several cycles is nested in it for handle other works */
+
+                             /* we only scan the zones from the lower index 0 => DMA to the @end_zone(inclusive).
+                              * thus,sometimes,we do not need to scan all zones in the NUMA node.
+                              */
+                             set local variable @end_zone to 0,0 => ZONE_DMA,inclusive.
+                             set local variable @lru_pages to 0,it is used to accumulate all reclaimable pages of zones they
+                             are need to be scanned.
+                             set local variable @has_under_min_watermark_zone to 0,it indicates whether there is a zone under
+                             min water mark. /* scare case */
+                             set @all_zones_ok to 1 at every iteration beginning,it indicates should we stop and return because
+                             all zones are OK.
+
+                             disable swap token,if current is maximum priority 0.
+
+                          5> the third loop,for each zones in this node,from end to head {
+                                     if current zone is not populated_zone(),skip it.
+                                     if current zone is all unreclaimable AND current priority is not 12,skip it.
+                                     if inactive_anon_is_low() on current zone with @sc resulted TRUE,invoke shrink_active_list()
+                                     on this zone,scan number is SWAP_CLUSTER_MAX. /* move some pages from active list to inactive list */
+                                     if current zone is not watermark OK on high water mark,set @end_zone to index of this zone,
+                                     and break this loop. /* we then handle it in next */
+                             }
+
+                             check @i,it is used as an iterator in the third loop,if @i is less than 0,we goto label "out".
+                             because the third loop check watermark,if all zones are OK,@i must be -1.
+
+                             /* we need to handle zones */
+                          6> the fourth loop,for each zone in this node from index 0 to @end_zone {
+                                     accumulate reclaimable pages of each zone in @lru_pages.
+                             }
+
+                             /* scan zones in DMA->HighMem direction,stopping at the last zone which needs scanning. */
+                             /* page allocator works in the opposite direction,this prevent the page allocator from allocating
+                              * page behind kswapd's direction of progress,which would cause too much scanning of the lower zones.
+                              */
+
+                             /* we shrink zones in this loop */
+                          7> the fifth loop,for each zone in this node from index 0 to @end_zone {
+                                     if current zone is not populated,skip it.
+                                     if current zone is all unreclaimable AND current priority is not 12,skip it.
+                                     
+                                     store current @priority in @temp_priority[@i],@i as iterator,from index 0.
+                                     set @sc.nr_scanned to 0.
+                                     note_zone_scanning_priority() on current @zone,with current @priority.
+                                     
+                                     call mem_cgroup_soft_limit_reclaim() before calling shrink_zone(),on the NUMA node's id
+                                     and current @zone's id.(zone_idx())                                   # @pgdat->node_id
+
+                                     check,if current zone is not watermark OK,water mark is "8 * high_wmark_pages(@zone),
+                                     class zone id is @end_zone,allocation flags is 0.
+                                     if it is the case,invoke shrink_zone() on current @zone with @sc and current @priority.
+
+                                     set @reclaim_state->reclaimed_slab to 0,because we are going to shrink slab.
+                                     call to shrink_slab(),pass it @sc.nr_scanned, GFP_KERNEL, @lru_pages as parameters,
+                                     result stored in local variable @nr_slab.
+
+                                     /* reclaimed page frames in this scanning */
+                                     increase @sc.nr_reclaimed by @reclaim_state->reclaimed_slab,use the result to
+                                     increase @total_scanned -- set to 0 at label "loop_again".
+
+                                     if @nr_slab is 0(we failed to shrink slab) AND "@zone->pages_scanned" is greater than
+                                     or equal to "zone_reclaimable_pages(@zone) * 6",we mark this @zone is all unreclaimable.
+                                     /* @pages_scanned member should be updated by shrink_zone(),
+                                      * if we failed to shrink slab,that means no suit slab entries can be reclaimed,
+                                      * and we scanned a lot of pages in the zone(6 multiple reclaimable pages),
+                                      * we can consider this zone is all unreclaimable.
+                                      */
+
+                                     check @total_scanned,if it is greater than "SWAP_CLUSTER_MAX * 2 = 64" AND
+                                     it is greater than "@sc.nr_reclaimed + @sc.nr_reclaimed / 2",we set @may_writepage
+                                     of @sc to 1,because we might need to trigger writeback later.
+
+                                     check whether this @zone's water mark is OK again,we have checked it previously before invoke
+                                     shrink_zone().if it is still under high water mark,set @all_zones_ok to 0(even after shrink_zone(),
+                                     there remaining a zone is not OK),proceeding check whether its min water is OK,if it is under
+                                     the min water mark too,set @has_under_min_watermark_zone to 1.
+                             }
+
+                          8> if @all_zones_ok is TRUE,break the second loop. /* kswapd: all done */
+                          9> @all_zones_ok is not TRUE - FALSE,kswapd is getting into trouble,take a nap,then take another
+                             pass across the zones.
+                             check,if @total_scanned is not _zero_ AND current @priority is less than 10,then
+                                     @has_under_min_watermark_zone == 1 => count VM event KSWAPD_SKIP_CONGESTION_WAIT
+                                                                   == 0 => invoke congestion_wait(),sync mode is BLK_RW_ASYNC,
+                                                                           timeout is "HZ / 10".
+                         10> check @sc.nr_reclaimed,if we at least reclaimed SWAP_CLUSTER_MAX pages,break the second loop.
+                     }
+                 "out":
+                 11> the sixth loop,for each zone in the node,DMA->HighMem direction {
+                             use the elements in array @temp_priority to update the corresponding zone's @prev_priority member.
+                     }
+                 12> check @all_zones_ok,it is not TRUE,then we need restart loopes.
+                     so,check kernel preempt,try_to_freeze() ourselves.
+                     after thawed,check @sc.nr_reclaimed,if it is less than SWAP_CLUSTER_MAX,set @order and @sc.order to 0.
+                     goto label "loop_again".
+                     /* fragmentation may mean that the system can not be rebalanced for high-order allocations in all zones.
+                      * at this point,if @nr_reclaimed < SWAP_CLUSTER_MAX,it means the zones have been fully scanned and
+                      * are still not balanced.
+                      * for high-order allocations,there is little point trying all over again as kswapd may infinite loop.
+                      * instead,recheck all watermarks at order-0 as they are the most important.
+                      * if watermarks are ok,kswapd will go back to sleep.
+                      * high-order users can still perform direct reclaim if they wish.
+                      */
+                 13> return @sc.nr_reclaimed to caller.
+                
