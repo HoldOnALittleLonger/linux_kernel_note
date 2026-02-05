@@ -14820,14 +14820,22 @@ Chapter 8 : Memory Management
                              * the slab descriptor is allocated in the first page frame of the slab.
                              */
             functions page_set_cache() and page_set_slab() is called by function slab_map_pages(),and this
-            function is invoked after alloc_slabmgmt() allocate a slab descriptor successfully by cache_grow().
+            function is invoked by cache_grow() after alloc_slabmgmt() allocated slab descriptor successfully.
             slab_map_pages() traverse all page frames assigned to "this" slab and call to the two functions on
             them.
                             @page->lru.next := @the-cache @page->lru.prev := @the-slab
+                            ! use force type converting kmem_cache * => list_head * , slab * => list_head *
             /**
              * @lru of a page frame is used by the Buddy System if only if the page is free.when attempt to 
              * allocate a page frame,the page would be unlinked from the LRU list.
              * therefore,PG_slab is set in the page frame if it is assigned to a slab.(not free)
+             *
+             * ! for general page frames,anonymous pages,and file pages,their @lru member usually is linked
+             *   into the list zone's @lru[page LRU type].but the page frame used by slab is different,its LRU
+             *   is used to store cache descrptor and slab descriptor.
+             *   for reclaim slab cache pages,should use shrink_slab() or cache_reap().
+             *   shrink_slab() handle object memory free,shrinker finally invoke kmem_cache_free() to free slab object.
+             *   cache_reap() handle slab objects on kmem_list3,it will free some freeable slab objects.
              */
     
             @s_mem field of a slab and @gfporder of the slab cache which contains this slab can be used together
@@ -15412,8 +15420,8 @@ Chapter 8 : Memory Management
           brief descriptor for __cache_free() :
             this function will skip calling cache_free_alien() when the platform is not
             NUMA to avoid cache misses that happen while accessing slabp to get nodeid!
-            get slab local cache,if @avail < @limit,then just place the object into this
-            slab local cache as well;otherwise,call to cache_flusharray to get space to
+            get slab local cache,if ac->@avail < ac->@limit,then just place the object into
+            this slab local cache as well;otherwise,call to cache_flusharray to get space to
             place this object.
 
           /**
