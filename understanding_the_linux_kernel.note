@@ -6003,11 +6003,33 @@ Chapter 4 : Interrupts and Exceptions
                     struct lockdep_map lockdep_map;
             #endif
             };
+            
+            #define PREPARE_WORK(_work, _func) \
+                    do { \
+                            (_work)->func = (_func); \
+                    } while (0)
+
+            #define PREPARE_DELAYED_WORK(_work, _func) PREPARE_WORK(&(_work)->work, (_func)) 
+
+            /* no lockdep configured */
+            #define __INIT_WORK(_work, _func, _onstack) \
+                    do { \
+                            __init_work((_work), _onstack); \
+                            (_work)->data = (atomic_long_t) WORK_DATA_INIT(); \
+                            INIT_LIST_HEAD(&(_work)->entry); \
+                            PREPARE_WORK((_work), (_func)); \
+                    } while (0)
 
             /* INIT_WORK - initialize @_work and set @_work->func to @_func */
             #define INIT_WORK(_work, _func)                   \
                     do {                                      \
                             __INIT_WORK((_work), (_func), 0); \
+                    } while (0)
+
+            #define INIT_DELAYED_WORK(_work, _func) \
+                    do { \
+                            INIT_WORK(&(_work)->work, (_func)); \
+                            init_timer(&(_work)->timer); \
                     } while (0)
 
             /*  delayed_work - represents a delayed work.
@@ -14386,6 +14408,7 @@ Chapter 8 : Memory Management
              * @ctor:       pointer to constructor method associated with the cache
              * @name:       name of the cache
              * @next:       next cache descriptor
+             * @reaped:     number of slab objects been reaped
              * @nodelists:  array of pointers are type of "struct kmem_list3",each element
              *              is a slab list object for all objects,and each slab list as
              *              a node of the slab cache
@@ -14421,6 +14444,8 @@ Chapter 8 : Memory Management
             /* statistics */
             #ifdef CONFIG_DEBUG_SLAB
                     ...
+                    unsigned long reaped;
+                    ...
             #endif
                     struct kmem_list3 *nodelists[MAX_NUMNODES];
             };
@@ -14452,11 +14477,13 @@ Chapter 8 : Memory Management
              * @colour_next: per-node cache coloring
              * @list_lock:  node concurrent protector
              * @shared:     shared per node 
-             *              pointer to a local cache shared by all CPUs
+             *              pointer to a slab local cache shared by all CPUs
+             *              # during initializing phase,this pointer points to
+             *                an array_cache allocated from "this" NUMA node
              *              # this field makes the task of migrating free
              *                objects from a slab local cache to another
              *                easier
-             * @alien:      slab local caches on other nodes
+             * @alien:      array of slab local cache descriptors on other nodes(not current NUMA node)
              * @next_reap:  used by slab allocator's page reclaiming algorithm
              * @free_touched: used by slab allocator's page reclaiming algorithm
              * # @next_reap and @free_touched can be updated withou locking
@@ -14586,8 +14613,17 @@ Chapter 8 : Memory Management
 
             "kmem_cache" => a first cache whose objects are the cache descriptors of the remaining
                             caches used by the kernel.
-                            /* name is "kmem_cache" */
-            @cache_cache => contains the descriptor of "kmem_cache".
+
+            @cache_cache => an object is type of struct kmem_cache,defined in <mm/slab.c>.
+                            this is the internal cache of cache description objects.
+                            /* cache for kmem_cache objects */
+                            {
+                                    .batchcount = 1
+                                    .limit = BOOT_CPUCACHE_ENTRIES
+                                    .shared = 1
+                                    .buffer_size = sizeof(struct kmem_cache)
+                                    .name = "kmem_cache"
+                            }
 
             the range of the memory area sizes typically includes 13 geometrically distributed sizes.
             @malloc_sizes => table of type "cache_sizes",this table includes 26 cache descriptors 
@@ -40650,4 +40686,158 @@ Chapter 17 : Page Frame Reclaiming
                       * high-order users can still perform direct reclaim if they wish.
                       */
                  13> return @sc.nr_reclaimed to caller.
+
+          The cache_reap() function :
+            PFRA must also reclaim the pages owned by the slab allocator caches,function cache_reap() is take care of this.
+            which is periodically scheduled -- approximately once every two seconds -- in the predefined delayed work @reap_work.
+            actually,@reap_work is a pointer which points to the per-CPU object @slab_reap_work,and during CPU initializing,
+            function start_cpu_timer() retrieve the object,and pass @reap_work to INIT_DELAYED_WORK(),@_func is cache_reap().
+
+            <mm/slab.c>
+              /* per-CPU delayed work for call to cache_reap() routine */
+              static DEFINE_PER_CPU(struct delayed_work, slab_reap_work);
+
+              /**
+               * start_cpu_timer - initiate the reap timer running on the target CPU
+               * @cpu:             CPU id
+               * # we run at around 1 to 2Hz via the workqueue/eventd.
+               * # add the CPU number into the expiration time to minimize the possibility of
+               *   the CPUs getting into lockstep and contending for the global cache chain
+               *   lock.
+               * # if keventd_up() is TRUE AND @reap_work->work.func is NULL then
+               *           invoke init_reap_node(@cpu)
+               *                  ! this function invoke next_node() to retrieve the next node in
+               *                    the bitmap of @node_states[N_ONLINE],the node is past current
+               *                    @cpu's node.  (type is nodemask_t [MAX_NUMNODES])
+               *                    if the node id is MAX_NUMNODES,then make use of the first node.
+               *                    set per-CPU variable @slab_reap_node of current @cpu to the node.
+               *                                         (type is unsigned long)
+               *           invoke INIT_DELAYED_WORK(@reap_work, cache_reap)
+               *           schedule_delayed_work_on(@cpu, @reap_work, __round_jiffies_relative(HZ, @cpu))
+               *                                                      ! function round jiffies to full seconds.
+               *   ! when this gets called from do_initcalls() via cpucache_init(),init_workqueue() has
+               *     already run,so keventd will be setup at that time.
+               */
+              static void __cpuinit start_cpu_timer(int cpu);
+
+              /**
+               * cache_reap - reclaim memory from caches
+               * @w:          work descriptor,usually,it is the per-CPU variable @slab_reap_work.work
+               * # called from workqueue/eventd every few seconds,used to clear the per-CPU caches for this CPU,
+               *   and return freeable pages to the main free memory pool.
+               */
+              static void cache_reap(struct work_struct *w);
+
+              description for cache_reap() :
+                get current NUMA node id in local variable @node.
+                convert @w to struct delayed_work *,store in local variable @work.
+                this function must acquire @cahe_chain_mutex before do the main work,if we can not
+                lock it(via mutex_trylock()),then we enter "out" path.
+                for each entry on @cache_chain {
+                        /* local pointer @searchp used to represent current entry,the struct kmem_cache * */
+                        do BUG test,it is a BUG if IRQ is disabled.
+                        retrieve kmem_list3 pointer object from @nodelists of @searchp,index is @node,the
+                        current NUMA node id,store in local variable @l3. /* slab cache node */
+
+                        invoke reap_alien() on @searchp and @l3.
+                        /**
+                         * static void reap_alien(*@cachep, *@l3) => defined in the same file.
+                         * - if @l3->alien is not NULL,then
+                         *           get the slab local cache on other nodes which is corresponds to current @slab_reap_node.
+                         *           if it is not NULL AND we can acquire @lock of the array_cache object,then
+                         *                   we invoke __drain_alien_cache(),pass it @cachep, @ac -- the array_cache object,
+                         *                   @node -- current @slab_reap_node.
+                         *   ! __drain_alien_cache(*@cachep, *@ac, @node) /* struct kmem_cache *, struct array_cache *, int */
+                         *                           - we only take actions if @ac's @avail is not 0,otherwise,we return with do nothing.
+                         *                             we might need to transfer objects from @ac to the kmem_list3 object which corresponds
+                         *                             to current node if @shared of l3 is not NULL.
+                         *                             proceeding execute free_block() on @cachep with @ac->entry,@ac->avail,and
+                         *                             current node id.
+                         *                             reset @ac->avail to 0,because we freed them.
+                         *
+                         *                             ! static int transfer_objects(*@to, *@from, @max);
+                         *                               - copy entries from @from to @to,number of entries to copy is depends on @max.
+                         *                                 the number is the minimal one between min(@from->avail, @max) and @to->limit - @to->avail.
+                         *                                 after copied,update @avail member of @from and @to.
+                         *
+                         *                             ! static void free_block(*@cachep, **@objpp, @nr_objects, @node);
+                         *                               - for each entry in @objpp,get the slab object the entry residing on,
+                         *                                 unlink the slab object from the slab list in kmem_list3 object,
+                         *                                 invoke slab_put_obj() on @cachep with @node,pass it the slab object and the entry.
+                         *                                 update accounting members.and if this slab object is not "in-use" AND
+                         *                                 free objects in kmem_list3 is too more,we destroy this slab object;otherwise
+                         *                                 add it to free list of the kmem_list3.
+                         *                                 if the slab object is "in-use",we add it to partial list of kmem_list3.
+                         */
+
+                        next,invoke drain_array() on @searchp with @l3,and local cache in in @searchp corresponds to
+                        current CPU,@force is 0,node is the @node.
+                        /**
+                         * void drain_array(*@cachep, *@l3, *@ac, @force, @node);
+                         * - drain an array if it contains any elements taking the l3 lock only if necessary.
+                         *   # l3 @list_lock also protects the array_cache if this function is used on the shared array.
+                         *   
+                         *   @ac can not be NULL OR its @avail is 0,otherwise,return with do nothing.
+                         *   if @ac->touched is TRUE AND @force is 0,then set @ac->touched to 0 and return to caller,
+                         *   because we do not force a drain array.
+                         *   otherwise,need to drain them out :
+                         *     /* need @list_lock */
+                         *     check @ac->avail,if it is not 0,then
+                         *             if @force is TRUE,we need to work on all available free objects in @ac,
+                         *             else,the number of object is "(@ac->limit + 4) / 5".
+                         *             and,if number of objects to free is greater than @ac->avail,we need to lower
+                         *             it,reset to "(@ac->avail + 1) / 2",a half of @ac->avail.
+                         *             invoke free_block(),@nr_objects is the final result we computed.
+                         *             decrease @ac->avail by the number of objects to free.
+                         *             move a part of remained entries in available area in @ac->entry to the front
+                         *             of this array,the number of entries to move is the updated @avail member,
+                         *             it is one among the following :
+                         *                     @force == 1 => @tofree = @avail,do not take a half
+                         *                     @avail -= @tofree == 0
+                         *                     move 0 entries
+                         *                     source position - @ac->entry[@tofree]
+                         *
+                         *                     @force == 0 => @tofree = (@ac->limit + 4) / 5
+                         *                     suppose @limit is 1024,then @tofree is 205
+                         *                     suppose @avail is 256
+                         *                     @avail -= @tofree == 51
+                         *                     move 51 entries
+                         *                     source position - @ac->entry[@tofree] => @entry[205]
+                         *                     
+                         *                     suppose @limist is 1024,then @tofree is 205
+                         *                     suppose @avail is 200,take a half,then @tofree is 201 / 2 = 100
+                         *                     @avail -= @tofree == 100
+                         *                     move 100 entries
+                         *                     source position - @entry[100]
+                         */
+
+                        check current @jiffies,if current time is after @l3->next_reap,we goto label "next".
+                        otherwise,update @l3->next_reap to "current @jiffies + REAPTIMEOUT_LIST3".
+                                                                               # 4 Hz
+
+                        invoke drain_array() again,but this time,we work on shared local cache -- @l3->shared.
+
+                        check @l3->free_touched,if it is TRUE,reset it to 0;otherwise,invoke function drain_freelist(),
+                        pass it @searchp, @l3, result of expression (@l3->free_limit + 5 * searchp->num - 1) / (5 * searchp->num).
+                        use return value of drain_freelist() call to STATS_ADD_REAPED() on @searchp -- __func_(x, y) => x->reaped += y .
+                        /**
+                         * static int drain_freelist(*@cache, *@l3, @tofree);
+                         * - remove slabs from the list of free slabs -- @l3->slabs_free.
+                         *   unlink objects from l3,call slab_destroy() on them,updare accounting data.
+                         *   function return number of freed slab objects.
+                         */
+
+                        check kernel preempt and get into next iteration.
+                }
+
+                /* normal return path */
+                "next":
+                  do BUG test again,it is a BUG if IRQ is disabled.
+                  release @cache_chain_mutex.
+                  invoke next_reap_node() -- this function invoke next_node() to get next online NUMA node past current node,
+                  and store it in @slab_reap_node.
+
+                "out":
+                  we re-schedule the delayed work @work again,time interval is round_jiffies_relative(REAPTIMEOUT_CPUC).
+                  the macro is defined to "2 * Hz".
                 
