@@ -15232,6 +15232,9 @@ Chapter 8 : Memory Management
            *               is requested 
            * @lock:        concurrent protector
            * @entry:       array of pointers for _freed_ objects in this slab local cache
+           *               # each "in-use" entry in this array should corresponds to an exact object's pointer,
+           *                 such @entry[i] => struct datum * .
+           *                 when allocate a new object from the given slab cache,first will try CPU's slab local cache.
            * # purpose of introducing this structure :
            *     LIFO ordering,to hand out cache-warm objects from _alloc
            *     reduce the number of linked list operations
@@ -15278,11 +15281,11 @@ Chapter 8 : Memory Management
           @cache_chain.during this procedure,struct kmem_cache.nodelists[CURRENT_NODE] is going to be
           initialized,too.
           for each slab cache
-            if @shared is equal to 1,then a shard slab local cache will be created
+            if @shared is equal to 1,then a shared slab local cache will be created
             and assigned to kmem_list3.@shared.
-            if @use_alien_caches is equal to 1,then an alien slab local cache will be created through
-            alloc_alien_cache(),and the pointer of pointer of the newly created alien slab local cache
-            is assigned to kmem_list3.alien.
+            if @use_alien_caches is equal to 1,then some alien slab local caches will be created through
+            alloc_alien_cache(),and the pointer of the array containing newly created alien slab local caches
+            is assigned to kmem_list3.alien. /* skip create alien for current NUMA node */
             a new slab local cache for current CPU will be created and assign to
             @cachep->array[THIS_CPU].
 
@@ -40819,12 +40822,13 @@ Chapter 17 : Page Frame Reclaiming
                          *                     source position - @entry[100]
                          */
 
-                        check current @jiffies,if current time is after @l3->next_reap,we goto label "next".
+                        check current @jiffies,if current time is after @l3->next_reap,we goto label "next". /* not now */
                         otherwise,update @l3->next_reap to "current @jiffies + REAPTIMEOUT_LIST3".
                                                                                # 4 Hz
 
                         invoke drain_array() again,but this time,we work on shared local cache -- @l3->shared.
 
+                              /* set when allocated new slab */
                         check @l3->free_touched,if it is TRUE,reset it to 0;otherwise,invoke function drain_freelist(),
                         pass it @searchp, @l3, result of expression (@l3->free_limit + 5 * searchp->num - 1) / (5 * searchp->num).
                         use return value of drain_freelist() call to STATS_ADD_REAPED() on @searchp -- __func_(x, y) => x->reaped += y .
@@ -40833,6 +40837,7 @@ Chapter 17 : Page Frame Reclaiming
                          * - remove slabs from the list of free slabs -- @l3->slabs_free.
                          *   unlink objects from l3,call slab_destroy() on them,updare accounting data.
                          *   function return number of freed slab objects.
+                         *   ! maximum @tofree slabs OR list become empty.
                          */
 
                         check kernel preempt and get into next iteration.
