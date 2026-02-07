@@ -10797,6 +10797,12 @@ Chapter 7 :
           to it.it is invoked by several kernel routines directly or in a lzay way(deferred).
 
           <linux/sched.h>
+            /* this serializes "schedule()" and also protects the run-queue from deletions
+             * and modifications(but __adding__ to the beginning of the run-queue has a seprated lock)
+             */
+            extern rwlock_t tasklist_lock;  /* <kernel/fork.c> *
+            extern spinlock_t mmlist_lock;  /* <kernel/fork.c> */
+
             /* __sched - indicates the following text is reside on section ".sched.text" */
             #define __sched __attribute__((__section__(".sched.text")))
 
@@ -16195,7 +16201,7 @@ Chapter 9 : Process Address Space
          * @mmap_sem:  memory region read/write semaphore
          * @page_table_lock: protects page tables and some counters
          * @mmlist:    list of maybe swapped mm's,these are globally strung together off @init_mm.mmlist,
-         *             and protected by @mmlist_lock
+         *             and protected by @mmlist_lock -- defined in <kernel/fork.c>
          *             this member is used to chain all memory descriptors
          * @hiwater_rss: high-watermask of RSS usage,maximum number of page frames ever owned by the process
          * @hiwater_vm:  high-water virtual memory usage,maximum number of page frames ever included in the 
@@ -40853,4 +40859,128 @@ Chapter 17 : Page Frame Reclaiming
                 "out":
                   we re-schedule the delayed work @work again,time interval is round_jiffies_relative(REAPTIMEOUT_CPUC).
                   the macro is defined to "2 * Hz".
-                
+
+        The Out of Memory Killer :
+          when there is no free memory can be allocated and PFRA also is fault to reclaim any page frames,we are in the case
+          "Out of Memory".for deal with this problem,out_of_memory() is called.this usually is happens in allocate page 
+          frame path,the function __alloc_pages_may_oom(),which is in the slow path.
+          finally,function oom_kill_process() is called to kill a "best" process and free its page frames.
+          function select_bad_process() is used to pick up the "best" process from the all existing processes on the system.
+          the selected process should satisfy several requisites :
+            1> the victim should own a large number of page frames,so that the amount of memory that can be freed is
+               significant. /* the amount of memory eaten by all children owned by the parent,too */
+            2> killing the victim should lose a small amount of work -- it is not a good idea to kill a batch process that
+               has been working for hours or days.
+            3> the victim should be a low static priority process -- the users tend to assign lower priorites to less
+               important processes.
+            4> the victim should not be a process with root privileges -- they usually perform important tasks.
+            5> the victim should not directly access hardware devices(such as the X Window Server),because the
+               hardware could be left in an unpredicatable state.
+            6> the victim can not be swapper(process 0),init(process 1),or any other kernel thread.
+                                     /* on newer kernel version,swapper is created by kernel thread "kthreadd",
+                                      * in this case,its PID is not 0.
+                                      */            
+
+          select_bad_process() need to scan all processes,and use an empirical formula to compute from the above rules
+          a value that denotes how good slecting that process is.
+          oom_kill_process() send a deadly signal(usually SIGKILL) to either a child of that process,or if this is not
+          possible,send to the process itself;all clones that share the same memory descriptor with the selected victim
+          also be killed.
+
+          <mm/oom_kill.c>
+            /**
+             * out_of_memory - kill the "best" process when out of memory
+             * @zonelist:      memory zones that allocation failed on
+             * @gfp_mask:      GFP flag
+             * @order:         amount of memory being requested as a power of 2
+             * @nodemask:      NUMA node mask
+             */
+            void out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask, int order, nodemask_t *nodemask);
+
+            brief description for out_of_memory() :
+              when we enter this function,first need to call all notifiers residing on @oom_notify_list.
+              /* via blocking_notifier_call_chain() <kernel/notifier.c> */
+              we pass local variable @freed's address to these notifiers,if we found @freed is greater than
+              _zero_(its default value is 0),that means someone got some memory back in the last second,
+              we just return to caller as well.
+              next,check if there were limitations on the allocation(only relevant for NUMA) that may require
+              different handling -- by invoke constrained_alloc(),result stored in local variable @constraint.
+              acquire @tasklist_lock.
+              for @constraint -
+                      CONSTRAINT_MEMORY_POLICY 
+                        invoke oom_kill_process() on @current
+                               /**
+                                * static int oom_kill_process(*@p, @gfp_mask, @order, @points, *@mem, *@message);
+                                * - if printk_ratelimit() resulted TRUE,we need dump oom header at beginning.
+                                *   if @p has PF_EXITING,we just call to __oom_kill_task() on @p without verbose print,
+                                *   then return.this function will invoke force_sig() on @p with signal SIGKILL,
+                                *   and the process that SIGKILL is delivered to will be set TIF_MEMDIE.
+                                *   printk  KERN_ERR message,because we are going to kill all children of @p.
+                                *   for each task in @p->children
+                                *           current child has same memory descriptor as @p,skip it.
+                                *           # because @p will be killed,so the memory will be freed.
+                                *           if @mem -- memory cgroup is not NULL AND current child is not in the @mem,skip it.
+                                *           invoke oom_kill_task() on current child,return 0 if failed.
+                                *   finally,invoke oom_kill_task() on @p. # we delay kill @p until all children been killed.
+                                * ! we can not kill init process,kernel thread,mm-less task.
+                                */
+                      CONSTRAINT_NONE
+                        if @sysctl_panic_on_oom is TRUE,printk oom-killer message,dump stack,enter kernel panic.
+                      CONSTRAINT_CPUSET
+                        invoke __out_of_memory()
+                               /**
+                                * __out_of_memory(@gfp_mask, @order) - out_of_memory() helper
+                                * - if @sysctl_oom_kill_allocating_task is TRUE,we kill ourselves;succeed,
+                                *   return to caller.
+                                *   # retry point
+                                *   we selecte the "best" process via select_bad_process().
+                                *   if the returned task descriptor @p satisfied PTR_ERR(@p) == -1UL,return to caller
+                                *   without killing. # because the task "p" is TIF_MEMDIE.
+                                *   if @p is NULL,we printk oom message and enter kernel panic. # we unlock @tasklist_lock
+                                *                                                                 before print.
+                                *   @p is not NULL,and it is the "best" process,so we call oom_kill_process() on it.
+                                *   if failed to kill it,we need retry again. # retry point
+                                */
+              release @tasklist_lock.
+              invoke shecule_timeout_uninterruptible() with 1 jiffies to give the task "p" a good change of
+              killing itself before we retry to allocate memory unless "p" is @current.
+              /* check TIF_MEMDIE flag */
+
+              /**
+               * select_bad_process - scan and select the "best" process to be killed
+               * @ppoints:            pointer to the object will save the good points
+               * @mem:                memory cgroup
+               * return:              task descriptor OR error pointer
+               * # we chose the process with the highest number of 'points'.
+               * # require called with @tasklist_lock is acquired.
+               */
+              static struct task_struct *select_bad_process(unsigned long *ppoints, struct mem_cgroup *mem);
+
+              brief description for select_bad_process() :
+                first,get current monotonic clock time in @uptime,it will be used to compare task's running time.
+                for each process on the system {
+                        skip mm-less task
+                        skip init task
+                        skip not in @mem task if @mem is not NULL
+                        task @p has TIF_MEMDIE,in this case,return ERR_PTR(-1UL) -- someone been killing
+                        task @p has PF_EXITING and @p is not @current,return ERR_PTR(-1UL) -- someone been exiting
+                                                   @p is @current,we set @chosen(local task pointer) to @p,
+                                                   and set *@ppoints to ULONG_MAX.
+                        skip task @p if @p->signal->oom_adj == OOM_DISABLE => this process refuse OOM adjust.
+                        
+                        for the task @p,we invoke badness() on it,pass @uptime.tv_sec as second parameter.
+                        if the points returned from badness() is greater than *@ppoints OR @chosen is NULL,
+                        we select this task @p,and reset *@ppoints to the result of badness() -- points.
+                        # during calculating good points(in badness()),task @p locked via task_lock().
+                        # Good means in badness() :
+                            1> we lose the minimum amount of work done
+                            2> we recover a large amount of memory
+                            3> we do not kill anything innocent of eating tons of memory
+                            4> we want to kill the minimum amount of processes (one)
+                            5> we try to kill the process the user expects us to kill
+                               (meet the POLS -- principle of least surprise)
+
+                        /* we continue to next iteration,maybe can found another better task @p than @chosen */
+                }
+                finally,return @chosen.
+
