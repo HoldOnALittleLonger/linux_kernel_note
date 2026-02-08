@@ -16222,7 +16222,7 @@ Chapter 9 : Process Address Space
          * @cpu_vm_mask: bit mask for lazy TLB switches
          * @context:   architecture-specific MM context
          * @faultstamp: last value of global fault stamp as seen by this process,
-         *              how long it has been since this task got the token
+         *              how long it has been since this task got the token(swap token)
          * @token_priority: token priority
          * @last_interval: last interval
          * @flags:     swap flags,must use atomic bitops to access the bits
@@ -16332,6 +16332,7 @@ Chapter 9 : Process Address Space
          *   and the Page Tables referenced by the memory descriptor,and then call to
          *   mmdrop()
          * # the implementation is introduced in <kernel/fork.c>
+         * # if the exiting process has swap token,the token will be put
          */
         extern void mmput(struct mm_struct *mm);
 
@@ -33732,7 +33733,7 @@ Chapter 16 : Accessing Files
                       mark_page_accessed(),if we are not progress on previous readahead index. 
                       /* mark the page as accessed only at the first time */
                       /* prev index != current index OR prev offset != current offset */
-                      /* PG_referenced | PG_active,the page is using,should not be swapped out */
+                      /* PG_referenced | PG_active,the page is using */
                       /**
                        * inactive,unreferenced -> inactive,referenced
                        * inactive,referenced -> active,unreferenced
@@ -38884,7 +38885,7 @@ Chapter 17 : Page Frame Reclaiming
                   next,check if @vma->vm_mm is not @current's @mm AND @vma->vm_mm has_swap_token() AND
                   @vma->vm_mm->mmap_sem is locked(through rwsem_is_locked()),then let @referenced increase.
                   /* @vma->vm_mm != @current->mm => not the owner of VMA
-                   * @vma->vm_mm has swap token => page swap
+                   * @vma->vm_mm has swap token => this process is exempted from PFRA -- can not be swapped out
                    * @@mmap_sem is locked => in the middle of a page fault
                    *
                    * pretend the page is referenced if the task has the swap token and is in the middle of
@@ -40612,6 +40613,10 @@ Chapter 17 : Page Frame Reclaiming
                              all zones are OK.
 
                              disable swap token,if current is maximum priority 0.
+                             /* disable_swap_token()
+                              * - put @swap_token_mm => all process can be swapped out.
+                              * ! disable swap token when priority reached highest level.
+                              */
 
                           5> the third loop,for each zones in this node,from end to head {
                                      if current zone is not populated_zone(),skip it.
@@ -40983,4 +40988,68 @@ Chapter 17 : Page Frame Reclaiming
                         /* we continue to next iteration,maybe can found another better task @p than @chosen */
                 }
                 finally,return @chosen.
+
+        The Swap Token :
+          Swap Thrashing - when the system is short of free memory,the PFRA tries hard to free memory
+                           by writing pages to disk and stealing the underlying page frames from some
+                           processes;at the same time,however,these processes want to proceed with their
+                           executions,hence they try hard to access their pages.
+                           /* kernel assigns to the processesthe page frames just freed by the PFRA,
+                            * and reads their contents from disk.
+                            */
+          Swap Token - the token exempts the process from the page frame reclaiming,so the process can
+                       continue its execution without page reclaimed by PFRA.
+                       the token in kernel is a global memory descriptor pointer named @swap_token_mm,
+                       which is defined in <mm/thrash.c>,when a process owns the swap token,the pointer
+                       points to the memory descriptor of this process.
+
+          <mm/thrash.c>
+            /* swap token lock */
+            staic DEFINE_SPINLOCK(swap_token_lock);
+
+            /* the swap token */
+            struct mm_struct *swap_token_mm;
+
+            /* token faultstamp */
+            static unsigned int global_faults;
+
+            /**
+             * grab_swap_token - try to get swap token
+             * @mm:              the memory descriptor of the process who want swap token
+             */
+            void grab_swap_token(struct mm_struct *mm);
+
+            brief description for grab_swap_token() :
+              if @swap_token_mm is NULL,we can give @mm the swap token.
+              if @swap_token_mm is not NULL AND it is not equal to @mm,we can give @mm the swap token
+              if and only if its @token_priority is greater than @swap_token_mm->token_priority.
+                                                                 /* the process holding swap token */
+
+              at the beginning,@global_faults is increased by 1,it record the global faultstamp.
+              this function use @global_faults and member @faultstamp of @mm to compute @current_interval.
+              /* @global_faults - @mm->faultstamp */
+              we need to increase @token_priority member of @mm by 2 when we got the swap token or the
+              process have been holding the swap token.
+              when swap token has been assigned to someone,we have to check @current_interval,and update
+              @mm's @token_priority.
+              if @current_interval is less than @mm->last_interval,increase @mm->token_priority by 1.
+                                                                   /* improve priority */
+              otherwise,check whether @mm->token_priority is greater than 0,if it is the case,decrease
+              @mm->token_priority by 1.                            /* reduce priority */
+              before we return to caller,we set @mm->faultstamp to @global_faults,and set @mm->last_interval
+              to @current_interval(even we failed to get the swap token,except we failed to acquire @swap_token_lock).
+
+              ! function do_swap_page() invoke grab_swap_token() if it has read a new page from a swap area,
+                and which is probably called by handle_pte_fault().
+
+            /**
+             * __put_swap_token - put swap token,set it to NULL of @mm is equal to @swap_token_mm
+             * # put_swap_token() is a wrapper of this function and which is called by disable_swap_token().
+             *   but disable_swap_token() invoke put_swap_token() with @swap_token_mm,this will disable
+             *   the token.
+             */
+            void __put_swap_token(struct mm_struct *mm);
+              
+
+          
 
