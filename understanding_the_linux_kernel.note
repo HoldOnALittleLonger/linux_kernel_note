@@ -40729,7 +40729,7 @@ Chapter 17 : Page Frame Reclaiming
                * # if keventd_up() is TRUE AND @reap_work->work.func is NULL then
                *           invoke init_reap_node(@cpu)
                *                  ! this function invoke next_node() to retrieve the next node in
-               *                    the bitmap of @node_states[N_ONLINE],the node is past current
+               *                    the bitmap of @node_states[N_ONLINE],the NUMA node is past current
                *                    @cpu's node.  (type is nodemask_t [MAX_NUMNODES])
                *                    if the node id is MAX_NUMNODES,then make use of the first node.
                *                    set per-CPU variable @slab_reap_node of current @cpu to the node.
@@ -41049,6 +41049,149 @@ Chapter 17 : Page Frame Reclaiming
              *   the token.
              */
             void __put_swap_token(struct mm_struct *mm);
+
+        Swapping :
+          swapping is introduced to offer a backup on disk for unmapped pages.
+          page frames have to be handled by swapping subsystem -
+            1> pages that belong to an anonymous memory region of a process.
+            2> dirty pages that belong to a private memory mapping of a process.
+            3> pages that belong to an IPC shared memory region.
+          kernel exploits the flag Present in the Page Table Entry to signal that a page belonging to
+          a process address space has been swapped out.
+          and linux also usethe remaining bits of the entry to store a "swapped-out page identifier"
+          that _encodes_ the location of the swapped-out page on disk.
+          Page Fault Exception handler will swaps in the missing page from disk if the non-present 
+          page is swapped out.
+
+          main features of swapping subsystem -
+            1> set up "swap areas" on disk to store pages that do not have a disk image.
+            2> manage the space on swap areas allocating and freeing "page slots" as the
+               need occurs.
+            3> provide functions both to "swap out" pages from RAM into a swap area and
+               to "swap in" pages from a swap area into RAM.
+            4> make use of "swapped-out page identifiers" in the Page Table Entries of pages
+               that are currently swapped out to keep track of the positions of data in
+               the swap areas.
+            /* if all the page frames obtained by a process,and not only those containing pages
+             * that have an image on disk,can be reclaimed at will by the PFRA,then swapping has
+             * to be used.
+             *
+             * command "swapoff" can be used to turn off swapping,but in this case,disk trashing
+             * is likely to occur sooner when the system load increases.
+             * # swapping can be used to expand the memory address space that is effectively usable
+             *   by the User Mode processes.
+             */
+
+          Swap Area :
+            the area used to store the pages swapped out from memory,which may be implemented either
+            as a disk partition of its own or as file included in a larger partition.
+            macro MAX_SWAPFILES specified the maximum number of defined swap areas,and it usually is
+            32(1 << 5 -- MAX_SWAPFILES_SHIFT).
+            /* several swap files advantages -
+             *   > spread a lot of swap space among severl disks let hardware act on them concurrently.
+             *   > swap spaced online increase.
+             */
+
+            page slot - 4096 byte block used to contain a swapped-out page.
+            the first page slot is used to persistently store some information about the swap area,such
+            informations are structed in an union named @swap_header.
+
+            <linux/swap.h>
+              /**
+               * swap_header - structure used to describe a swap area
+               * @magic:       provides a string that marks part of the disk
+               *               unambiguously as a swap area
+               * @info:        info of the swap area
+               */
+              union swap_header {
+                      /**
+                       * magic - swap area magic strings,used to mark a disk part is swap area
+                       * @reserved:
+                       *         reserved string
+                       * @magic: magic string,"SWAP-SPACE" or "SWAPSPACE2"
+                       */
+                      struct {
+                              char reserved[PAGE_SIZE - 10];
+                              char magic[10];
+                      } magic;
+
+                      /* info - swap area informations
+                       * @bootbits:
+                       *        not used by the swapping algorithm,it may store
+                       *        partition data,disk labels,and so on
+                       * @version:
+                       *        swapping algorithm version
+                       * @last_page:
+                       *        last page slot that is effectively usable
+                       * @nr_badpages:
+                       *        number of defective page slots
+                       * @sws_uuid:
+                       *        swap area UUID
+                       * @sws_volumen:
+                       *        swap area volumen label
+                       * @padding:
+                       *        padding
+                       * @badpages:
+                       *        up to 637 numbers specifying the location of defective page slots
+                       */
+                      struct {
+                              char bootbits[1024];
+                              __u32 version;
+                              __u32 last_page;
+                              __u32 nr_badpages;
+                              unsigned char sws_uuid[16];
+                              unsigned char sws_volume[16];
+                              __u32 padding[117];
+                              __u32 badpages[1];
+                      } info;
+              };
+
+            Creating and activating a swap area :
+              data stored in swap area by processes only valid when system is running,when the system
+              is switch off,all data will be discarded.
+              hence,swap areas contain very little control information,essentially,the swap area type and the
+              list of defective page slots,that is easily fits in a single 4kB page.
+
+              <linux/swap.h>
+                /**
+                 * swap_extent - swap extent corresponds to a group of pages -- page slots that
+                 *               are physically adjacent on disk
+                 * @list:        page slot list
+                 * @start_page:  index of the first page slot of this extent
+                 * @nr_pages:    number of page slots in this extent
+                 * @start_block: the starting block number of this extent
+                 */
+                struct swap_extent {
+                        struct list_head list;
+                        pgoff_t start_page;
+                        pgoff_t nr_pages;
+                        sector_t start_block;
+                };
+
+              when we want to use a whole disk partition as a swap area,we can first create the partition,
+              then execute command "mkswap" on the parition.
+              the command "mkswap" will write fill a swap_header structure in the first page of the swap area,
+              that is write the header into disk,but the swap area stay in an inactive state.
+              each swap area can be activated in a script file at system boot or dynamically after the system is
+              running.
+              the command "swapon" invoke the system call sys_swapon(),which activate the specified swap area.
+              when activating the swap area,an ordered list of the swap extents that composed this swap area
+              will be created.
+              ! a swap area stored in a disk partition is composed of just one extent.
+                a swap area stored in a regular file can be composed of several extents,
+                because the filesystem may not have allocated the whole file in contiguous blocks on disk.
+
+            Distribute pages in the swap areas :
+              when swapping out,the kernel tries to store pages in contiguous page slots to minimize
+              disk seek time when accessing the swap area.
+              for the case that more than one swap area is used -
+                faster swap areas -- swap area stored in faster disk -- get a higher priority.
+                when searching page slot,kernel starting from the highest priority swap area.
+                if there is several highest priority swap areas,kernel select them cyclically to
+                avoid overloading one of them.
+                if no free slot is found in the swap areas that have the highest priority,the
+                search continues in the swap areas that have a priority next to the highest one,
+                and so on.
               
 
           
