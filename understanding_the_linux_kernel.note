@@ -41330,5 +41330,184 @@ Chapter 17 : Page Frame Reclaiming
                                              +--> counter of page slot 1
 
                      traversing : swap_info_struct 2 => swap_info_struct 0 => swap_info_struct N => ... => swap_info_struct 1
-          
 
+          Swapped-Out Page Identifier :
+            a swapped-out page is uniquely identified quite simply by specifying the index of the swap area in the
+            @swap_info array and the page slot index inside the swap area.
+
+            <linux/swap.h>
+              /* swp_entry_t - swapped-out page identifier */
+              typedef struct {
+                      unsigned long val;  /* encode swap area type and page slot number */
+              } swp_entry_t;
+
+            <linux/swapops.h>
+              /* shift of "type" field in a swap entry.
+               * "* 8" => "<< 3"
+               * "type" field is placed at the five high-order bits.
+               */
+              #define SWP_TYPE_SHIFT(e) (sizeof(e.val) * 8 - MAX_SWAPFILES_SHIFT)
+                                      /* ^usually is 4 bytes */
+
+              /* mask used to extract offset field,and the offset field is
+               * right-aligned in the remaining bits that except the five high-order
+               * bits.
+               */
+              #define SWP_OFFSET_MASK(e) ((1UL << SWP_TYPE_SHIFT(e)) - 1)
+
+              /**
+               * suppose unsigned long is 32 bits.
+               * suppose MAX_SWAPFILES_SHIFT is 5.
+               * SWP_TYPE_SHIFT => 4 * 8 - 5 = 27
+               * 1UL << 27 => 00001000000000000000000000000000
+               *                 #^ order : 27
+               * (1UL << 27) - 1 => 00000111111111111111111111111111 => offset mask
+               */
+
+              ! swp_entry_t's are _never_ stored anywhere in their arch-dependent format.
+
+              /**
+               * swp_entry - construct a swap entry object by encode swap area type and the
+               *             page slot offset,this is the arch-independent format.
+               * @type:      swap area type,used to locate swap_info_struct object in @swap_info array
+               * @offset:    page slot offset
+               * return:     a swap entry
+               * # @ret.val = (@type << SWP_TYPE_SHIFT(ret)) | (offset & SWP_OFFSET_MASK(@ret))
+               */
+              static inline swp_entry_t swp_entry(unsigned long type, pgoff_t offset);
+
+              /* extract "type" field,"@entry.val >> SWP_TYPE_SHIFT(@entry)" */
+              static inline unsigned swp_type(swp_entry_t entry);
+
+              /* extract "offset" field,@entry.val & SWP_OFFSET_MASK(@entry)" */
+              static inline pgoff_t swp_offset(swp_entry_t entry);
+
+              /* convert the Page Table Entry @pte to Swap Entry format and return it.
+               * first,convet @pte through __pte_to_swp_entry(@pte),this is the arch-dependent format.
+               * second,extract "type" field and "offset" field from the arch-dependent entry via
+               * routines __swp_type() and __swp_offset().
+               * third,construct a new arch-independent format from the type and the offset through
+               * swp_entry().
+               */
+              static inline swp_entry_t pte_to_swp_entry(pte_t pte);
+
+              /* convert the Swap Entry @entry to Page Table Entry format and return it.
+               * first,extract the type and the offset from @entry by swp_type() and swp_offset().
+               * second,construct an arch-dependent format from the type and the offset by __swp_entry().
+               * third,convert the arch-dependent format swap entry to PTE via __swp_entry_to_pte().
+               */
+              static inline pte_t swp_entry_to_pte(swp_entry_t entry);
+
+              /* CONFIG_MMU */
+              /* check whether a pte points to a swap entry.
+               * return "!pte_none(@pte) AND !pte_present(@pte) AND !pte_file(@pte)"
+               * @pte cant be _zero_ filled AND the page is not present AND the page frame
+               * is not a file page.
+               */ 
+              static inline int is_swap_pte(pte_t pte);
+              /* END CONFIG_MMU */
+          
+            The maximum size of a swap area is determined by the number of bits available to identify a slot.
+            On 80x86,the 24 bits available limit the size of a swap area to 2^24 slots -- 64GB.
+            
+            a page may belong to several processes,therefore,it is possible to swap out the same page several times.
+            a page is physically swapped out and stored just once,of course,but each subsequent attempt to swap
+            it out increase the @swap_map counter.
+
+            <mm/swapfile.c>
+              /**
+               * swap_duplicate - increase reference count of swap entry by 1
+               * @entry:          the swap entry
+               * return:          0 => success
+               *                  -ENOMEM if a swap_count_continuation is required but
+               *                  could not be atomically allocated
+               * # this routine rely on __swap_duplicate() to test the swap entry.but
+               *   __swap_duplicate() is possible fails for another reason.if it is the
+               *   first iteration,because __swap_duplicate(@entry, 1) did not return -ENOMEM,so
+               *   the loop would not be executed,in this case,no reference count increase,
+               *   and return value is 0.(actually,we failed to increase counter,but stay returned
+               *   0 as if it succeeded)
+               *   if __swap_duplicate() returned -ENOMEM,we need to allocate new page through
+               *   add_swap_count_continuation().
+               *
+               * # function continue swap count rely on routine add_swap_count_continuation(),pass it
+               *   a gfp flag GFP_ATOMIC as the second parameter.
+               *   # add_swap_count_continuation(@entry, @gfp_mask),this routine is called when a swap count
+               *     is duplicated beyond SWAP_MAP_MAX(62),it allocates a new page and links that to the entry's
+               *     page of the original vmalloc'ed swap_map,to hold the "continuation count".
+               *     ! new page frame is allocated via alloc_page(),gfp flag is @gfp_mask | __GFP_HIGHMEM.
+               *     ! the first refcount is extracted via offset field of @entry,t is stored in local
+               *       variable @count,and the value has disabled SWAP_HAS_CACHE.if,after @count disabled
+               *       COUNT_CONTINUED the result is not equal SWAP_MAP_MAX,we will do not use the new page.
+               *
+               *     the head page that newly allocated might will be linked into is got through
+               *     "vmalloc_to_page(@si->swap_map + offset)",@si is swap_info_struct object retrieve from
+               *     @swap_info array,@offset is extracted from @entry.
+               *
+               *     this function traverse pages linked on @head->lru if @head has private data.
+               *     (if @head has no private data,function will set SWP_CONTINUED as its private data,and
+               *      set SWP_CONTINUED in @si->flags,but we do not traverse the page list that linked by
+               *      @lru member)
+               *
+               *     during traversing,function kmap_atomic() current page with type KM_USER0,and use the offset
+               *     into page frame to get the real refcount.
+               *     if the previous refcount(@count) is not COUNT_CONTINUED OR "this" refcount(@count)
+               *     after disabled COUNT_CONTINUED is not equal to SWAP_CONT_MAX,we free the newly allocated
+               *     page frame,and use the older page.
+               *
+               *     otherwise,after traversing done,we will link the newly allocated page frame to @head,
+               *     the connector is @lru member.
+               *     !! THIS FUNCTION RETURN -ENOMEM IF FAILED TO ALLOCATE NEW PAGE FRAME,FOR ALL OTHER CASES,
+               *        IT RETURN 0 TO CALLER,EVEN NO SUCH swap_info_struct OBJECT.
+               *
+               *                                  +--> swap count,need duplicate but beyonded SWAP_MAP_MAX
+               *                                  |
+               *     [============================@========================]     => @swap_map linear address space
+               *           /              /        /              \              => mapped by vmalloc()
+               *     [ ... | page a | ... | page k | page l | ... | page x | ... => physical pages
+               *                            \ => linked by @lru member
+               *                             | page c |
+               *
+               * # this routine usually is invoked while trying to swap out an alread swapped-out page.
+               */
+              int swap_duplicate(swp_entry_t entry);
+
+              /**
+               * __swap_duplicate - verify that a swap entry is valid and increment its swap map count.
+               * @entry:            swap entry
+               * @usage:            value used to increase count
+               * return:            0 => success
+               *                    -ENOMEM => swap-mapped reference requested but needs continued swap count
+               *                    -ENOENT => swap-cache reference is requested but the entry is not used
+               *                    -EEXIST => swap-cache reference is requested but there is already one
+               *                    -EINVAL => swp_entry is migration entry
+               *                    -EINVAL => swp_entry is invalid
+               * # routine extract type and offset,use type to get swap_info_struct object.
+               *   get the counter that corresponds to @p->swap_map[offset].
+               *   disable SWAP_HAS_CACHE in the counter.
+               *   if @usage is equal to SWAP_HAS_CACHE
+               *           if counter is not _zero_ AND it has no SWAP_HAS_CACHE before
+               *           => we will set SWAP_HAS_CACHE for it later -- set @has_cache to SWAP_HAS_CACHE.
+               *           else if counter has SWAP_HAS_CACHE before
+               *           => set return value to error code -EEXIST # someone else added cache
+               *           else
+               *           => set return value to error coed -ENOENT  # no users remaining
+               *
+               *   # this branch should be executed if we are from swap_duplicate().
+               *   else if counter is TRUE OR counter has SWAP_HAS_CACHE before
+               *           if after counter disabled COUNT_CONTINUED is less than SWAP_MAP_MAX
+               *           => let counter += @usage # have not reached maximum count.
+               *           else if after counter disabled COUNT_CONTINUED is greater than SWAP_MAP_MAX
+               *           => set return value ot error code -EINVAL # exceeded limit.
+               *           else if counter is swap_count_continued   # count continuation,we do not increase the original one
+               *           => set counter to COUNT_CONTINUED
+               *           else                                      # need to allocate new page for count continuation,
+               *           => set return value to error code -ENOMEM # because current count is equal to SWAP_MAP_MAX.
+               *   # others
+               *   else
+               *           => set return value to -ENOENT
+               *
+               *   finally,set @p->swap_map[offset] to "counter(the previous value,disabled SWAP_HAS_CACHE,and
+               *   maybe updated) | @has_cache(0 OR SWAP_HAS_CACHE(64))",and return the return value.
+               */
+              static int __swap_duplicate(swap_entry_t entry, unsigned char usage);
