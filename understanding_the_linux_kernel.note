@@ -41270,6 +41270,18 @@ Chapter 17 : Page Frame Reclaiming
               };
 
               /**
+               * swap map count - 8 bits
+               * [ 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 ]
+               * | | | | |<------ counter ------>| max  00111110 => 62
+               * | | | |        # ^SWAP_MAP_BAD => bits 00111111 => 63
+               * | | | +--> SWAP_HAS_CACHE
+               * | | |<---- SWAP_CONT_MAX ------>| bits 01111111 => 127
+               * | +--> COUNT_CONTINUED
+               * |<------- SWAP_MAP_SHMEM ------>| bits 10111111 => 191
+               */
+
+
+              /**
                * swap_list_t - swap info indicator for the swap_info array
                * @head:        index of the first swap area descriptor in swap_info array
                * @next:        index of the next swap area descriptor in swap_info array
