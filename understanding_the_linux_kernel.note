@@ -41627,7 +41627,8 @@ Chapter 17 : Page Frame Reclaiming
                       */
                      the page 0 containing swap header,we need it.
                      if returned a ERR PTR,set error code to PTR_ERR(@page),and goto "bad_swap".
-                 11> we succeed to read page where swap header is stored,so kmap() @page.
+                 11> we succeed to read page where swap header is stored,so kmap() @page,the returned
+                     linear address is stored in a local object @swap_header it is type of union swap_header * .
                      next,copy "SWAPSPACE2" to the @swap_header's @magic.magic.
                      /* report KERN_ERR and set error code to -EINVAL,goto "bad_swap" if copying failed */
                      invoke swab32() on @swap_header->info.version.
@@ -41638,7 +41639,16 @@ Chapter 17 : Page Frame Reclaiming
                       *    1   0   1   0   1   0   1   0
                       *  swab => 01010101
                       */
-                     if the result is 1(version 1),then /* swap partition endianess hack */
+                     if the result is 1(version 1),then
+                       /* swap partition endianess hack.
+                        * the "mkswap" command write swap header into
+                        * swap file through write() system call as usual,
+                        * that will in machine native byte order.
+                        * so we need to swab() these fields for get
+                        * current information.
+                        * swab() routine may invoke __arch_swab32(),
+                        * if which is defined;otherwise,call to __constant_swab32().
+                        */
                              swab32s() -- in-place version, on
                                      @swap_header->info.version
                                      @swap_header->info.last_page
