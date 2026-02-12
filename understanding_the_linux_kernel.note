@@ -41242,7 +41242,8 @@ Chapter 17 : Page Frame Reclaiming
                * @highest_alloc:    while preparing discard cluster
                * @curr_swap_extent: current swap extent
                * @first_swap_extent:
-               *                    the first swap extent
+               *                    the first swap extent,the others will be added into the tail of
+               *                    this first extent,the order followed is from page 0 to page N.
                * @bdev:             swap device or bdev of swap file
                * @swap_file:        pointer to the file object of the regular file
                *                    or device file that stores the swap area
@@ -41523,3 +41524,258 @@ Chapter 17 : Page Frame Reclaiming
                *   maybe updated) | @has_cache(0 OR SWAP_HAS_CACHE(64))",and return the return value.
                */
               static int __swap_duplicate(swap_entry_t entry, unsigned char usage);
+
+          Activating and Deactivating a Swap Area :
+            activate and deactivate a swap area require CAP_SYS_ADMIN capacity.
+
+            The sys_swapon() service routine :
+              program "swapon" just issue swapon() system call to kernel for activate the specified swap area.
+              
+              <mm/swapfile.c>
+                /**
+                 * sys_swapon - system call swapon() service routine,used to activate a specified swap area
+                 * @specialfile:
+                 *              the file which is specified as a swap area,it can be either a regular file or
+                 *              a disk device file that corresponds to a disk parition(we rarely use full disk as swap)
+                 * @swap_flags: swap flags
+                 *              # SWAP_FLAG_PREFER 0x8000 => this swap area will have a higher priority than default
+                 *                                           (default is low priority)
+                 *              ! libc mentioned swap flag SWAP_FLAG_DISCARD,but in linux 2.6.34.1,no such flag is
+                 *                introduced.and the flag SWAP_FLAG_DISCARD will let kernel discard all freed swap pages
+                 *                will be discarded before they are reused,this require the device support discard or
+                 *                trim operations.
+                 *              # SWAP_FLAG_PRIO_MASK 0x7fff => mask used to extract priority in swap flag
+                 *                SWAP_FLAG_PRIO_SHIFT 0
+                 * return:        0 OR error code
+                 */
+                SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
+                => asmlinkage long sys_swapon(const char __user *specialfile, int swap_flags);
+
+                what sys_swapon() does :
+                  1> test user permission,if current user has no CAP_SYS_ADMIN capacity,return -EPERM.
+                  2> kzalloc() a new swap_info_struct object named @p,if failed,return -ENOMEM.
+                  3> acquire @swap_lock.
+                     traverse @swap_info from range [0, @nr_swapfiles),this will find out a free swap area slot.
+                     /* no SWP_USED is set in the element */
+                     after traverse accomplished,we check the iterator,if it is greater than or equal to MAX_SWAPFILES,
+                     that means no freed usable swap area slot,we need to deallocate @p,release lock,and goto "out" label.
+                     in this case,the error code stay is -EPERM.
+                  4> we check the iterator(@type),if it is greater than or equal to @nr_swapfiles,we can install the new swap area
+                     at current slot.
+                     so,set up it,start SMP memory barrier,increase @nr_swapfiles,it now points to current position where
+                     new swap area can be installed.
+                     otherwise,we deallocate @p,and make use of the swap area object which is pointed by the iterator.
+                     /* this swap object is no SWP_USED,we can re-use it. */
+                  5> set some fields of @p.
+                     INIT_LIST_HEAD() @p->first_swap_extent.list .
+                     set @p->flags to SWP_USED,we now using it.
+                     set @p->next to -1,because we have not put it into @swap_info.
+                     release @swap_lock,because we have finished traversing to @swap_info.
+                  6> get @specialfile's name through getname() routine.
+                     if a ERR PTR is returned,we set local variable @name(char *) to NULL,and goto label "bad_swap_2".
+                     otherwise,we use the @name to filp_open() the swap file.
+                     of course,if a ERR PTR is returned again,we set @swap_file to NULL,and goto label "bad_swap_2".
+                  7> now we have opened the swap file,we use it to set @p.
+                     set @p->swap_file to @swap_file(the file pointer returned by filp_open()).
+                     retrieve address space object of the swap file,and the host inode of the address_space,store them
+                     in local variable @mapping and @inode,respectively.
+                  8> set error code to -EBUSY.
+                     we traverse @swap_info again without hold @swap_lock.
+                     in this loop,we use @i as an iterator {
+                             for current swap area object @q <= @swap_info[i].
+                             if @i == @type OR @q->swap_file is NULL,we skip it.
+                             if @mapping == @q->swap_file->f_mapping,we jump to "bad_swap" label.
+
+
+                             /**
+                              * this loop check whether the swap file is been used by another swap area.
+                              * we can not re-use a swap file when it is been held by others.
+                              */
+                     }
+                  9> we need to check type of swap file,either a regular file or a device.
+                     set error code to -EINVAL.
+                     invoke S_ISBLK() on @inode->i_mode.
+                       it is block device {
+                               get bdev of @inode,invoke bd_claim() to let this function become a holder of
+                               the bdev.
+                               if failed,goto label "bad_swap".
+                               otherwise,set @p->old_block_size to the result of block_size(@bdev).
+                               and then,invoke set_blocksize() on @bdev to set its block size to PAGE_SIZE.
+                               if we failed to set block size,goto label "bad_swap".
+                               if everything is OK,set @p->bdev to @bdev.
+                       }
+                     invoke S_ISREG() on @inode->i_mode,because it is not a block device.
+                       it is regular file {
+                               set @p->dev to the @s_dev of the super block of @inode.
+                               acquire @i_mutex of @inode.
+                               set local recorder @did_down to 1.
+
+                               check whether S_SWAPFILE is set in @inode's flags,if it is the case,
+                               we set error code to -EBUSY and goto label "bad_swap".
+                               /* this inode is been got by swapon() on another kernel control path,
+                                * we can not use the swap file.
+                                */
+                       }
+                     if it neither is block device,nor is regular file,so goto label "bad_swap.
+                 10> get @inode size in PAGE_SIZE,store result in @swapfilepages.
+                     if @mapping have not implemented readpage(),set error code to -EINVAL,and goto
+                     label "bad_swap".
+                     we read_mapping_page() on the page has index 0 of @mapping,and target file is
+                     @swap_file.
+                     /* this function invoke read_cache_page(),the @filter is the method readpage()
+                      * of the address_space.
+                      */
+                     the page 0 containing swap header,we need it.
+                     if returned a ERR PTR,set error code to PTR_ERR(@page),and goto "bad_swap".
+                 11> we succeed to read page where swap header is stored,so kmap() @page.
+                     next,copy "SWAPSPACE2" to the @swap_header's @magic.magic.
+                     /* report KERN_ERR and set error code to -EINVAL,goto "bad_swap" if copying failed */
+                     invoke swab32() on @swap_header->info.version.
+                     /* swab() => __swab32(),defined in <linux/swab.h>
+                      * - swap adjacent bytes,return a byteswapped 32-bit value.
+                      *
+                      *  [ 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 ]
+                      *    1   0   1   0   1   0   1   0
+                      *  swab => 01010101
+                      */
+                     if the result is 1(version 1),then /* swap partition endianess hack */
+                             swab32s() -- in-place version, on
+                                     @swap_header->info.version
+                                     @swap_header->info.last_page
+                                     @swap_header->info.nr_badpages
+                                     each element in @swap_header->info.badpages[],range [0, @swap_header->info.nr_badpages)
+                 12> check the swap header's sub-version.
+                     if @swap_header->info.version is not equal to 1,that means it is a wrong version.
+                     /* swab32() is not in-place version */
+                     then
+                             print KERN_WARNING message.
+                             set error code to -EINVAL.
+                             goto "bad_swap". /* we can not use the swap area with a wrong version */
+                 13> set @p->lowest_bit to 1.
+                     set @p->cluster_next to 1.
+                     set @p->cluster_nr to 0.
+                     now,we need to vmalloc() @swap_map member,before do this,we need to determine how many pages
+                     the @swap_map should maps.
+                     first @maxpages is got by invoke swp_offset() on a swap entry with type 0 and offset ~0UL.
+                     we have to construct a swap entry at first,then convert it to PTE,and convert it back to
+                     swap entry format.finally,invoke swp_offset() on the entry.
+                     @maxpages is the "offset + 1".
+
+                     test @maxpages,if it is greater than @swap_header->info.last_page,we need to limit it to
+                     @swap_header->info.last_page + 1.
+                     if overflow happened,we set @maxpages to UINT_MAX.
+                     
+                     set @p->highest_bit to "@maxpages - 1".
+
+                     set error code to -EINVAL,and check @maxpages and @nr_badpages member -
+                       if it is _zero_,goto "bad_swap". /* zero mapping */
+                       if @swapfilepages is not _zero_ AND @maxpages is greater than @swapfilepages,
+                       report KERN_WARNING message and to "bad_swap". /* exceeded inode size */
+                       if @swap_header->info.nr_badpages is not _zero_ AND @inode is regular file inode,
+                       goto "bad_swap". /* pre-allocated file but some part of file cant be accessed,bad swap area */
+                       if @swap_header->info.nr_badpages is greater than MAX_SWAP_BADPAGES,
+                       goto "bad_swap. /* so bad hence we can not use this swap area */
+                 14> now we have known the max pages number,ready to vmalloc() @swap_map.
+                     call to vmalloc(),pass it @maxpages,returned linear address stored in the local @swap_map variable.
+                     if @swap_map is 0,goto "bad_swap",error code is -ENOMEM.
+                     otherwise,fill @swap_map with _zero_.
+                     set local variable @nr_good_pages to "@maxpages - 1".
+                                                                      #^the swap header page can not be used as page slot.
+                 15> traverse @swap_header->info.badpages[],range [0, @swap_header->info.nr_badpages) {
+                             the array stored bad pages' numbers.
+                             if current page number is 0 OR current page number is greater than @swap_header->info.last_page,
+                             /* bad page is swap header page OR exceeded total page number */
+                             then set error code to -EINVAL,and goto "bad_swap".
+
+                             if current page number is less than @maxpages,
+                             then set the corresponding counter in @swap_map to SWAP_MAP_BAD,and decrease @nr_good_pages by 1.
+                     }
+                 16> invoke swap_cgroup_swapon(),pass it @type and @maxpages,this function update swap cgroup informations,
+                     if failed,goto "bad_swap".
+                     check @nr_good_pages -
+                             not 0 >
+                                     set @swap_map[0] to SWAP_MAP_BAD,because it is swap header page.
+                                     set @p->max to @maxpages.
+                                     set @p->pages to @nr_good_pages. /* good pages */
+                                     invoke setup_swap_extents(),pass it @p and local variable @span's address.
+                                                                                              #^type is sector_t *
+                                                                                              # number of blocks the extent spanned.
+                                     /* a swap extent is a simple thing which maps a contiguous range of pages onto
+                                      * a contiguous range of disk blocks.an ordered list of swap extents is built at
+                                      * swapon() time and is then used at swap_writepage()/swap_readpage() time for locating
+                                      * where on disk a page belongs.
+                                      * if the swapfile is an S_ISBLK block device,a single extent is installed.
+                                      *
+                                      * for S_ISREG swapfiles,setup_swap_extents() will walk all the file's blocks and
+                                      * will parse them into an ordered extent list,in PAGE_SIZE chunks.if some stray
+                                      * blocks are found which do not fall within the PAGE_SIZE alignment requirements,
+                                      * they are simply tossed out -- we will never use those blocks for swapping.
+                                      * for S_ISREG swapfiles,we set S_SWAPFILE across the life of the swapon,this prevent
+                                      * root from shooting its foot off by ftruncating an "in-use" swapfile.
+                                      */
+                                             result < 0 => failed
+                                             set error code to the resutl,and goto "bad_swap".
+                                      set @nr_good_pages to @p->pages. /* because setup_swap_extents() may change its value */
+                             is  0 >
+                                      report KERN_WARNING message,and set error code to -EINVAL,goto "bad_swap".
+                 17> /* for disk-based swap area,either block device or regular file */
+                     test @p->bdev,if it is not NULL,then
+                             invoke blk_queue_nonrot() on the @bdev's request queue,if result is TRUE
+                                     enable SWAP_SOLIDSTATE in @p->flags
+                                     set @p->cluster_next to "1 + (random32() % @p->highest_bit)".
+                             invoke discard_swap() on @p => swapon() tell device that all the old swap contents can be discarded,
+                                                            to allow the swap device to optimize its wear-levelling.
+                                     returned 0 => enable SWP_DISCARDABLE in @p->flags.
+                 18> acquire @swapon_mutext.
+                     acquire @swap_lock.
+                     if SWAP_FLAG_PREFER is set in @swap_flags,we set @p->prio to
+                             (@swap_flags & SWAP_FLAG_PRIO_MASK) >> SWAP_FLAG_PRIO_SHIFT
+                     otherwise,we set its @prio to "--least_priority".
+                                          /* default value is 0,increase by swapoff() if @p's priority is a negative value,
+                                           * maybe restored if try_to_unuse() the swap area failed.
+                                           */
+                 19> set @p's fields {
+                             .swap_map = @swap_map /* get from vmalloc() */
+                             .flags |= SWP_WRITEOK /* we can use it */
+                     }
+                     update global variables @nr_swap_pages and @total_swap_pages {
+                             @nr_swap_pages += @nr_good_pages
+                             @total_swap_pages += @nr_good_pages
+                             /* good pages of @p */
+                     }
+                     printk KERN_INFO message about this swap area.
+                     insert @p into @swap_info,order is high priority to low priority.
+                 20> release @swap_lock.
+                     release @swapon_mutex.
+                     set error code to 0,and goto label "out".
+
+                 bad_swap:
+                   restore @bdev's block size if @bdev is not NULL,and bd_release() it,because
+                   we bd_claim() it previously.
+                   destroy_swap_extents() on @p.
+                   swap_cgroup_swapoff() on @type,because we can not use this swap area.
+                   proceeding execute "bad_swap_2".
+                 bad_swap_2:
+                   acquire @swap_lock.
+                   set @p->swap_file to NULL.
+                   set @p->flags to 0.
+                   release @swap_lock.
+                   vfree() @swap_map.
+                   close @swap_file,if we opened it previously.
+                   proceeding execute "out".
+
+                 out: /* normal return path */
+                   if @page is not NULL and it is not ERR PTR
+                           kunmap() @page /* the swap header page */
+                           page_cache_release() @page /* read_mapping_page() is called on it */
+                   if @name is not NULL
+                           /* we did getname() */
+                           putname() on @name
+                   if @did_down is TRUE
+                           /* regular file as swap area */
+                           if error code is 0,we set S_SWAPFILE in @inode's @i_flags.
+                           release @inode's @i_mutex.
+                   finally,return error code,it maybe _zero_ -- succeed,or a negative value(error code).
+
+            The sys_swapoff() service routine :
+            
