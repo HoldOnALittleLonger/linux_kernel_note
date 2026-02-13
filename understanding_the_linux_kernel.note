@@ -37965,6 +37965,7 @@ Chapter 17 : Page Frame Reclaiming
 
                                      if @mmlist of @mm is empty,acquire @mmlist_lock and check again,if it still is
                                      empty,add @mm->@mmlist to the @init_mm's @mmlist.release the lock.
+                                               /* @init_mm->mmlist collects maybe swapped mms */
 
                                      decrease MM_ANONPAGES of @mm,increase MM_SWAPENTS of @mm.
 
@@ -41285,7 +41286,7 @@ Chapter 17 : Page Frame Reclaiming
               /**
                * swap_list_t - swap info indicator for the swap_info array
                * @head:        index of the first swap area descriptor in swap_info array
-               * @next:        index of the next swap area descriptor in swap_info array
+               * @next:        index of the swap area descriptor to be used next in swap_info array
                */
               struct swap_list_t {
                       int head;
@@ -41759,13 +41760,13 @@ Chapter 17 : Page Frame Reclaiming
                      release @swapon_mutex.
                      set error code to 0,and goto label "out".
 
-                 bad_swap:
+                 "bad_swap":
                    restore @bdev's block size if @bdev is not NULL,and bd_release() it,because
                    we bd_claim() it previously.
                    destroy_swap_extents() on @p.
                    swap_cgroup_swapoff() on @type,because we can not use this swap area.
                    proceeding execute "bad_swap_2".
-                 bad_swap_2:
+                 "bad_swap_2":
                    acquire @swap_lock.
                    set @p->swap_file to NULL.
                    set @p->flags to 0.
@@ -41774,7 +41775,7 @@ Chapter 17 : Page Frame Reclaiming
                    close @swap_file,if we opened it previously.
                    proceeding execute "out".
 
-                 out: /* normal return path */
+                 "out": /* normal return path */
                    if @page is not NULL and it is not ERR PTR
                            kunmap() @page /* the swap header page */
                            page_cache_release() @page /* read_mapping_page() is called on it */
@@ -41788,4 +41789,182 @@ Chapter 17 : Page Frame Reclaiming
                    finally,return error code,it maybe _zero_ -- succeed,or a negative value(error code).
 
             The sys_swapoff() service routine :
-            
+              routine sys_swapoff() do the reverse to what sys_swapon() did.it is used to remove an
+              specified swap area from system.
+
+              <mm/swapfile.c>
+                /**
+                 * sys_swapoff - system call service routine sys_swapoff(),used to remove a swap area
+                 * @specialfile: the swap file
+                 * return:       0 OR error code
+                 */
+                SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
+                => asmlinkage long sys_swapoff(const char __user *specialfile);
+
+                what sys_swapoff() does :
+                  1> test permission,caller must have CAP_SYS_ADMIN capacity,otherwise,return -EPERM.
+                     call to getname() on @specialfile to get swapfile's pathname,stored in @pathname the
+                     local pointer.
+                     if @pathname is a ERR PTR,then goto label "out",in this case,the error code is encoded
+                     in @pathname,we can extract it via PTR_ERR().
+                  2> use the @pathname to open the swap file via filp_open(),flag is O_RDWR | O_LARGEFILE,mode is 0.
+                     the file pointer is stored in local variable @victim. /* we need to address_space object to
+                                                                            * locate our target -- the swap area object.
+                                                                            */
+                     if @victim is a ERR PTR,we also goto "out",and extract the error code from @victim.
+                  3> get the swap file mapping in @mapping,the local pointer.
+                     acquire @swap_lock.
+                     traverse @swap_info start from @swap_list,use @mapping to find out the previous swap_info_object
+                     of our target @p. /* prev->next => our target */
+                     the iterator is @type,and local variable @prev store the previous swap area's type.
+                     if @type is less than _zero_,that means we have encountered a invalid type
+                             so set error code to -EINVAL,release @swap_lock,goto label "out_dput".
+                  4> invoke security_vm_enough_memory(),pass it @p->pages.
+                     this routine finally end up call to __vm_enough_memory(),which is defined in <mm/mmap.c>,it is
+                     used to check whether @current task has a enough memory to allocate a new virtual mapping;
+                     0 means enogh,-ENOMEM means there is not.
+                     if memory is enough,we invoke vm_unacct_memory(),pass it @p->pages,this routine will let the
+                     per-CPU variable "@vm_committed_as -= @p->pages".
+                     otherwise,there is not enough memory,set error code to -ENOMEM,release @swap_lock,goto "out_dput".
+                  5> /* splice swap areas in @swap_info,we still holding @swap_lock */           
+                     test @prev,if it is less than _zero_,we set @swap_list.head to @p->next.
+                     otherwise,set @swap_info[@prev]->next to @p->next. 
+                     test @p->prio,if it is less than _zero_,then
+                             for each swap area from @p->next,set their @prio member to @p->prio--.
+                                                                                        /* re-adjust priority for them,
+                                                                                         * high => low
+                                                                                         */
+                             let @least_priority++. /* in swapon(),this variable is decreased */
+                  6> modify @nr_swap_pages and @total_swap_pages,let them decrease by @p->pages.
+                     clear SWP_WRITEOK in @p's @flags.
+                     release @swap_lock.
+                     enable PF_OOM_ORIGIN in @current->flags.
+
+                     call to try_to_unuse(@type).
+                     /* this routine is defined in the same file.
+                      * it use swap area @type to retrieve the swap_info_struct object.
+                      * next invoke find_next_to_unuse() to scan the swap area's @swap_map,for each
+                      * in-use entry in the swap mapping {
+                      *
+                      *   # find_next_to_unuse(@si, @prev) - scan @swap_map for entries,if current entry's count is
+                      *                                      not SWAP_MAP_BAD AND the count is not _zero_,return
+                      *                                      the index of this counter.
+                      *                                      if @prev is not _zero_,and current index reached maximum
+                      *                                      index,adjust max to "@prev + 1",reset @prev to 0,reset
+                      *                                      current index to 1 and cotinue scanning.
+                      *                                      if the scanning reached maximum index(@max) again,scanning
+                      *                                      will stop and function return 0.
+                      *                                      # suppose no next unuse after reset current index.
+                      *
+                      *         if @current is signal pending,break and return -EINTR.
+                      *         use the index returned by find_next_to_unuse() to construct a swap entry.
+                      *         invoke read_swap_cache_async() to read the swap page which is corresponds to this swap entry.
+                      *
+                      *         # before enter scanning,start mm is initialized to @init_mm,of course,have got reference increase
+                      *         test start mm's @mm_users,if it is equal to 1,we need to mmput this start mm,and reset it
+                      *         to @init_mm,then increase start mm's @mm_users by 1.
+                      *
+                      *         wait PG_locked clear,wait PG_writeback clear,lock the swap page,and wait PG_writeback clear
+                      *         again.
+                      *
+                      *         read current @swap_map counter in @swcount.
+                      *                      #^si->swap_map
+                      *                      # current @swap_map counter => @swap_map[current swap map index]
+                      *         check @swcount -
+                      *                 SWAP_MAP_SHMEM
+                      *                   => hand over to shmem_unuse(),error returned will break scanning.
+                      *                      next,continue to next scanning iteration.
+                      *                 not _zero_ AND we are not start from @init_mm
+                      *                   => invoke unuse_mm() on the start mm with this swap entry and this swap page.
+                      *                      # function unuse_mm() will traverse memory mapping of current mm,for each anonymous VMA,
+                      *                        it invoke unuse_vma() on the VMA with the swap entry and the swap page,if unuse_vma()
+                      *                        returned a error,we need to stop the loop early;and return the error code to caller.
+                      *
+                      *         check current swap map counter -
+                      *                 not _zero_ /* referenced by someone */
+                      *                   => traverse mms from start mm,connector is @mmlist {
+                      *                        # while-condition : current swap map counter is not _zero_ AND
+                      *                                            no error happened AND
+                      *                                            next mm is not start mm(have not traverse allthing)
+                      *
+                      *                        mmput previous mm /* before enter traversing,it is initialized to start mm */
+                      *                        let previous mm points to current mm
+                      *                        if current mm is @init_mm,set local variable @set_start_mm to 1.
+                      *                        else if @swap_count is not _zero_,invoke unuse_mm() on current mm,with the
+                      *                                swap entry and the swap page.
+                      *                        
+                      *                        test @set_start_mm,if it is TRUE AND current swap map counter is less than @swcount
+                      *                                mmput new start mm /* before enter traversing,it is initialized to start mm */
+                      *                                increase current mm's @mm_users.
+                      *                                reset new start mm to current mm. /* next time,we will start from the last
+                      *                                                                   * recently mm
+                      *                                                                   */
+                      *                                reset @set_start_mm to 0.
+                      *                      }
+                      *                      after travering accomplished,mmput previous mm and start mm,reset start mm to new start mm.
+                      *         this function may need to start writeback if current swap map counter is not _zero_ AND the swap page is
+                      *         dirty.
+                      *         this function will delete this swap page from swap cache via delete_from_swap_cache() if the page
+                      *         is really a swap page AND its @private member is equal to the entry's @val field.
+                      *
+                      *         before enter next iteration,set this swap page dirty,unlock it,page_cache_release() it,and check
+                      *         kenrel preempt,then enter next iteration.
+                      * }
+                      * finally,mmput the start mm,and return the result to caller,0 OR error code.
+                      * 
+                      * ! this routine is similar try_to_unmap() in rmap implementation.but it forcus on memory descriptors
+                      *   they may swapped,these memory descriptors are collected on @init_mm's @mmlist.
+                      *   function unuse_vma() will uncharge the swap page from the process's anonymous VMA.
+                      *   if _zero_ is returned,the swap area should not "in-use" by anyone.
+                      */
+
+                     disable PF_OOM_ORIGIN in @current->flags.
+                  7> check result of try_to_unuse().
+                     if an error is occurred,we need to restore this swap area,so put it back to @swap_info,follow
+                     the original priority order.if @p->prio is less than _zero_,we set its priority to "--@least_priority".
+                     restore @nr_swap_pages and @total_swap_page,reset SWP_WRITEOK in @p->flags.
+                     the priorities of swap areas they are followed @p we have adjusted will not be restored,
+                     even @p->prio is less than _zero_.
+                     after we restored,goto "out_dput".
+                  8> try_to_unuse() succeed.
+                     we acquire semaphore @swap_unplug_sem for WRITE,and release it immediately.
+                     /* if any unplug function is running,we would blocking on DOWN operation.
+                      * we wait them at there and relese semaphore immediately.
+                      */
+                     invoke destroy_swap_extents() on @p,this function will destroy all extents that belong to @p.
+                     if SWP_CONTINUED is set in @p->flags,we invoke free_swap_count_continuations() on @p to free
+                     the pages used by @swap_map for swap map count continuation. /* swapon() allocate and setup them */
+                  9> acquire @swapon_mutex,we avoid sys_swapon() is running.
+                     acquire @swap_lock.
+                     invoke drain_mmlist(),this function will remove all mms on @init_mm->mmlist if all swap areas
+                     been registered on system are not "in-use"(its member @inuse_pages is 0 => not in use).
+                     set @p->highest_bit to 0.
+                     make use of a while-cycle,stop condition is @p->flags < SWP_SCANNING {
+                             release @swap_lock,invoke schedule_timeout_uninterruptible(),timeout is 1 jiffy,then
+                             acquire @swap_lock,enter next iteration.
+                     }
+                 10> we record @p->swap_file in @swap_file a local file pointer,and set @p->swap_file to NULL.
+                     set @p->max to 0.record @p->swap_map in a local @swap_map variable,and set @p->swap_map to NULL.
+                     set @p->flags to 0.
+                     release @swap_lock.
+                     release @swapon_mutex.
+                     invoke vfree() on the local @swap_map to remove vmap mapping.
+                     invoke swap_cgroup_swapoff(),type is @type.(destroy swap account informatin)
+                 11> retrieve the @inode of @mapping.
+                     if @inode is S_ISBLK()
+                             /* block device */
+                             restore block size of the block device,this is changed by sys_swapon().
+                     other cases
+                             just clear S_SWAPFILE flag.(need @i_mutex)
+                     call to filp_close() on the file pointer @swap_file. /* this file should be opened at system
+                                                                           * initialize phase,or by swapon() issued
+                                                                           * by the administrator later.
+                                                                           */
+                     set error code to 0.
+                
+                 "out_dput":
+                   invoke filp_close() on @victim,the file object returned by filp_open() on @specialfile.
+                   continue execute "out".
+                 "out": /* return path */
+                   return error code OR 0.
+                
