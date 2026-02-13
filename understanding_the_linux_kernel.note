@@ -41914,7 +41914,9 @@ Chapter 17 : Page Frame Reclaiming
                       * 
                       * ! this routine is similar try_to_unmap() in rmap implementation.but it forcus on memory descriptors
                       *   they may swapped,these memory descriptors are collected on @init_mm's @mmlist.
-                      *   function unuse_vma() will uncharge the swap page from the process's anonymous VMA.
+                      *   function unuse_vma() will check whether current VMA is the VMA this swap page fall in,if it is,then
+                      *   corresponding PTE to this swap page's index will be adjusted,and this swap page will be added into the
+                      *   process's address space as an anonymous page,it is no longer a swap page in swap cache.
                       *   if _zero_ is returned,the swap area should not "in-use" by anyone.
                       */
 
