@@ -30615,7 +30615,7 @@ Chapter 15 : The Page Cache
            *   @sync_page of @a_ops of @mapping if the method is defined,call to io_scheduler() to
            *   relinquish CPU time;after resume,return _zero_ to caller that the routine __wait_on_bit_lock().
            * # for block device,the default value of method @sync_page is block_sync_page() in <fs/buffer.c>,
-           *   which will call to blk_run_backing_dev() defined in <linux/backing-dev.h> if this page is in
+           *   which will call to blk_run_backing_dev()(defined in <linux/backing-dev.h>) if this page is in
            *   page cache(@mapping of the page is not NULL),finally,method unplug_io_fn() is invoked if
            *   it is exist.                                                # unplug method of this bdi
            */
@@ -41350,7 +41350,7 @@ Chapter 17 : Page Frame Reclaiming
             @swap_info array and the page slot index inside the swap area.
 
             <linux/swap.h>
-              /* swp_entry_t - swapped-out page identifier */
+              /* swp_entry_t - swapped-out page identifier => [type of swap area, offset of page slot] */
               typedef struct {
                       unsigned long val;  /* encode swap area type and page slot number */
               } swp_entry_t;
@@ -41557,16 +41557,16 @@ Chapter 17 : Page Frame Reclaiming
                   2> kzalloc() a new swap_info_struct object named @p,if failed,return -ENOMEM.
                   3> acquire @swap_lock.
                      traverse @swap_info from range [0, @nr_swapfiles),this will find out a free swap area slot.
-                     /* no SWP_USED is set in the element */
+                                                                                     /* no SWP_USED is set in the element */
                      after traverse accomplished,we check the iterator,if it is greater than or equal to MAX_SWAPFILES,
                      that means no freed usable swap area slot,we need to deallocate @p,release lock,and goto "out" label.
                      in this case,the error code stay is -EPERM.
                   4> we check the iterator(@type),if it is greater than or equal to @nr_swapfiles,we can install the new swap area
-                     at current slot.
-                     so,set up it,start SMP memory barrier,increase @nr_swapfiles,it now points to current position where
-                     new swap area can be installed.
+                     at current slot.                      /* but not greater than or equal to MAX_SWAPFILES */
+                     so,set up it,start a SMP memory barrier,increase @nr_swapfiles,it now points to current position where
+                     new swap area can be installed.       /* install a new one */
                      otherwise,we deallocate @p,and make use of the swap area object which is pointed by the iterator.
-                     /* this swap object is no SWP_USED,we can re-use it. */
+                     /* this swap object is no SWP_USED has set,we can re-use it. */
                   5> set some fields of @p.
                      INIT_LIST_HEAD() @p->first_swap_extent.list .
                      set @p->flags to SWP_USED,we now using it.
@@ -41595,6 +41595,8 @@ Chapter 17 : Page Frame Reclaiming
                      }
                   9> we need to check type of swap file,either a regular file or a device.
                      set error code to -EINVAL.
+
+                     block file case :
                      invoke S_ISBLK() on @inode->i_mode.
                        it is block device {
                                get bdev of @inode,invoke bd_claim() to let this function become a holder of
@@ -41605,9 +41607,11 @@ Chapter 17 : Page Frame Reclaiming
                                if we failed to set block size,goto label "bad_swap".
                                if everything is OK,set @p->bdev to @bdev.
                        }
+
+                     regular file case :
                      invoke S_ISREG() on @inode->i_mode,because it is not a block device.
                        it is regular file {
-                               set @p->dev to the @s_dev of the super block of @inode.
+                               set @p->bdev to the @s_bdev of the super block(@i_sb) of @inode.
                                acquire @i_mutex of @inode.
                                set local recorder @did_down to 1.
 
@@ -41615,8 +41619,10 @@ Chapter 17 : Page Frame Reclaiming
                                we set error code to -EBUSY and goto label "bad_swap".
                                /* this inode is been got by swapon() on another kernel control path,
                                 * we can not use the swap file.
+                                * ! it is "in-use".
                                 */
                        }
+
                      if it neither is block device,nor is regular file,so goto label "bad_swap.
                  10> get @inode size in PAGE_SIZE,store result in @swapfilepages.
                      if @mapping have not implemented readpage(),set error code to -EINVAL,and goto
@@ -41630,8 +41636,8 @@ Chapter 17 : Page Frame Reclaiming
                      if returned a ERR PTR,set error code to PTR_ERR(@page),and goto "bad_swap".
                  11> we succeed to read page where swap header is stored,so kmap() @page,the returned
                      linear address is stored in a local object @swap_header it is type of union swap_header * .
-                     next,copy "SWAPSPACE2" to the @swap_header's @magic.magic.
-                     /* report KERN_ERR and set error code to -EINVAL,goto "bad_swap" if copying failed */
+                     next,call to memcmp(),check whether the @swap_header's @magic.magic is same as "SWAPSPACE2".
+                     /* report KERN_ERR and set error code to -EINVAL,goto "bad_swap" if they are not same */
                      invoke swab32() on @swap_header->info.version.
                      /* swab() => __swab32(),defined in <linux/swab.h>
                       * - swap adjacent bytes,return a byteswapped 32-bit value.
@@ -41662,7 +41668,7 @@ Chapter 17 : Page Frame Reclaiming
                              print KERN_WARNING message.
                              set error code to -EINVAL.
                              goto "bad_swap". /* we can not use the swap area with a wrong version */
-                 13> set @p->lowest_bit to 1.
+                 13> set @p->lowest_bit to 1. /* skip page slot 0 */
                      set @p->cluster_next to 1.
                      set @p->cluster_nr to 0.
                      now,we need to vmalloc() @swap_map member,before do this,we need to determine how many pages
@@ -41756,6 +41762,10 @@ Chapter 17 : Page Frame Reclaiming
                      }
                      printk KERN_INFO message about this swap area.
                      insert @p into @swap_info,order is high priority to low priority.
+                     /* insertion is not operates as traverse @swap_info from index 0 to @nr_swapfiles.
+                      * it rather operates on @swap_list iterator,to find out an appropriate position
+                      * to insert this swap area.
+                      */
                  20> release @swap_lock.
                      release @swapon_mutex.
                      set error code to 0,and goto label "out".
@@ -41794,6 +41804,12 @@ Chapter 17 : Page Frame Reclaiming
 
               <mm/swapfile.c>
                 /**
+                 * we need this because the bdev->unplug_fn() can sleep and we cannot hold @swap_lock
+                 * while calling the unplug_fn().and @swap_lock can not be turned into a mutex.
+                 */
+                static DECLARE_RWSEM(swap_unplug_sem);
+
+                /**
                  * sys_swapoff - system call service routine sys_swapoff(),used to remove a swap area
                  * @specialfile: the swap file
                  * return:       0 OR error code
@@ -41814,15 +41830,15 @@ Chapter 17 : Page Frame Reclaiming
                      if @victim is a ERR PTR,we also goto "out",and extract the error code from @victim.
                   3> get the swap file mapping in @mapping,the local pointer.
                      acquire @swap_lock.
-                     traverse @swap_info start from @swap_list,use @mapping to find out the previous swap_info_object
-                     of our target @p. /* prev->next => our target */
+                     traverse @swap_info start from _@swap_list_,use @mapping to find out the previous swap_info_object
+                     of our target @p and the target @p. /* prev->next => our target */
                      the iterator is @type,and local variable @prev store the previous swap area's type.
                      if @type is less than _zero_,that means we have encountered a invalid type
                              so set error code to -EINVAL,release @swap_lock,goto label "out_dput".
-                  4> invoke security_vm_enough_memory(),pass it @p->pages.
+                  4> invoke security_vm_enough_memory(),pass it @p->pages. /* rough check */
                      this routine finally end up call to __vm_enough_memory(),which is defined in <mm/mmap.c>,it is
                      used to check whether @current task has a enough memory to allocate a new virtual mapping;
-                     0 means enogh,-ENOMEM means there is not.
+                     0 means enogh,-ENOMEM means there is not.                  /* because we need to swap in pages */
                      if memory is enough,we invoke vm_unacct_memory(),pass it @p->pages,this routine will let the
                      per-CPU variable "@vm_committed_as -= @p->pages".
                      otherwise,there is not enough memory,set error code to -ENOMEM,release @swap_lock,goto "out_dput".
@@ -41839,33 +41855,50 @@ Chapter 17 : Page Frame Reclaiming
                      clear SWP_WRITEOK in @p's @flags.
                      release @swap_lock.
                      enable PF_OOM_ORIGIN in @current->flags.
+                            /* in case of a dramatic shortage of page frames,the select_bad_process()
+                             * will be forced to select and kill this process -- it is executing "swapoff" command.
+                             */
 
                      call to try_to_unuse(@type).
                      /* this routine is defined in the same file.
                       * it use swap area @type to retrieve the swap_info_struct object.
+                      * set start mm to @init_mm,and increase @mm_users of this memory descriptor.
                       * next invoke find_next_to_unuse() to scan the swap area's @swap_map,for each
-                      * in-use entry in the swap mapping {
+                      * in-use entry in the swap mapping,stop condition is index 0 returned {
                       *
                       *   # find_next_to_unuse(@si, @prev) - scan @swap_map for entries,if current entry's count is
                       *                                      not SWAP_MAP_BAD AND the count is not _zero_,return
                       *                                      the index of this counter.
                       *                                      if @prev is not _zero_,and current index reached maximum
                       *                                      index,adjust max to "@prev + 1",reset @prev to 0,reset
-                      *                                      current index to 1 and cotinue scanning.
+                      *                                      current index to 1 and continue scanning.(from index 1)
                       *                                      if the scanning reached maximum index(@max) again,scanning
                       *                                      will stop and function return 0.
                       *                                      # suppose no next unuse after reset current index.
+                      *                                      # try_to_unuse() call to this routine continuously can ensure
+                      *                                        all swap map counter will become 0 except swap header counter
+                      *                                        and bad page slot counter.
+                      *                                        even if a process do_unmap() its virtual linear address and
+                      *                                        reinsert the partially mapped region where associated with this
+                      *                                        swap area.
+                      *                                        
                       *
                       *         if @current is signal pending,break and return -EINTR.
                       *         use the index returned by find_next_to_unuse() to construct a swap entry.
                       *         invoke read_swap_cache_async() to read the swap page which is corresponds to this swap entry.
+                      *                                           /* read lock page and release when I/O completed */
+                      *                                           /* page read from swap area => put in swap cache */
+                      *                                                  #^swap_readpage()
+                      *         if read_swap_cache_async() returned a NULL page descriptor,function test current swap map counter,
+                      *         it is _zero_ => this page slot is freed by another kernel control path,we can continue to next page slot.
+                      *         not _zero_   => allocate new page failed,return -ENOMEM.
                       *
                       *         # before enter scanning,start mm is initialized to @init_mm,of course,have got reference increase
                       *         test start mm's @mm_users,if it is equal to 1,we need to mmput this start mm,and reset it
                       *         to @init_mm,then increase start mm's @mm_users by 1.
                       *
                       *         wait PG_locked clear,wait PG_writeback clear,lock the swap page,and wait PG_writeback clear
-                      *         again.
+                      *         again.                                       /* lock it again,to prevent swapped out */
                       *
                       *         read current @swap_map counter in @swcount.
                       *                      #^si->swap_map
@@ -41873,12 +41906,14 @@ Chapter 17 : Page Frame Reclaiming
                       *         check @swcount -
                       *                 SWAP_MAP_SHMEM
                       *                   => hand over to shmem_unuse(),error returned will break scanning.
-                      *                      next,continue to next scanning iteration.
+                      *                      continue to next scanning iteration if no error detected;otherwise,stop scanning.
                       *                 not _zero_ AND we are not start from @init_mm
                       *                   => invoke unuse_mm() on the start mm with this swap entry and this swap page.
                       *                      # function unuse_mm() will traverse memory mapping of current mm,for each anonymous VMA,
                       *                        it invoke unuse_vma() on the VMA with the swap entry and the swap page,if unuse_vma()
                       *                        returned a error,we need to stop the loop early;and return the error code to caller.
+                      *                        !! WE ONLY CHECK ANONYMOUS VMAS OF USER MODE PROCESSES,BECAUSE ONLY THE PAGES BELONG
+                      *                           TO THESE VMAS CAN BE SWAPPED OUT.
                       *
                       *         check current swap map counter -
                       *                 not _zero_ /* referenced by someone */
@@ -41889,6 +41924,9 @@ Chapter 17 : Page Frame Reclaiming
                       *
                       *                        mmput previous mm /* before enter traversing,it is initialized to start mm */
                       *                        let previous mm points to current mm
+                      *
+                      *                        we need to check kernel preempt at there before continue.
+                      *
                       *                        if current mm is @init_mm,set local variable @set_start_mm to 1.
                       *                        else if @swap_count is not _zero_,invoke unuse_mm() on current mm,with the
                       *                                swap entry and the swap page.
@@ -41902,13 +41940,24 @@ Chapter 17 : Page Frame Reclaiming
                       *                                reset @set_start_mm to 0.
                       *                      }
                       *                      after travering accomplished,mmput previous mm and start mm,reset start mm to new start mm.
-                      *         this function may need to start writeback if current swap map counter is not _zero_ AND the swap page is
-                      *         dirty.
+                      *
+                      *         test result of the last unuse_mm(),if it is an error code,we need to unlock the page and stop scannig.
+                      *
+                      *         this function may need to start writeback if current swap map counter is not _zero_ AND the page is dirty
+                      *         AND it is a swap page.
+                      *                                /* through swap_writepage(), @wbc->sync_mode is WB_SYNC_NONE 
+                      *                                 * after swap_writepage() returned,it try to lock this page again,
+                      *                                 * and wait on PG_writeback is clear.
+                      *                                 */
+                      *
+                      *                       /* if this page is a swap page */
                       *         this function will delete this swap page from swap cache via delete_from_swap_cache() if the page
                       *         is really a swap page AND its @private member is equal to the entry's @val field.
                       *
                       *         before enter next iteration,set this swap page dirty,unlock it,page_cache_release() it,and check
                       *         kenrel preempt,then enter next iteration.
+                      *         ! set dirty => prevent the shrink_list() function might later drop the page from the Page Table of
+                      *           some process without saving it in an another swap area.
                       * }
                       * finally,mmput the start mm,and return the result to caller,0 OR error code.
                       * 
@@ -41918,6 +41967,15 @@ Chapter 17 : Page Frame Reclaiming
                       *   corresponding PTE to this swap page's index will be adjusted,and this swap page will be added into the
                       *   process's address space as an anonymous page,it is no longer a swap page in swap cache.
                       *   if _zero_ is returned,the swap area should not "in-use" by anyone.
+                      *   ! the swap map counter is decreased in routine unuse_pte(),which invoke swap_free() on the swap entry.
+                      * ! data un-sync problem :                                                            /* delete_from-swap_cache() */
+                      *     a "ghost" process accesses the page slot and starts swapping the page in,but the page is removed from
+                      *     swap cache.it need to read the page from swap area,but this page frame would be different from the
+                      *     page frames owned by the processes that are supposed to share the page with the "ghost" process.
+                      *     this problem does not arise when deactivating a swap area,because interference from a ghost process
+                      *     could happen only if a swapped-out page belongs to a private anonymous memory mapping.in this case,
+                      *     the page is handled by COW mechanism,so it is perfectly legal to assign different page frames to the
+                      *     processes that reference the page.
                       */
 
                      disable PF_OOM_ORIGIN in @current->flags.
@@ -41932,6 +41990,14 @@ Chapter 17 : Page Frame Reclaiming
                      we acquire semaphore @swap_unplug_sem for WRITE,and release it immediately.
                      /* if any unplug function is running,we would blocking on DOWN operation.
                       * we wait them at there and relese semaphore immediately.
+                      * when we got unplug semaphore,that means the block driver's activity is over,the swap pages
+                      * should be readed(async way) from swap area to RAM.
+                      * we use this to sync with block device.
+                      *
+                      * another routine will try to acquire this semaphore is swap_unplug_io_fn(),which will acquire
+                      * this semaphore for READ,if the @page is a swap pace,it will run the backing_dev that the
+                      * corresponding swap_info_struct's @bdev pointed to.hence,the block device driver will start
+                      * work.
                       */
                      invoke destroy_swap_extents() on @p,this function will destroy all extents that belong to @p.
                      if SWP_CONTINUED is set in @p->flags,we invoke free_swap_count_continuations() on @p to free
@@ -41963,6 +42029,9 @@ Chapter 17 : Page Frame Reclaiming
                                                                            * by the administrator later.
                                                                            */
                      set error code to 0.
+    
+                     !! WE DO NOT FREE THIS swap_info_object IN THE @swap_info,JUST MARK IT IS NOT "in-use".
+                        (swapon() MAY ALLOCATED IT FROM GENERAL SLAB CACHE)
                 
                  "out_dput":
                    invoke filp_close() on @victim,the file object returned by filp_open() on @specialfile.
