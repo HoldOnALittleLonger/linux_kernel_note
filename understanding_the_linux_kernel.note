@@ -41289,7 +41289,6 @@ Chapter 17 : Page Frame Reclaiming
                * |<------- SWAP_MAP_SHMEM ------>| bits 10111111 => 191
                */
 
-
               /**
                * swap_list_t - swap info indicator for the swap_info array
                * @head:        index of the first swap area descriptor in swap_info array
@@ -42102,6 +42101,18 @@ Chapter 17 : Page Frame Reclaiming
                              subtract number of in-use page slots from number of available page slots,if the result
                              is less than SWAPFILE_CLUSTER => we no free space to start a new cluster
                              then
+                                     /* This usually happens at the end of swap area.
+                                      *         suppose all page slots are good pages,except page slot 0.
+                                      *
+                                      *         |<--------- pages -------------->|                     
+                                      *         |===================@###########|..............|
+                                      *         |<----- in-use ---->|<- free -->|<- bad area ->| 
+                                      *                             |   |   
+                                      *                             |   +--> less than SWAPFILE_CLUSTER
+                                      *                             |        # we will use this space one by one
+                                      *                             +--> cluster_next
+                                      *                             |<--- reset cluster_nr --->|
+                                      */
                                      set @si->cluster_nr to "SWAPFILE_CLUSTER - 1",and goto label "checks".
 
                              next,test @si->flags,if it set SWP_DISCARDABLE
@@ -42177,10 +42188,20 @@ Chapter 17 : Page Frame Reclaiming
                                    /* page slot has index higher than @highest_bit is "in-use",we do not want them */
                                    /* overflow happened,because @offset < "SWAPFILE_CLUSTER - 1" */
                   4> if result of vm_swap_full() is TRUE AND @si->swap_map[@offset] is equal to SWAP_HAS_CACHE
-                     then
+                     then         /* ^a macro function,return "@nr_swap_pages * 2 < @total_swap_pages" */
+
                              /* reuse swap entry of cache-only swap if not busy */
                              release @swap_lock.
-                             invoke __try_to_reclaim(),pass it @si and current @offset.
+                             invoke __try_to_reclaim_swap(),pass it @si and current @offset.
+                                    /**
+                                     * find_get_page() the page which corresponds to current swap entry in @swapper_space.
+                                     * no such page,return 0;otherwise,invoke try_to_free_swap() on the swap page.
+                                     * try_to_free_swap() - delete_from_swap_cache() on the given page,if it is
+                                     *                        a swap page AND no PG_writeback AND swap map count is 0
+                                     *                      after removing,set this page dirty,and return 1.
+                                     *                      if the page can not be removed,return 0.
+                                     *                      # called with PG_locked.this is done by __try_to_reclaim_swap().
+                                     */
                              acquire @swap_lock again.
                              if the result of __try_to_reclaim_swap() is not _zero_,goto "checks".
                              otherwise,we goto label "scan". /* check next one,do linear examining */
@@ -42197,6 +42218,13 @@ Chapter 17 : Page Frame Reclaiming
                      if @offset is equal to @si->highest_bit,let @highest_bit decrease by 1.
 
                      increase @si->inuse_pages by 1.
+
+                     test @si-inuse_pages,if it is equal to @si->pages => all page slots are "in-use"
+                     then
+                             reset @si->lowest_bit to @si->max.
+                             reset @si->highest_bit to 0.(no page for further allocation)
+                             /* we can still use current page slot at this time */
+
                      set current counter to @usage.
                      set @si->cluster_next to "@offset + 1".
                      disable SWAP_SCANNING flag for @si.
@@ -42266,8 +42294,139 @@ Chapter 17 : Page Frame Reclaiming
                   8> disable SWAP_SCANNING flags,and return 0 to caller.
                      /* -= SWP_SCANNING */
 
+            The get_swap_page() function :
+              this function is used to find out a free page slot by search all registered swap areas.
 
+              <mm/swapfile.c>
+                /**
+                 * get_swap_page - search all registered swap areas to find a free page slot
+                 * return:         a swap entry identify that free page slot
+                 */
+                swp_entry_t get_swap_page(void);
 
+                description for get_swap_page() :
+                  during this function executing,it will acquire @swap_lock.
+                  if @nr_swap_pages is less than or equal to 0 => no available free page slot,this will
+                  release lock and makeup a zero swap entry and return it to caller.
+
+                  decrease @nr_swap_pages by 1,this acts like a placeholder.
+
+                                      /* Round Robin fashion */
+                                      /* first,we continue from the next of last recently searched position,
+                                       * and if necessary,we will restart from the beginning.(involve next calling)
+                                       */
+                  function make use of a for-cycle to traverse swap areas,start from @swap_list.next.
+                  stop condition is either @type < 0 OR @wrapped >= 2,before enter next iteration,
+                  @type will be updated to the local variable @next,it is current swap area's @next member
+                  or @swap_list's @next member {
+                          we get current swap area in @si,and set @next to @si->next.
+                          test @next,if @next is less than 0 => @si is the last OR
+                                          @wrapped is _zero_ /* default value is 0 */ AND
+                                          @si->prio is not equal to the next swap area's @prio
+                                          /* detected different priorities,and we can wrap once */
+                          then
+                                  reset @next to @swap_list.head.
+                                  increase @wrapped by 1. /* we want to restart from head,because current
+                                                           * swap area is the last OR
+                                                           * we detected different priority in next swap area
+                                                           */
+                          test @si->highest_bit,if it is 0,that means it is full in-use,we skip it.
+                          test SWP_WRITEOK flag,if the flag is not set in @si,we skip it because it can not be used
+                          for swap.
+
+                          reset @swap_list.next to @next. /* @next has been updated */
+                          call to scan_swap_map() on @si,pass SWAP_HAS_CACHE as the @usage parameter.
+                          if the returned index is not 0,we release @swap_lock,and use the index to make up
+                          a swap entry {@type, @offset},and return the entry to caller.
+
+                          /* index 0 is returned */
+                          reset @next to @swap_list.next. /* we need to continue searching */
+                  }
+
+                  /* searching completed,no free page slot is found,we restore placeholder */
+                  restore @nr_swap_pages => let it increase by 1.
+
+                  /* no free page slot */                  
+                  release @swap_lock,return swap entry {0}.
+
+            The swap_free() function :
+              this routine is used to free a page slot which is identified by a given swap entry.
+
+              <mm/swapfile.c>
+                /**
+                 * swap_free - get swap area via the given swap entry,invoke swap_entry_free() on the
+                 *             swap area,pass it 1 as the third parameter
+                 * @entry:     swap entry
+                 * # get swap area rely on swap_info_get(),the routine will check type and offset in
+                 *   the entry whether is valid on the @swap_info and on the swap area.
+                 *   if they are valid,return the swap area and acquire @swap_lock.
+                 *   otherwise,printk KERN_ERR message.
+                 */
+                void swap_free(swp_entry_t entry);
+
+                /**
+                 * swap_entry_free - free a swap entry on a specified swap area,and also do usage examination
+                 * @p:               swap area
+                 * @entry:           swap entry
+                 * @usage:           counter test
+                 * return:           the page slot's current reference count,0 means it is free
+                 * # free means decrease the page slot's counter,but this swap entry maybe duplicated via
+                 *   swap_duplicate() by someone.only the counter of this page slot become _zero_,the page
+                 *   slot is considered as a free page slot.
+                 */
+                static unsigned char swap_entry_free(struct swap_info_struct *p, swp_entry_t entry,
+                                                     unsigned char usage);
+
+                description for swap_entry_free() :
+                  first get offset in @entry,use @offset get count of the page slot.
+                  set local variable @has_cache to @count & SWAP_HAS_CACHE => indicate whether this swap entry is
+                                                                              cached.
+                  disable SWAP_HAS_CACHE in @count. /* clear 0x40 in @count,the bit as a flag.
+                                                     * if @count is continuation,0x80 should be
+                                                     * set in it.
+                                                     */
+
+                  if @usage is SWAP_HAS_CACHE,then report VM BUG if @has_cache is FALSE,and set @has_cache to FALSE.
+                     /* this means we want to clear SWAP_HAS_CACHE later,because the entry we want to free is cached.
+                      * we removed it from swap cache,thus there is no longer SWAP_HAS_CACHE is set.
+                      */
+
+                  else if @count is equal to SWAP_MAP_SHMEM,then set @count to 0.
+                          /* special handle to shmem */
+                  else if after disabled COUNT_CONTINUED in @count,the result is less than or equal to SWAP_MAP_MAX
+                  then          /* clear continuation flag,and test count,if it is greater than SWAP_MAP_MAX,
+                                 * we do not handle it.
+                                 * SWAP_MAP_MAX => 62 (valid)
+                                 * value is 63 => SWAP_MAP_BAD(63,invalid) => do not handle it.
+                                 * because we cleared SWAP_HAS_CACHE,and disabled COUNT_CONTINUED,
+                                 * the maximum value of remaining 6 bits only could be 63.
+                                 */
+
+                          test if @count is equal to COUNT_CONTINUED
+                                            /* @count just is 0x80 => 128,it have been continued */
+                          then
+                                  if swap_count_continued() on current page lost with @count resulted TRUE,
+                                  set @count to "SWAP_MAP_MAX | COUNT_CONTINUED". /* increased from SWAP_MAP_MAX */
+                                  otherwise,set @count to SWAP_MAP_MAX. /* not from SWAP_MAP_MAX,set it to the max */
+                          otherwise,it is not count continuation,just decrease @count by 1 as well.
+
+                  test @count,if it is _zero_,we invoke mem_cgroup_uncharge_swap() on the @entry to update cgroup info.
+                  
+                  set @usage to "@count | @has_cache".
+                  reset current page slot's counter to @usage.
+
+                  test @usage,it is _zero_
+                  then
+                          set @p->lowest_bit to @offset,if @offset is less than @p->lowest_bit.
+                          set @p->highest_bit to @offset,if @offset is greater than @p->highest_bit.
+                          set @swap_list.next to @p->type,if @swap_list.next is greater than or equal to 0 AND
+                                                             @p's priority is greater than priority of the next
+                                                             swap area in the swap list.
+                          increase @nr_swap_pages by 1,because this page slot's counter is 0,it is free.
+                          decrease @p->inuse_pages by 1,we freed one.
                    
+                  return @usage to caller. /* if the page slot is free,0 should be returned,otherwise,current
+                                            * reference count should be returned.
+                                            */
 
                 
