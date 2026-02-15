@@ -41232,13 +41232,20 @@ Chapter 17 : Page Frame Reclaiming
                *                      SWAP_CONT_MAX   0x7f    max count,in each @swap_map continuation
                *                      COUNT_CONTINUED 0x80    see @swap_map continuation for full count
                *                      SWAP_MAP_SHMEM  0xbf    owned by shmem/tmpfs,in first @swap_map
-               * @lowest_bit:       index of first free in @swap_map
-               * @highest_bit;      index of last free in @swap_map
+               * @lowest_bit:       index of first free page slot in @swap_map
+               * @highest_bit;      index of last free page slot in @swap_map
+               *                    ! every page slot is lower than @lowest_bit or higher than @highest_bit
+               *                      is known to be occupied.
                * @pages:            total of usable pages of swap,because the first page containing
                *                    swap header,so it can not be used as a page slot
                * @inuse_pages:      number of those currently in use
-               * @cluster_next:     likely index for next allocation
-               * @cluster_nr:       countdown to next cluster search
+               * @cluster_next:     likely index for next allocation.
+               *                    it stores the index of the first page slot to be examined in the
+               *                    next allocation.
+               * @cluster_nr:       countdown to next cluster search,used when allocate page slots.
+               *                    it stores the number of free page slots allocated,and would be 
+               *                    reset to 0 when the function restarts allocation from the beginning
+               *                    of the swap area.
                * @lowest_alloc:     while preparing discard cluster
                * @highest_alloc:    while preparing discard cluster
                * @curr_swap_extent: current swap extent
@@ -42038,4 +42045,229 @@ Chapter 17 : Page Frame Reclaiming
                    continue execute "out".
                  "out": /* return path */
                    return error code OR 0.
+
+          Allocating and Releasing a Page Slot :
+            for minimize disk seek time,when kernel need to swap out page,it have to store the page in contiguous
+            slot.
+            
+            Extreme Strategies :
+              1> always start from the beginning of the swap area.
+                 this will increase average seek time during swap-out operations,because
+                 free page slots may be scattered far away from one another.
+              2> always start from the last allocated page slot.
+                 this will increase the average seek time during swap-in operations if
+                 the swap area is mostly free,because the handful of occupied page slots
+                 may be scattered far away from one another.
+
+            Linux adopted strategy :
+              always start from the last allocated page slot,but has exceptions :
+                1> the end of the swap area is reached.
+                2> SWAPFILE_CLUSTER(<mm/swapfile.c>,macro definition,value is 256) free page slots
+                   were allocated after the last restart from the beginning of the swap area.
+
+                # swap_info_struct => cluster_nr
+                                      cluster_next
+                                      lowest_bit
+                                      highest_bit
+                                      (involve with page slot allocation)
+
+            The scan_swap_map() function :
+              <mm/swapfile.c>
+                #define SWAPFILE_CLUSTER 256
+                #define LATENCY_LIMIT 256
+
+                /**
+                 * scan_swap_map - routine used to search a free page slot on a given swap area.
+                 * @si:            the swap area
+                 * @usage:         value of the usage count to be set
+                 * return:         index to the free page slot OR 0
+                 * # called with @swap_lock holding.
+                 */
+                static inline unsigned long scan_swap_map(struct swap_info_struct *si, unsigned char usage);
+
+                what scan_swap_map() does :
+                  /* we try to cluster swap pages by allocating them sequentially in swap.
+                   * once we have allocated SWAPFILE_CLUSTER pages this way,we resort to
+                   * first-free allocation,starting a new cluster.
+                   */
+                  
+                  1> set @latency_ration(local variable) to LATENCY_LIMIT.(latency used for kernel preempt checking)
+                     let @si->flags += SWP_SCANNING => we are scanning page slot.
+                     set local variables @scan_base and @offset both to @si->cluster_next => we start from there.
+                  2> test @si->cluster_nr,if it is _zero_ /* research a new cluster,because allocated page slots are consumed */
+                     then                 /* after test,we decrease it by 1 => i--
+                                           * we update @cluster_nr at there,and it will
+                                           * be reset when we need to search a new cluster.
+                                           */
+                             subtract number of in-use page slots from number of available page slots,if the result
+                             is less than SWAPFILE_CLUSTER => we no free space to start a new cluster
+                             then
+                                     set @si->cluster_nr to "SWAPFILE_CLUSTER - 1",and goto label "checks".
+
+                             next,test @si->flags,if it set SWP_DISCARDABLE
+                             then
+                                     test @si->lowest_alloc,if it is TRUE,goto label "checks".
+                                     set @si->lowest_alloc to @si->max.(number of page slots in @swap_map,except page slot 0)
+                                     set @si->highest_alloc to 0.
+                             release @swap_lock.
+
+                             /* seek is expensive,we start searching for new cluster from start of patition */
+                             if @si is not backed a solid disk device,we reset @scan_base and @offset to @si->lowest_bit.
+                             /* if we are on a solid disk device,we can start searching from current position */
+                          
+                             set local variable @last_in_cluster to "@offset + SWAPFILE_CLUSTER - 1".
+
+                             use a for-cycle to locate the first empty (unaligned) cluster,stop condition is
+                             @last_in_cluster is greater than @si->highest_bit,increase @offset by 1 before enter next
+                             iteration {
+                            
+                                     /* we need free space in range [@offset, @offset + SWAPFILE_CLUSTER).
+                                      * if the starting position is in-use,we can considier the remaining page slots
+                                      * also "in-use",because we are searching a new cluster.if there is remaining
+                                      * a free page slot,we do not need to start search a new cluster.
+                                      */
+                                     if @si->swap_map[@offset] is not _zero_ => in-use
+                                             set @last_in_cluster to "offset + SWAPFILE_CLUSTER"
+                                     else if @offset is equal to @last_in_cluster
+                                             /* we found from @offset to @last_in_cluster,no page slot is "in-use",
+                                              * so we can freely to use this cluster.
+                                              * @offset advance by 1 at every iteration,and the first branch will
+                                              * check whether current page slot is "in-use".
+                                              */
+                                             acquire @swap_lock.
+                                             let @offset -= "SWAPFILE_CLUSTER - 1".
+                                             reset @si->cluster_next to @offset.
+                                             reset @si->cluster_nr to "SWAPFILE_CLUSTER - 1". /* we reset @cluster_nr,
+                                                                                               * because we got a new cluster.
+                                                                                               */
+                                             set local variable @found_free_cluster to 1.
+                                             goto label "checks".
+
+                                     /* when we checked 256 page slots,we have to check kernel preempt */
+                                     test --@latency_ration,if it is less than 0,we need to check kernel preempt,
+                                     and reset it to LATENCY_LIMIT.
+                             }
+
+                             /* if we come from the for-cycle above,that means we failed to found a cluster
+                              * which is in current position to @highest_bit.
+                              * so next,we should restart search cluster from beginning to @scan_base,the starting position
+                              * of the previous searching.                    # @lowest_bit,below this index,the page slot
+                              *                                                 is "in-use".
+                              */
+                             reset @offset to @si->lowest_bit.
+                             reset @last_in_cluster to "@offset + SWAPFILE_CLUSTER - 1".
+                                                       /* <========================>
+                                                        *  |                      |
+                                                        *  +--> @offset           +--> @last_in_cluster
+                                                        */
+
+                             restart for-cycle,the cycle is almost same as the previous,but stop condition is
+                             "@last_in_cluster >= @scan_base".
+
+                             /* at there,we failed again,@found_free_cluster still is _zero_ */
+                             reset @offset to @scan_base.
+                             acquire @swap_lock.
+                             reset @cluster_nr to "SWAPFILE_CLUSTER - 1" => 255
+                             reset @lowest_alloc to 0.
+
+                  "checks":  /* check if current cluster is available */
+                  3> if @si no SWP_WRITEOK is set,then goto label "no_page".
+                     if @si's @highest_bit is _zero_,then goto label "no_page",because all page slots are in-use.
+                     if @offset is greater than @si->highest_bit,reset @scan_base and @offset to @si->lowest_bit.
+                                   /* page slot has index higher than @highest_bit is "in-use",we do not want them */
+                                   /* overflow happened,because @offset < "SWAPFILE_CLUSTER - 1" */
+                  4> if result of vm_swap_full() is TRUE AND @si->swap_map[@offset] is equal to SWAP_HAS_CACHE
+                     then
+                             /* reuse swap entry of cache-only swap if not busy */
+                             release @swap_lock.
+                             invoke __try_to_reclaim(),pass it @si and current @offset.
+                             acquire @swap_lock again.
+                             if the result of __try_to_reclaim_swap() is not _zero_,goto "checks".
+                             otherwise,we goto label "scan". /* check next one,do linear examining */
+                  5> if current @swap_map counter is not _zero_,goto "scan".
+                                /* @swap_map[@offset] */
+                                /*
+                                 * when we searching a new cluster,we released @swap_lock.
+                                 * hence,someone,may used the page slot at index "@offset -= SWAP_CLUSTER - 1",
+                                 * right after we decided to use this cluster.
+                                 */
+
+                     /* because we need a free page slot,so update recorders */
+                     if @offset is equal to @si->lowest_bit,let @lowest_bit increase by 1.
+                     if @offset is equal to @si->highest_bit,let @highest_bit decrease by 1.
+
+                     increase @si->inuse_pages by 1.
+                     set current counter to @usage.
+                     set @si->cluster_next to "@offset + 1".
+                     disable SWAP_SCANNING flag for @si.
+
+                     /* we will use the page slot at current position */
+                  6> test @si->lowest_alloc,if it is TRUE /* discardable */
+                     then
+                             test @found_free_cluster,if it is TRUE
+                             then
+                                     /* we found a free cluster */
+                                     if @offset is less than @si->highest_alloc AND @si->lowest_alloc is less than or
+                                     equal to @last_in_cluster
+                                     then
+                                             reset @last_in_cluster to "@si->lowest_alloc - 1".
+                                     enable SWP_DISCARDING in @si.
+                                     release @swap_lock.
+
+                                     if @offset is less than @last_in_cluster => we are not allocating the last one
+                                     then
+                                             invoke discard_swap_cluster(),pass it @si,@offset,and result of 
+                                             "@last_in_cluster - @offset + 1".
+                                             /* <========@.........#>
+                                              *          |         |
+                                              *          |         +--> @last_in_cluster
+                                              *          +--> starting
+                                              *          |<------->| => need discard
+                                              */
+                                     acquire @swap_lock again.
+                                     reset @lowest_alloc to 0.
+                                     disable SWP_DISCARDING.
+                                     start a SMP barrier.
+                                     wake up processes waiting on bit "ilog2(SWP_DISCARDING)" of @si->flags is clear.
+                             else if @si->flags set SWP_DISCARDING => we failed to found a new cluster,and someone is
+                                                                      discarding cluster space.
+                                     we just release @swap_lock.
+                                     wait on @si->flags until "ilog2(SWP_DISCARDING)" is cleared,action is wait_for_discard(),
+                                     task state is TASK_UNINTERRUPTIBLE.
+                                     then acquire @swap_lock again.
+                             else
+                                     /* we failed to found a new cluster,and no one is discarding cluster */
+                                     reset @si->lowest_alloc to @offset,if @offset is less than @si->lowest_alloc.
+                                     reset @si->highest_alloc to @offset,if @offset is greater than @si->highest_alloc.
+
+                                     /* pages allocated by racing tasks while scan fro a free cluster is in progress,
+                                      * so that its final discard can exclude them.
+                                      */
+
+                     /* normal return path */
+                     return @offset to caller.
+
+                  "scan":
+                  7> /* scan range [@lowest_bit, @highest_bit] */
+                     release @swap_lock.
+                     from current @offset,for each element in range (@offset, @si->highest_bit] {
+                             if current counter is _zero_,we can use it,acquire @swap_lock and goto "checks".
+                             if vm_swap_full() returned TRUE AND current counter is SWAP_HAS_CACHE,we also
+                             acquire @swap_lock and goto "checks".
+                             check kernel preempt if we have checked 256 elements,then reset @latency_ration.
+                     }
+                     reset @offset to @si->lowest_bit.
+                     from current @offset,for each element in range (@offset, @scan_base),do the same examines
+                     as the previous.
+                     
+                     acquire @swap_lock.
+                     /* we failed to search a new cluster,so we have to use the page slot in [@lowest_bit, @highest_bit] */
+                  "no_page":
+                  8> disable SWAP_SCANNING flags,and return 0 to caller.
+                     /* -= SWP_SCANNING */
+
+
+
+                   
+
                 
