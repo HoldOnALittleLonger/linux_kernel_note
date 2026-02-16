@@ -17782,6 +17782,20 @@ Chapter 9 : Process Address Space
                                       *           struct page *pages[PAGEVEC_SIZE]; # array
                                       *                             #^value is 14
                                       *   }; # total length is (2 + 14 = 16) * sizeof(unsigned long)
+                                      *
+                                      * void lru_add_drain() => <mm/swap.c>
+                                      * - drain_cpu_pagevecs() on current CPU(through get_cpu()),
+                                      *   then put current CPU(through put_cpu()).
+                                      * static void drain_cpu_pagevecs(int cpu) => <mm/swap.c>
+                                      * - get current @cpu's per-CPU variable @lru_add_pvecs.
+                                      *   for each LRU type,get the page-vector,if it is full,
+                                      *   invoke ____pagevec_lru_add() on the page-vector with current LRU
+                                      *   type.
+                                      *   get per-CPU variable @lru_rotate_pvecs.
+                                      *   if its count is not _zero_,invoke pagevec_move_tail() to move
+                                      *   pages in the vector to the tail of associated zone's lru list.
+                                      *   # zone of the page,and LRU list related to this page's LRU type.
+                                      *   # pagevec_move_tail() called with local IRQ disabled.
                                       */
               retrieve TLB cache object,it is type of pointer to struct mmu_gather.
                                      /* from per-CPU variable named "mmu_gathers" */
@@ -35734,8 +35748,8 @@ Chapter 16 : Accessing Files
                          */
                       lock the page through lock_page() /* might sleep */
                                             /* trylock_page() => test_and_set_bit_lock()
-                                             * if PG_locked have been setup,invoke __lock_page()
-                                             * wait on the bit cleared
+                                             * if PG_locked have been setup,
+                                             * wait on the bit cleared and invoke __lock_page() to lock it
                                              */
                       check whether the page get truncated -- the page's @mapping != @file's @f_mapping
                       in this case,we must unlock it,and put it,then goto label "no_cached_page".
@@ -39310,12 +39324,13 @@ Chapter 17 : Page Frame Reclaiming
                         page_check_references() on it returned PAGEREF_RECLAIM or PAGEREF_RECLAIM_CLEAN
                                 PAGEREF_KEEP -> keep in list
                                 PAGEREF_ACTIVATE -> activate it
-                        it is anonymous page but swappable OR anonymous page and been swapped out OR not anonymous page
+                        it is anonymous page,and it is swappable OR anonymous page and been swapped out OR not an anonymous page
                                 anonymous page and have not swapped out
                                         no __GFP_IO in @sc -> keep in list
                                 anonymous page and have not swapped out AND has __GFP_IO in @sc
-                                        try to add the page to swap
+                                        try to add the page to swap /* swappable => add_to_swap() on the page succeed */
                                                 failed -> activate it
+                                /* if we added it to swap cache,then @may_enter_fs is set to 1 */
                         it is mapped and its mapping is not NULL,try_to_unmap() on it returned SWAP_SUCCESS /* User Mode process referenced to it */
                                 try_to_unmap() returned SWAP_FAIL  -> activate it
                                 try_to_unmap() returned SWAP_AGAIN -> keep in list
@@ -39353,7 +39368,7 @@ Chapter 17 : Page Frame Reclaiming
                                                                    |
                                                                    V
                         it has mapping but we succeed to remove mapping for it via __remove_mapping()
-                           /* page cache page OR swap cache,and @_count is not 1 */
+                           /* page cache page OR swap cache page,and @_count is not 1 */
                            /* for swap cache,__delete_from_swap_cache() is called by __remove_mapping().
                             * for page cache,__remove_from_page_cache() is called by __remove_mapping().
                             */
@@ -42429,4 +42444,182 @@ Chapter 17 : Page Frame Reclaiming
                                             * reference count should be returned.
                                             */
 
+          The Swap Cache :
+            swap-in and swap-out can induce many race conditions,the swapping subsystem must handle carefully
+            the following caes -
+              1> Multiple swap-ins
+                   two processes may concurrently try to swap in the same shared anonymous page.
+              2> Concurrent swap-ins and swap-outs
+                   a process may swap-in a page that is being swapped out by the PFRA.
+
+            swap cache,introduced for solve these race problems.
+            the key rule :
+              nobody can start a swap-in or swap-out without checking whether the swap cache already includes
+              the affected page.
+
+            ! concurrent swap operations affecting the same page always act on the same page frame.
+              kernel can rely on PG_locked to avoid any race condition.
                 
+
+            if we need to reclaim an anonymous page and which is swappable,routine shrink_page_list() will
+            invoke add_to_swap() to add this page into swap cache,rather than start an I/O operation directly
+            to write this page to swap area.
+
+            after the page is added into swap cache,the process still holds a reference to the page.but shrink_page_list()
+            proceeding invoke try_to_unmap() on it,hence the Page Table Entry that refer to this page will be replaced
+            by a swap entry(because it is an anonymous page).because add_to_swap() will set this page dirty if the page
+            is added to the swap cache,the later pageout() called by shrink_page_list() will writeback this page to
+            swap area.future access to this page will trigger a swap-in operation,because handle_pte_fault() will found
+            the PTE is a swap entry.
+
+            Swap Cache Implementation :
+              the swap cache is rely on page cache.the global swap mapping is named @swapper_space,and the address_space_operations
+              is named @swap_aops,backing-dev is named @swap_backing_dev_info.
+
+              <mm/swap_state.c>
+                /* a_ops */
+                static const struct address_space_operations swap_ops = {
+                        .writepage = swap_writepage,
+                        .sync_page = block_sync_page,
+                        .set_page_dirty = __set_page_dirty_nobuffers,
+                        .migratepage = migrate_page,
+                };
+
+                /* backing-dev */
+                static struct backing_dev_info swap_backing_dev_info = {
+                        .name = "swap",
+                        .capabilities = BDI_CAP_NO_ACCT_AND_WRITEBACK | BDI_CAP_SWAP_BACKED,
+                        .unplug_io_fn = swap_unplug_io_fn,
+                };
+
+                /* page cache,used for all pages in the swap cache */
+                struct address_space swapper_space = {
+                        .page_tree = RADIX_TREE_INIT(GFP_ATOMIC | __GFP_NOWARN),
+                        .tree_lock = __SPIN_LOCK_UNLOCKED(swapper_space.tree_lock),
+                        .a_ops = &swap_aops,
+                        .i_mmap_nonlinear = LIST_HEAD_INIT(swapper_space.i_mmap_nonlinear),
+                        .backing_dev_info = &swap_backing_dev_info,
+                };
+
+              page in the swap cache are stored as every other page in the page cache,but somethings are different :
+                1> @mapping of the page frame is NULL
+                2> PG_swapcache is set
+                3> @private of the page frame stores the swapped-out page identifier associated with this page
+                4> both page's @_count and the related page slot counter are increased
+
+                ! all swap cache pages will reside on @swapper_space.page_tree.
+                  @swapper_space.nrpages records the number of swap cache pages.
+
+              Helper functions :
+                <mm/swap_state.c>
+                  /**
+                   * lookup_swap_cache - use @entry.val to find a swap cache in @swapper_space.this routine
+                   *                     rely on find_get_page() the radix-tree routine.
+                   * return:             the page descriptor OR NULL(no such page)
+                  struct page *lookup_swap_cache(swp_entry_t entry);
+
+                  /**
+                   * add_to_swap - add @page to the swap cache(@swapper_space).this routine use get_swap_page()
+                   *               to get a free page slot,then invoke add_to_swap_cache() to put @page to the
+                   *               page slot(identified by a swap entry),pass it 
+                   *               __GFP_HIGH | __GFP_NOMEMALLOC | __GFP_NOWARN as the third parameter.
+                   *                           (__GFP_NOMEMALLOC - stops emergency reserves from being allocated)
+                   *               if no free page slot,return 0. 
+                   *               if add to cache succeed,set @page dirty and return 1.
+                   *               if add to cache failed,swapcache_free() the swap entry(page descriptor is NULL) and return 0.
+                   *                                     #^defined in <mm/swapfile.c>
+                   *                                       call swap_info_get() on the swap entry to get swap info object.
+                   *                                       invoke swap_entry_free() on the swap area with the swap entry,
+                   *                                       @usage is SWAP_HAS_CACHE.
+                   *                                       if page descriptor is not NULL,invoke mem_cgroup_uncharge_swapcache(),
+                   *                                       pass this routine @page, @entry, result of "current page slot counter != 0".
+                   *                                                                                  #^returned by swap_entry_free()
+                   *               # add_to_swap_cache(*@page, @entry, @gfp_mask)
+                   *                 - use @gfp_mask to call radix_tree_preload().
+                   *                   no error happens,invoke __add_to_swap_cache(@page, @entry).
+                   *                   invoke radix_tree_preload_end() to mark end.
+                   *                   return 0 OR error code(from radix-tree or __add_to_swap_cache()).
+                   * # VM BUG if
+                   *     @page is not locked
+                   *     @page is not PG_uptodate
+                   */
+                  int add_to_swap(struct page *page);
+
+                  /**
+                   * __add_to_swap_cache - place @page in the swap cache,and setup its fields.
+                   *                       page_cache_get() on page to increase its @_count.
+                   *                       invoke SetPageSwapCache() for it => PG_swapcache.
+                   *                       invoke set_page_private() to set its @private to @entry.val.
+                   *                       call to radix_tree_insert() to insert this @page to @swapper_space.page_tree,
+                   *                       index is @entry.val. # insert require @tree_lock.
+                   *                       no error happened,increase @total_swapcache_pages by 1,increase
+                   *                       zone counter NR_FILE_PAGES of the zone of this @page,increase cache info
+                   *                       through INC_CACHE_INFO() on @add_total field of structure object @swap_cache_info.
+                   *                       return 0 if no error happens;otherwise,restore @page and return error code.
+                   * # VM BUG if 
+                   *     @page is not locked
+                   *     @page been a swap cache page
+                   *     @page is not swap-backed(PageSwapBacked() => return @page->flags & PG_swapbacked)
+                   */
+                  static int __add_to_swap_cache(struct page *page, swp_entry_t entry);
+
+                  /**
+                   * delete_from_swap_cache - use @page->private to locate swap cache index,invoke __delete_from_swap_cache()
+                   *                          on the page.next,invoke swapcache_free() on the index with this @page.
+                   *                          finally,drop reference to @page which is get in add_to_swap().
+                   *                          # void __delete_from_swap_cache(*@page) => <mm/swap_state.c>
+                   *                            - radix_tree_delete() the @page from @page_tree of @swapper_space,index is the
+                   *                              @page's private member.
+                   *                              set @private member to 0,clear PG_swapcache.
+                   *                              decrease @total_swapcache_pages,decrease NR_FILE_PAGES counter of the page's zone,
+                   *                              increase @swap_cache_info.del_total.
+                   * # VM BUG if
+                   *     @page is not locked
+                   *     @page is not PG_swapcache
+                   *     @page is in writeback
+                   */
+                  void delete_from_swap_cache(struct page *page);
+
+                  /**
+                   * free_page_and_swap_cache - perform a free_page(),also freeing any swap cache associated with this page
+                   *                            if it is the last user of the page.
+                   *                            invoke free_swap_cache() on @page,drop reference count to @page.
+                   *                            # static inline void free_swap_cache(struct page *page) => <mm/swap_state.c>
+                   *                              - if @page is PG_swapcache AND @page has NULL @mapping AND we can lock it
+                   *                                        invoke try_to_free_swap() on the @page.
+                   *                                        unlock this @page.
+                   */
+                  void free_page_and_swap_cache(struct page *page);
+
+                  /**
+                   * free_pages_and_swap_cache - batch version of free_page_and_swap_cache().
+                   *                             operates on the page descriptor array @pages,number of pages is @nr.
+                   *                             perform lru_add_drain() to flush lru adding transaction on current CPU.
+                   *                             for page in @pages,take a batch of pages,size is PAGEVEC_SIZE,invoke
+                   *                             free_swap_cache() on each batched page.next invoke release_pages()
+                   *                             on the batch.
+                   */
+                  void free_pages_and_swap_cache(struct page **pages, int nr);
+
+                <mm/swapfile.c>
+                  /**
+                   * free_swap_and_cache - free the swap entry,free the page cache entry if it is the last user.
+                   *                       if @entry is not a swap entry,return 1.
+                   *                       function use @entry to get swap area @p.
+                   *                       if @p is not NULL
+                   *                               invoke swap_entry_free() on @p with the @entry,@usage is 1.
+                   *                               if result is SWAP_HAS_CACHE,find_get_page() on the swap cache,
+                   *                               to get the page has index @entry.val. # page is cached,we need to remove cache.
+                   *                               if @page is not NULL and we can not lock it,page_cache_release() on it.
+                   *                                                                           # we just drop reference,but do not
+                   *                                                                             remove it from swap cache,maybe
+                   *                                                                             someone is referring to it.
+                   *                               release @swap_lock.
+                   *                       if @page is not NULL /* we did find_get_page() */
+                   *                               @page is PG_swapcache AND not in writeback AND (NULL mapping or vm_swap_full() is TRUE)
+                   *                                       invoke delete_from_swap_cache() on it,and set it dirty.
+                   *                               unlock @page and page_cache_release() it.
+                   *                       return result of "@p != NULL".
+                   * # called with @swap_lock held.
+                   */
+                  int free_swap_and_cache(swp_entry_t entry);
