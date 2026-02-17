@@ -6752,6 +6752,8 @@ Chapter 5 : Kernel Synchronization
                                                        |      |
                                                        |      +--> mask that the bit at @nr is 1,others are 0
                                                        +--> old value of *@addr 
+              test_and_set_bit_lock(nr, addr)
+                                            ->       same as test_and_set_bit() on x86 platform
               test_and_clear_bit(nr, addr)  ->       clear the @nr_th bit of *addr and return its old value
               test_and_change_bit(nr, addr) ->       invert the @nr_th bit of *addr and return its old value
 
@@ -37971,11 +37973,15 @@ Chapter 17 : Page Frame Reclaiming
                              initialize a local variable named @entry is type of swp_entry_t,the type is defined
                              in <linux/swap.h>.it is a structure contains only one member named @val is type of
                              unsigned long.@entry is initialized from @page's private data.
+                                                     /* add_to_swap() store swap entry in @private member */
                 
                              if @page is swap cache(PG_swapcache is set),then
-                                     /* swap page */
-                                     if @entry is a duplicated swap entry,restore PTE from @pteval,set return value
-                                     to SWAP_FAIL,and goto label "out_unmap". /* it is flushed previously */
+                                     /* swap page */                                          /* it is flushed previously */
+                                     invoke swap_duplicate() on @entry,if result is les than 0,restore PTE from
+                                     @pteval,set return value to SWAP_FAIL,and goto label "out_unmap".
+                                     /**
+                                      * swap_duplicate() will increase page slot counter of @entry.
+                                      */
 
                                      if @mmlist of @mm is empty,acquire @mmlist_lock and check again,if it still is
                                      empty,add @mm->@mmlist to the @init_mm's @mmlist.release the lock.
@@ -37991,6 +37997,10 @@ Chapter 17 : Page Frame Reclaiming
                                      reset @entry to the result of make_migration_entry(),pass it @page, pte_write(@pteval)
                                      as the parameters.            /* makeup a new migration PTE,and enable Write flag */
 
+                             /* we have duplicated swap entry,so we modify PTE in the @mm that corresponds to this page.
+                              * when the process attempt to access this page frame,Page Fault Exception would be triggered,
+                              * then a swap-in operation will start.
+                              */
                              invoke set_pte_at() to use @entry set PTE,of course,have to convert swap entry to Page Table Entry.
                              do BUG test again,if PTE is a file PTE,we can not swap it out.
 
@@ -39331,13 +39341,28 @@ Chapter 17 : Page Frame Reclaiming
                                         try to add the page to swap /* swappable => add_to_swap() on the page succeed */
                                                 failed -> activate it
                                 /* if we added it to swap cache,then @may_enter_fs is set to 1 */
+
+                        /* we invoke page_mapping() on the page at there,to get @mapping member of this page descriptor.
+                         * <linux/mm.h>
+                         *   static inline struct address_space *page_mapping(struct page *page);
+                         *   - retrieve @page->mapping in local pointer @mapping.
+                         *     if @page is in swap cache,reset @mapping to &@swapper_space.
+                         *     else if page an anonymous page,reset @mapping to NULL. # @mapping & PAGE_MAPPING_ANON
+                         *     finally,return @mapping to caller.
+                         *     ! it is a BUG if page is using by slab.
+                         *     ! lower bit is 1 => page's mapping points to an anon_vma object.
+                         *     ! we do not modify @mapping member of @page to @swapper_space when it is in swap cache,
+                         *       but we return @swapper_space to caller.hence,pageout() called by shrink_page_list()
+                         *       will invoke @swapper_space.writepage() to writeback this swap entry.
+                         */
+
                         it is mapped and its mapping is not NULL,try_to_unmap() on it returned SWAP_SUCCESS /* User Mode process referenced to it */
                                 try_to_unmap() returned SWAP_FAIL  -> activate it
                                 try_to_unmap() returned SWAP_AGAIN -> keep in list
                                 try_to_unmap() returned SWAP_MLOCK -> putback LRU
                         it is not dirty OR "dirty but pageout() returned PAGE_CLEAN or (PAGE_SUCCESS AND it is no longer dirty and
                         in writeback status)"
-                                dirty
+                                dirty   /* pageout it */
                                         PAGEREF_RECLAIM_CLEAN -> keep in list
                                         !@may_enter_fs -> keep in list
                                         !@sc->may_writepage -> keep in list /* page is dirty,but we can not writeback it */
@@ -41302,6 +41327,8 @@ Chapter 17 : Page Frame Reclaiming
                * | | |<---- SWAP_CONT_MAX ------>| bits 01111111 => 127
                * | +--> COUNT_CONTINUED
                * |<------- SWAP_MAP_SHMEM ------>| bits 10111111 => 191
+               *
+               * count is 0 => free(available),and it is not in the swap cache.
                */
 
               /**
@@ -42526,6 +42553,8 @@ Chapter 17 : Page Frame Reclaiming
                    *                           (__GFP_NOMEMALLOC - stops emergency reserves from being allocated)
                    *               if no free page slot,return 0. 
                    *               if add to cache succeed,set @page dirty and return 1.
+                   *               # because we set PG_dirty,so pageout() called by shrink_page_list() will writeback
+                   *                 this page frame.
                    *               if add to cache failed,swapcache_free() the swap entry(page descriptor is NULL) and return 0.
                    *                                     #^defined in <mm/swapfile.c>
                    *                                       call swap_info_get() on the swap entry to get swap info object.
@@ -42623,3 +42652,79 @@ Chapter 17 : Page Frame Reclaiming
                    * # called with @swap_lock held.
                    */
                   int free_swap_and_cache(swp_entry_t entry);
+
+          Swapping Out Pages :
+            Inserting the page frame in the swap cache :
+              this is handled by shrink_page_list().if the page frame is an anonymous page and it is not included in swap cache,
+              add_to_swap() would be called on this page.
+
+            Updating the Page Table Entries :
+              after add_to_swap() terminates,try_to_unmap() will be invoked by shrink_page_list().because add_to_swap() modified
+              page flag and its @private member,thus the function will use the @private member to makeup a new swap entry,and
+              use the entry to reset the corresponding PTE of the page of the process.
+
+            Writing the page into the swap area :
+              because add_to_swap() set PG_swapcache for the page,thus the next calling to page_mapping() will return address of
+              @swapper_space.pageout() will invoke writepage() in @swapper_space to writeback the page frame to swap area.
+
+              <mm/page_io.c>
+                /**
+                 * swap_writepage - routine used to write a swap cache page back to swap area.
+                 * @page:           the page
+                 * @wbc:            writeback control
+                 * return:          0 => we succeed to remove the page from swap cache OR
+                 *                       we succeed to write it back to swap area
+                 *                  -ENOMEM => get BIO failed 
+                 * # first,invoke try_to_free_swap() try to delete the page from swap cache.
+                 *   if we succeed,we can unlock the page and return 0.(because its swap counter is 0)
+                 *   we failed to remove it from swap cache,then we need to write it back to swap area.
+                 *   invoke get_swap_bio(),GFP flag is GFP_NOIO,end routine is end_swap_bio_write().
+                 *                                                             #^finally invoke end_page_writeback().
+                 *   if we failed to get new a BIO,set PG_dirty for it,unlock it and return -ENOMEM.
+                 *   now we got a new BIO associated with this swap cache page,we need to submit it.
+                 *   the default data direction is WRITE(@rw),if sync mode is WB_SYNC_ALL,then
+                 *   we need to enable "(1 << BIO_RW_SYNCIO) | (1 << BIO_RW_UNPLUG)" in @rw.
+                 *   count VM event PSWPOUT.
+                 *   set PG_writeback for @page.
+                 *   unlock it and invoke submit_bio() to start BIO.
+                 *   finally,return 0 to caller.
+                 * # static struct bio *get_swap_bio(gfp_t gfp_flags, struct page *page, bio_end_io_t end_io);
+                 *   - bio_alloc() a new bio which has 1 io vector,allocation flag is @gfp_flags.
+                 *     if succeed,init the @bio {
+                 *             .bi_sector = map_swap_page(@page, &@bio->bi_bdev),
+                 *             .bi_io_vec[0].bv_page = page,
+                 *                          .bv_len  = PAGE_SIZE,
+                 *                          .bv_offset = 0,
+                 *             .bi_vcnt = 1,
+                 *             .bi_idx = 0,
+                 *             .bi_size = PAGE_SIZE,
+                 *             .bi_end_io = @end_io,
+                 *     }
+                 *     let @bio->bi_sector <<= PAGE_SHIFT - 9.(PAGE_SHIFT => 12,result is 3)
+                 *                             ! we convert one_block-PAGE_SIZE to one_block-512B,
+                 *                               to get the real sector number on the backing disk.
+                 *     return the @bio to caller.
+                 *   # sector_t map_swap_page(struct page *page, struct block_device **bdev) => <mm/swapfile.c>
+                 *     - use @page->private to invoke map_swap_entry(),the entry is makeup from the page slot offset.
+                 *     ! static sector_t map_swap_entry(@entry, **@bdev) => <mm/swapfile.c>
+                 *       - use page slot offset to find out the swap extent which include this page slot,
+                 *         return the swap extent's @start_block + (@offset - swap extent's @start_page).
+                 *         we start searching from @curr_swap_extent of the swap area,and update this member
+                 *         to record our current position.
+                 *       ! it is a BUG if no such page slot is present in the swap area.
+                 *       ! found : @se->start_page <= @offset AND @offset < (@se->start_page + @se->nr_pages)
+                 *       ! swap extent,one block corresponds to PAGE_SIZE.
+                 */
+                int swap_writepage(struct page *page, struct writeback_control *wbc);
+
+            Removing the page frame from the swap cache :
+              after we write the page frame back to swap area,shrink_page_list() will invoke __remove_mapping()
+              on the @mapping returned by page_mapping() with the page descriptor.
+              for @mapping is @swapper_space,__delete_from_swap_cache() is called for remove this page frame
+              from swap cache(we added it previously),then invoke swapcache_free() to free the swap entry that
+              corresponds to the page slot.
+              /* this will disable SWAP_HAS_CACHE in the swap map counter,because the page is no longer exist
+               * in the swap cache.
+               * but the swap map counter is not _zero_,there maybe some processes are referring to
+               * it because we invoked swap_duplicate() in try_to_unmap() routine.
+               */
