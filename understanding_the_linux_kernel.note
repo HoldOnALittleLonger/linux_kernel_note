@@ -18530,8 +18530,17 @@ Chapter 9 : Process Address Space
 
                       continue from there:
                       
-                      if we succeed to lock up @old_page,then set local variable @resue to the result
+                      if we succeed to lock up @old_page,then set local variable @reuse to the result
                       of reuse_swap_page(),which try to reuse a swap page frame for @old_page.
+                         /* defined in <mm/swapfile.c>
+                          * get page's @_mapcount in @count.
+                          * if @count <= 1 AND page is PG_swapcache
+                          *         let @count += page_swapcount(page)
+                          *         if @count is 1 AND page is not in writeback
+                          *                 delete page from swap cache,set PG_dirty for it
+                          * finally,return result of "@count <= 1".(if @count stay a negative value,we can not reuse it,because
+                          *                                         no one refer to it)
+                          */
                       if we succeed to got a swap page to reuse,then move @old_page to @vma's anonymous VMA.
                       finally,unlock @old_page.
               @vma->vm_flags enabled VM_WRITE | VM_SHARED
@@ -30775,7 +30784,7 @@ Chapter 15 : The Page Cache
            *     # go down make use of while-cycle until height becomes _zero_
            *       if current node is NULL,then have to invoke radix_tree_node_alloc() to allocate
            *       new tree node,because of radix tree preload,this routine first try per-CPU
-           *       preloaded nodes,allocate new node(might failed) if no free node is avaiable
+           *       preloaded nodes,allocate new node(might failed) if no free node is avaiable.
            *       after get a tree node,setup it with current height,and assign its pointer to
            *       upper node's @slots[](for root,it is @rnode member)
            *     if the final slot is NULL,return -EEXIST to caller
@@ -42728,3 +42737,247 @@ Chapter 17 : Page Frame Reclaiming
                * but the swap map counter is not _zero_,there maybe some processes are referring to
                * it because we invoked swap_duplicate() in try_to_unmap() routine.
                */
+
+          Swapping In Pages :
+            swapping in pages happens when process try to access the swapped out pages through the Page Table Entries,
+            but such pages are not Present in memory,thus Page Fault Exception will happen.function handle_pte_fault()
+            will test whether the PTE points to a swapped out page,if it is,then invoke do_swap_page() to handle swapping in.
+
+            swapping in condition >
+              1> the VMA is valid -- it belongs to a memory region of the current process.
+              2> the page is not Present(no Present flag in PTE).
+              3> the Page Table Entry is not NULL,but Dirty flag is clear.
+
+              /* _zero_ PTE => do_linear_fault() / do_anonymous_page()
+               * file mapping => do_nonlinear_fault()
+               * else,swap PTE => do_swap_page().
+               */
+
+            The do_swap_page() function :
+              function called for swap-in the swapped out pages.
+
+              <mm/memory.c>
+                /**
+                 * do_swap_page - handle swap-in,usually called from handle_pte_fault()
+                 * @mm:           the memory in which the VMA caused Page Fault
+                 * @vma:          the VMA
+                 * @address:      the linear address in @vma
+                 * @page_table:   Page Table Entry that corresponds to the page
+                 *                # handle_mm_fault() invoke pte_alloc(),this is the PTE
+                 * @pmd:          PMD of PTE
+                 * @flags:        Page Fault flags
+                 * @orig_pte:     original PTE
+                 *                # a local PTE named @entry in handle_pte_fault(),which
+                 *                  initialize it from *@page_table
+                 */
+                static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long address,
+                                        pte_t *page_table, pmd_t *pmd, unsigned int flags, pte_t orig_pte);
+
+                what do_swap_page() does :
+                  1> pte_unmap_same() to check @page_table and @orig_pte whether they are same,if it is the case,
+                     pte_unmap() @page_table.
+                     if we failed on unmap @page_table,goto label "out".
+                     use a local object name @entry is type of swp_entry_t,to store the result of pte_to_swp_entry(),
+                     we covert @entry to a swap entry format.
+                  2> if @entry is not a swap entry /* test by non_swap_entry() */
+                     then
+                             test if @entry is a migration entry /* test by is_migration_entry().
+                                                                  * defined in <linux/swapops.h>.
+                                                                  * return TRUE if swap type is SWP_MIGRATION_READ or
+                                                                  * is SWP_MIGRATION_WRITE.
+                                                                  */
+                                     TRUE => invoke migration_entry(),pass it @mm,@pmd,@address.
+                             else if @entry is a hardware poison entry /* test by is_hwpoison_entry(),bad memory unit.
+                                                                        * swap type is SWP_HWPOISON.
+                                                                        */
+                                     set @ret to VM_FAULT_HWPOISON. /* @ret is a local variable used to store return value */
+                             else
+                                     invoke print_bad_pte() to report msg about @orig_pte is a bad PTE.
+                                     set @ret to VM_FAULT_SIGBUS.
+
+                             goto label "out". /* for non-swap-entry case,we handle migration.for others,return error to caller */
+                  3> trigger delay accounting work by enable DELAYACCT_PF_SWAPIN in @current->delay->flags.
+                             /* delayacct_set_flag(),defined in <linux/delay.h> */
+                     invoke lookup_swap_cache() try to find out the swapped out page from swap cache. /* maybe it has been writeback */
+                     @page(local pointer) used to store the result of this function.
+                     if the page is not in swap cache
+                     then
+                             we grab_swap_token() on @mm. /* prevent further swap-out on the memory @mm */
+                             invoke swapin_readahead(),pass it @entry,GFP_HIGHUSER_MOVABLE,@vma,and @address as parameters.
+                             /* of course,ReadAhead also work on swap cache.
+                              * <mm/swap_state.c>
+                              *   struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask, struct vm_area_struct *vma,
+                              *                                 unsigned long addr);
+                              *   - routine used to swap in pages in hope we need them soon.
+                              *     swap readahead :
+                              *       simply read an aligned block of (1 << page_cluster) entries in the swap area.
+                              *       this method is chosen because it does not cost us any seek time.
+                              *       we also make sure to queue the "original" request together with the readahead ones.
+                              *     ! caller must hold @vma->vm_mm semaphore for READ,if @vma is not NULL.
+                              *     ! @page_cluster is type of int defined in <mm/swap.c>,it indicates how many pages
+                              *       do we try to swap or page in/out together.
+                              *       it is initialized to 2 OR 3 during system initialization phase.
+                              *       for small-memory machine,cluster size is 2;otherwise,it is 3.
+                              *       # value is 0 => no readahead.
+                              *   - invoke valid_swaphandles(),pass it @entry,and address of local variable named @offset.
+                              *     this routine return the offset for readaround,and the number of pages to read.(in @nr_pages)
+                              *     # valid_swaphandles() count pages from swp_offset(@entry),in range
+                              *          (base)                                    (end)
+                              *         [(offset >> page_cluster) << page_cluster, base + (1 << page_cluster))
+                              *         # base == 0 => ++base, end > max => end = max
+                              *       when traversing the range,it will acquire @swap_lock.
+                              *       if there is a page slot is free or it is SWAP_MAP_BAD,it will reduce the range by
+                              *       walk back to base.
+                              *       if there is the previous case again,it will pick up the middle.
+                              *                              +--> first free or SWAP_MAP_BAD in this direction
+                              *                         good |
+                              *               |.=.....=======...==.|
+                              *               base    |            end
+                              *                       +--> offset to return
+                              *                       |<--->|
+                              *                         number of pages to read
+                              *
+                              *     # if readahead is disabled(@page_cluster is 0),do not readahead swapped-out pages,
+                              *       that is do not raverse the range,we only read_swap_cache_async() at the end of this
+                              *       function to read the exact swap entry.
+                              *     for swapped-out pages in the range,it invoke read_swap_cache_async() on them.
+                              *     if any fault is occurred on read page async(returned page descriptor is NULL),
+                              *     we break the loop;otherwise,for each page,we page_cache_release() them once,because
+                              *     we get them in read_swap_cache_async().
+                              *     finally,we invoke lru_add_drain(),and read_swap_cache_async() on @entry,return the
+                              *     page descriptor to caller.   
+                              */
+                             if the returned page descriptor(stored in @page) is NULL
+                             then
+                                     call to pte_offset_map_lock() to map @address and get PTE corresponds to @address
+                                     in @page_table.
+                                     if @page_table is same as @orig_pte,we set @ret to VM_FAULT_OOM.
+                                                                                       # because we need to allocate new
+                                                                                         page to store the contents from
+                                                                                         swapped-out page.
+                                     shutdown delay accounting work by clear flag DELAYACCT_PF_SWAPIN in @current->delay->flags.
+                                              /* handled by delayacct_clear_flag() */
+                                     next goto label "unlock".
+                             /* @page is not NULL */
+                             we set @ret to VM_FAULT_MAJOR,and count VM event PGMAJFAULT.
+                     else if,the @page is in swap cache,and it is hardware poison
+                     then
+                             set @ret to VM_FAULT_HWPOISON.
+                             trigger delayed accounting work clear flag,account type is DELAYACCT_PF_SWAPIN.
+                             goto label "out_release".
+                  4> the @page current is in swap cache. /* it have not writeback to swap area,or we read it back to swap cache */
+                     lock @page.
+                     clear delay flag DELAYACCT_PF_SWAPIN.
+                     invoke ksm_might_need_to_copy(),pass it @page,@vma,and @address,store result in @page.
+                     /* routine is defined in <linux/ksm.h>.
+                      * if the page is an anonymous page AND it is not the head anon_vma of VMA AND it is nonlinear mapping,
+                      * then invoke ksm_does_need_to_copy() on it.
+                      * which will allocate a new page,and copy contents from the original page to new page,add new page to
+                      * LRU list or unevictable list,return the page descriptor to the new page(NULL if failed to allocate).
+                      * flag set in new page : PG_dirty, PG_uptodate, PG_swapbacked, PG_locked
+                      */
+                     if @page is NULL(we ksm copied it,but failed to allocate new page),set @ret to VM_FAULT_OOM,and goto label
+                     "out".
+                     try mem_cgroup_try_charge_swapin() on @page,and the memory cgroup will be pointed by local variable @ptr.
+                     if we failed,set @ret to VM_FAULT_OOM,goto label "out_page".
+                  5> we pte_offset_map_lock() the @address,returned PTE pointer is stored in @page_table.
+                     if @page_table is not same as @orig_pte,goto "out_nomap". /* PTE changed */
+                     if no PG_uptodate set in @page,set @ret VM_FAULT_SIGBUS,and goto "out_nomap". /* async reading error */
+                     increase @mm counter MM_ANONPAGES(fast path),decrease @mm counter MM_SWAPENTS(fast path).
+                     makeup a PTE(@pte) for @page,protection is get from @vma->vm_page_prot.
+                  6> if @flags enabled FAULT_FLAG_WRITE AND reuse_swap_page() on @page succeed,
+                     then we update @pte,pte_mkdirty() it and invoke maybe_mkwrite() on it with @vma,disable FAULT_FLAG_WRITE
+                     in @flags.                               /* prevent useless COW,because we are the unique owner to the page */
+                     invoke flush_icache_page() on @page with @vma.
+                     use @pte to set @page_table. /* @pte is newly constructed */
+                     invoke page_add_anon_rmap() on @page. /* page is anonymous page */
+                     call to mem_cgroup_commit_charge_swapin() on @page,the memory cgroup is @ptr.
+                  7> invoke swap_free() to free @entry,because the page been swapped-in.
+                     if vm_swap_full() is TRUE OR @vma has VM_LOCKED is set OR @page is PG_mlocked,we invoke try_to_free_swap()
+                     on @page. /* get it out of swap cache */
+                     unlock @page.
+                     if @flags enabled FAULT_FLAG_WRITE. /* this flag maybe cleared in step 6>,if we can reuse it */
+                     then
+                                invoke do_wp_page(),pass it @mm,@vma,@address,@page_table,@pmd,@ptl,and @pte.
+                                let @ret |= its result.       /* handle COW on a shared page */
+                                if @ret has VM_FAULT_ERROR is set,set @ret to VM_FAULT_ERROR.
+                                goto label "out".
+                     invoke update_mmu_cache(),pass it @vma,@address,and @page_table.MMU will update its cache to include
+                     the new value of @page_table.
+                     
+                     /* continue from "unlock" */
+
+                  "unlock":
+                          pte_unmap_unlock() @page_table,spinlock is stored in @ptl.
+                          /* we mapped @page_table before */
+                  "out":  /* normal return path */
+                          return @ret.
+
+                          /* bad return path */
+                  "out_nomap":
+                          memory cgroup @ptr uncharge swapin.
+                          pte_unmap_unlock() @page_table.
+                  "out_page":
+                          unlock @page.
+                  "out_release":
+                          page_cache_release() @page,return @ret.
+
+            The read_swap_cache_async() :
+              use to commit an asynchrounous READ I/O operation for read swapped-out page from swap area.
+
+              <mm/swap_state.c>
+                /**
+                 * read_swap_cache_async - locate a page of swap in physical memory,reserving swap cache space
+                 *                         and reading the disk if it is not already cached
+                 * @entry:                 swap entry
+                 * @gfp_mask;              new page allocation mask
+                 * @vma:                   VMA which include the page
+                 * @addr:                  linear address
+                 * return:                 page descriptor OR NULL(allocation failed or the swap entry is no longer in use)
+                 */
+                struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
+                                                   struct vm_area_struct *vma, unsigned long addr);
+
+                description for read_swap_cache_async() :
+                  the main work is handled in a do-while cycle,the stop condition is @err(local variable) is -ENOMEM {
+                          first,we find_get_page() from @swapper_space,index is @entry.val.
+                          if we found it,we can stop loop.
+                          otherwise,if @new_page is NULL(a local variable),we alloc_page_vma() to get new page frame,
+                          if failed,break loop because no memory.
+                    
+                          next,invoke radix_tree_preload(),GFP flag is @gfp_mask & GFP_KERNEL.
+                          if failed,break cycle,@err storing the result of this function.
+                          proceeding invoke swapcache_prepare() on @entry,this function invoke __swap_duplicate() on @entry,
+                          @usage is specified to SWAP_HAS_CACHE.
+                          result is stored in @err.
+                          if @err is -EEXIST => someone have duplicated it,we call radix_tree_preload_end(),and continue to next,
+                          iteration.if someone did this for us,the next find_get_page() should return the page descriptor.
+                          for other error,we just radix_tree_preload_end() and break loop.
+
+                          lock @new_page,set PG_swapbacked for it,invoke __add_to_swap_cache() to cache it.
+                          if we succeed
+                                  invoke radix_tree_preload_end().
+                                  call to lru_cache_add_anon() on @new_pge.
+                                  because the page is in swap cache,we invoke swap_readpage() on it to read contents from swap area.
+                                  return @new_page to caller.
+                          if we failed
+                                  also invoke radix_tree_preload_end().
+                                  clear PG_swapbacked on it,clear PG_locked on it,invoke swapcache_free() to remove it from
+                                  swap cache.but we do not deallocate it,we can reuse the page in next iteration to avoid 
+                                  allocate page frame again.
+                  }
+
+                  after loop ended,we check @new_page,if it is not NULL,we drop reference to it.
+                                                      /* we allocated it,but race happened,page is found in next
+                                                       * iteration,thus we need to drop reference to @new_page.
+                                                       * in this case,free_page() should be triggered.
+                                                       * or @found_page is NULL,we failed on radix preload,
+                                                       * also have to drop reference to it.
+                                                       * or we failed on __add_to_swap_cache().
+                                                       * # radix insertion may return -ENOMEM because no available node.
+                                                       */
+                  finally return @found_page to caller.
+
+                    
+/* END OF CHAPTER17 */
+
