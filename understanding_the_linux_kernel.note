@@ -42981,3 +42981,82 @@ Chapter 17 : Page Frame Reclaiming
                     
 /* END OF CHAPTER17 */
 
+
+Chapter 18 :
+
+
+/* END OF CHAPTER18 */
+
+
+CHapter 19 :
+
+
+/* END OF CHAPTER19 */
+
+
+Chapter 20 : Program Execution
+    programe file will be setup by kernel and run as a process,kernel can not just simply load context of the program file
+    into memory and let CPU run from there,it need to eal with flexibility in several areas.
+      Different executable formats :
+        linux is distinguished by its ability to run binaries that were compiled for other operating systems.
+
+      Shared libraries :
+        many executable files do not contain all the code required to run the program but expect the kernel to load in
+        functions from a library at runtime.
+
+      Other information in the execution context :
+        this include the command-line arguments and environment variables familiar to programmers.
+
+    a program is stored on disk as an "executable file",which include both the object code of the functions to be executed
+    and data on which these functions will act.
+    some object codes of functions is included in special files called "libraries",these functions are available to all
+    programmers.
+    the code of a library function may either statically copied into the executable file or linked to the process at runtime.
+                                              (static libraries)                            (shared libraries)
+    command-line arguments are typed in by the user following the executable filename,environment variables are inherited from
+    the shell,but user can modify them before launch the program.
+
+    Executable Files :
+      an executable file is a regular file that describes how to initialize a new execution context.
+      a new program can be executed unless another process load it,in the most case,the process is interactive shell.
+      when we need to run a new program,we can type its full-pathname(or filename,depends on PATH environment variable),
+      and follow an optional arguments for the new program.
+        e.g.        bash> /bin/ls -l    /* full pathname */
+                    bash> ls -l         /* filename on relative path,shell need to search "ls" from the paths defined in
+                                         * environment variable PATH
+                                         */
+      when shell need to start a new program,it first fork itself via sys_fork() system call,and then replace process
+      execution context through system calls exec*().hence,the forked new child process will be replaced by the new
+      program.
+      the exec*() service routine in kernel space need to find the corresponding file,check the executable format,and modifies
+      the execution context of the current process according to the information stored in it.when the system call terminated,
+      the process starts executing the code stored in the executable file.
+
+      when a process starts running a new program,its execution context changes drastically because most of the resources
+      obtained during the process's previous computations are discarded.
+        will be replaced :
+          shell arguments
+          environment variables
+          User Mode address space
+          process name
+          ...
+        will be changed :
+          process privilege
+          ...
+        will be discarded :
+          memory lock
+          pending signals
+          registered signal actions 
+          registered atexit actions
+          shared memory
+          memory mapping
+          POSIX timers
+          POSIX message queue
+          POSIX named semaphore 
+          opened directory
+          floating-environment(floating registers will be reset)
+          ...
+        will be kept :
+          opened file descriptors that no FD_CLOEXEC is set
+          ...
+          
