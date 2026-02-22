@@ -43059,4 +43059,189 @@ Chapter 20 : Program Execution
         will be kept :
           opened file descriptors that no FD_CLOEXEC is set
           ...
+
+    Process Credentials and Capabilities :
+      traditionally,Unix systems associate with each process some "credentials",which bind the process
+      to a specific user and a specific user group.
+      the use of credentials requires support both in the process data structure and in the resources
+      being protected.
+      ! credentials determine what each process can or cannot do,on a multiuser system.
+
+      Credentials in Process data structure :
+        struct task_struct {
+                ...
+                /**
+                 * objective and real subjective task 
+                 * credentials (COW)
+                 */
+                const struct cred *real_cred;
+
+                /**
+                 * effective (overridable) subjective task
+                 * credentials (COW)
+                 */
+                const struct cred *cred;
+    
+                /**
+                 * guard against foreign influences on
+                 * credential calculations (notably, ptrace)
+                 */
+                struct mutex cred_guard_mutex;
+
+                /* for KEYCTL_SESSION_TO_PARENT */
+                struct cred *replacement_session_keyring;
+
+                /**
+                 * executable name excluding path
+                 * - access with [g/s]et_task_comm
+                 *   (which lock it with task_lock())
+                 * - initialized normally by setup_new_exec()
+                 */
+                char comm[TASK_COMM_LEN];
+                ...
+        };
+
+        structure "cred" contains all credentials in process data structure,which is defined in
+        <linux/cred.h>.
+
+        <linux/cred.h>
+          /**
+           * cred - in process credentials
+           * @usage:
+           *        ref counter
+           * @subscribers:
+           *        number of processes subscribed
+           * @put_addr:
+           *        used for debug when put cred
+           * @magic:
+           *        debug magic
+           * @uid:  real UID of the task
+           *        # current login user id
+           * @gid:  real GID of the task
+           *        # current login user's group id
+           * @suid: saved UID of the task
+           *        # usually same as effective uid
+           *          saved set-user-ID
+           *          a copy of effective user-id
+           * @sgid: saved GID of the task
+           *        # usually same as effective gid
+           *          saved set-group-ID
+           *          a copy of effective group-id
+           * @euid: effective UID of the task
+           *        # usually is real user id
+           *        # for all other operations except filesystem related operations
+           *        # for setuid program,this field is set to the owner uid of program file
+           * @egid: effective GID of the task
+           *        # usually is real group id
+           *        # for setgid program,this field is set to the owner gid of program file
+           * @fsuid:
+           *        UID for VFS ops
+           * @fsgid:
+           *        GID for VFS ops
+           * @securebits:
+           *        SUID-less security management
+           * @cap_inheritable:
+           *        caps children can inherit
+           * @cap_permitted:
+           *        caps we are permitted
+           * @cap_effective:
+           *        caps we can actually use
+           * @cap_bset:
+           *        capability bounding set
+           * @jit_keyring:
+           *        default keyring to attach requested keys to
+           * @thread_keyring:
+           *        keyring private to this thread
+           * @request_key_auth:
+           *        assumed request_key authority
+           * @tgcred:
+           *        thread-group shared credentials
+           * @security:
+           *        subjective LSM security
+           * @user: real user ID subscription
+           * @group_info:
+           *        supplementary groups for euid/fsgid
+           * @rcu:  RCU deletion hook
+           */
+          struct cred {
+                  atomic_t usage;
+          #ifdef CONFIG_DEBUG_CREDENTIALS
+                  atomic_t subscribers;
+                  void *put_addr;
+                  unsigned magic;
+          #define CRED_MAGIC 0x43736564
+          #define CRED_MAGIC_DEAD 0x44656144
+          #endif
+
+                  uid_t uid;
+                  gid_t gid;
+                  uid_t suid;
+                  gid_t sgid;
+                  uid_t euid;
+                  gid_t egid;
+                  uid_t fsuid;
+                  gid_t fsgid;
+                  unsigned securebits;
+                  kernel_cap_t cap_inheritable;
+                  kernel_cap_t cap_permitted;
+                  kernel_cap_t cap_effective;
+                  kernel_cap_t cap_bset;
+
+          #ifdef CONFIG_KEYS
+                  unsigned char jit_keyring;
+
+                  struct key *thread_keyring;
+                  struct key *request_key_auth;
+                  struct thread_group_cred *tgcred;
+          #endif
+        
+          #ifdef CONFIG_SECURITY
+                  void *security;
+          #endif
+
+                  struct user_struct *user;
+                  struct group_info *group_info;
+                  struct rcu_head rcu;
+          };
+
+          #define NGROUPS_SMALL 32
+          #define NGROUPS_PER_BLOCK ((unsigned int)(PAGE_SIZE / sizeof(gid_t)))
+
+          /**
+           * group_info - user group info
+           * @usage:      ref counter
+           * @ngroups:    number of groups
+           * @nblocks:    number of gid blocks
+           * @small_block:
+           *              embedded small gid block
+           * @blocks:     pointer to gid blocks
+           */
+          struct group_info {
+                  atomic_t usage;
+                  int ngroups;
+                  int nblocks;
+                  gid_t small_block[NGROUPS_SMALL];
+                  gid_t *blocks[0];
+          };
+
+      the process's credentials usually compared with the corresponding identifiers stroed in the inodes of
+      the files being accessed.
+
+      UID 0 specifies the superuser root,and GID 0 means root group.
+      ! root user has the highest privilege.
+        euid,egid,fsuid,fsgid as the same.
+
+      when a process is created,it always inherits the credentials of its parent.however,these credentials
+      can be modified later,either when the process starts executing a new program or when it issues
+      suitable system calls.
+      ! usually,uid,euid,fsuid,and suid fields contain the same value.but for a setuid file -- setuid flag is on,
+        euid and fsuid are set to the identifier of the file's owner.
+        setgid is similar to setuid.
+
+      Linux and all modern Unix systems,allows processes to acquire setuid privileges only when necessary and drop
+      them when they are no longer needed,to prevent unexpected security risks.
+      when start a setuid program,the effective uid is set the uid of file's owner,and similar to setgid.
+
+      process can change the effective identifiers by means of the setuid(),setresuid(),setfsuid(),and setreuid()
+      system calls.
           
