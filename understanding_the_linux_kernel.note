@@ -43244,4 +43244,19 @@ Chapter 20 : Program Execution
 
       process can change the effective identifiers by means of the setuid(),setresuid(),setfsuid(),and setreuid()
       system calls.
+        ! secure manner :
+            when a set-uid program starts,its effective user id and saved user id both are set to the uid of
+            the owner of this program file.                         /* copy from effective user id */
+            then,we can do this following :
+              > no special request,issue setuid() to drop privilege,that is set user id to real user id.
+              > special request,and we need privilege to do some works.                    /* usually is current user */
+                  > issue setuid() to set effective user id to saved user id for gain privilege.
+                  > ...               /* because saved user id is a copy of effective user id,we can geteuid()
+                                       * to retrieve effective user id when we start,and restore effective user id
+                                       * later,when we need privilege to do some works.
+                                       */
+                  > work done.
+                  > drop the privilege,back to our original privilege.
+                
+            
           
