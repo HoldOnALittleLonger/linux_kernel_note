@@ -43157,7 +43157,7 @@ Chapter 20 : Program Execution
            * @tgcred:
            *        thread-group shared credentials
            * @security:
-           *        subjective LSM security
+           *        subjective LSM(Linux Security Module) security
            * @user: real user ID subscription
            * @group_info:
            *        supplementary groups for euid/fsgid
@@ -43243,7 +43243,7 @@ Chapter 20 : Program Execution
       when start a setuid program,the effective uid is set the uid of file's owner,and similar to setgid.
 
       process can change the effective identifiers by means of the setuid(),setresuid(),setfsuid(),and setreuid()
-      system calls.
+      system calls.                                                /* the system call service routine is defined in <kernel/sys.c> */
         ! secure manner :
             when a set-uid program starts,its effective user id and saved user id both are set to the uid of
             the owner of this program file.                         /* copy from effective user id */
@@ -43257,6 +43257,217 @@ Chapter 20 : Program Execution
                                        */
                   > work done.
                   > drop the privilege,back to our original privilege.
+            !! oops :
+                 because setuid() is called with effective user id is _zero_,it will set all IDs to the given uid,
+                 we dropped the privilege.but when we want to regain privilege,that is impossible,setuid() on uid
+                 _zero_ will failed. /* we lost privilege to set uid to 0 */
+                 the BSD-style setreuid() can help us to drop privilege temporarily and regain again.
+                     # require _XOPEN_SOURCE >= 500
+                 another way is use seteuid() to instead setuid(),this feature is contained in POSIX.1.but kernel
+                 do not provide system call for seteuid(),it provide system call setresuid(),and we can implement
+                 seteuid() by issue setresuid() with new euid and orignal real uid,original saved uid. 
+
+      Process capabilities :
+        The POSIX.1e draft,introduced another model of process credentials based on the notion of "capabilites".
+        Linux kernel support this,although most Linux distributions do not make use of them.
+
+        a _capability_ is simply a flag that asserts whether the process is allowed to perform a specific operation
+        or a specific class of operations. /* different from model "superuser VS normal user" */
+
+        POSIX-draft defined capabilites <linux/capability.h> -
+          /* in a system with _POSIX_CHOWN_RESTRICTED option defined,this overrides the restriction
+           * of changing file ownership and group ownership.
+           */
+          #define CAP_CHOWN 0
+
+          /* override all DAC access,including ACL execute access if _POSIX_ACL is defined.
+           * excluding DAC access covered by CAP_LINUX_IMMUTABLE.
+           */
+          #define CAP_DAC_OVERRIDE 1
+
+          /* overrides all DAC restrictionhs regarding read and search on files and directories,
+           * including ACL restrictions if _POSIX_ACL is defined.
+           * excluding DAC access covered by CAP_LINUX_IMMUTABLE.
+           */
+          #define CAP_DAC_READ_SEARCH 2
+
+          /* overrides all restrictions about allowed operations on files,where file owner ID
+           * must be equal to the user ID,except where CAP_FSETID is applicable.
+           * do not override MAC and DAC restrictions.
+           */
+          #define CAP_FOWNER 3
+
+          /* overrides the following restrictions that the effective user ID shall match the file
+           * owner ID when setting the S_ISUID and S_ISGID bits on that file.
+           * the effective group ID shall match the file owner ID when setting the S_ISGID bit
+           * on that file.
+           * the S_ISUID and S_ISGID bits are cleared on successful return from chown()(not implemented)
+           */
+          #define CAP_FSETID 4
+
+          /* overrides the restriction that the real or effective user ID of a process sending
+           * a signal must match the real or effective user ID of the process receiving the signal.
+           */
+          #define CAP_KILL 5
+
+          /* allows setgid() manipulation,setgroups(),forged gids on socket credentials passing. */
+          #define CAP_SETGID 6
+
+          /* allow set*uid() manipulation(including fsuid),forged pids on socked credentials passing. */
+          #define CAP_SETUID 7
+
+        Linux-specific capabilites <linux/capability.h> -
+          /* allow capability manipulations on other process */
+          #define CAP_SETPCAP 8
+
+          /* allow modification of S_IMMUTABLE and S_APPEND file attributes */
+          #define CAP_LINUX_IMMUTABLE 9
+
+          /* allow binding to TCP/UDP sockets below 1024,binding to ATM VCIs below 32 */
+          #define CAP_NET_BIND_SERVICE 10
+
+          /* alloc broadcasting,listen to multicast */
+          #define CAP_NET_BROADCAST 11
+
+          /* allow general networking administration */
+          #define CAP_NET_ADMIN 12
+          
+          /* allow use of RAW sockets,use of PACKET sockets */
+          #define CAP_NET_RAW 13
+
+          /* allow locking of shared memory segments,mlock and mlockall */
+          #define CAP_IPC_LOCK 14
+
+          /* override IPC ownership checks */
+          #define CAP_IPC_OWNER 15
+
+          /* insert and remove kernel modules - modify kernel without limit */
+          #define CAP_SYS_MODULE 16
+
+          /* allow ioperm/iopl access,sending USB messages to any device via /proc/bus/usb */
+          #define CAP_SYS_RAWIO 17
+
+          /* allow use of chroot() */
+          #define CAP_SYS_CHROOT 18
+
+          /* allow ptrace() of any process */
+          #define CAP_SYS_PTRACE 19
+
+          /* allow configuration of process accounting */
+          #define CAP_SYS_PACCT 20
+
+          /* allow general system administration */
+          #define CAP_SYS_ADMIN 21
+
+          /* allow use of reboot() */
+          #define CAP_SYS_BOOT 22
+
+          /* skip permisson checks of the nice() and setpriority() system calls,and allow
+           * creation of real-time processes
+           */
+          #define CAP_SYS_NICE 23
+
+          /* allow resource limits to be increased */
+          #define CAP_SYS_RESOURCE 24
+
+          /* allow manipulation of system clock and real-time clock */
+          #define CAP_SYS_TIME 25
+
+          /* allow configuration of tty devices,vhangup() of tty */
+          #define CAP_SYS_TTY_CONFIG 26
+
+          /* allow the privileged aspects of mknod() */
+          #define CAP_MKNOD 27
+
+          /* allow taking of leases on files */
+          #define CAP_LEASE 28
+
+          /* allow to generate audit message by writing in netlink sockets */
+          #define CAP_AUDIT_WRITE 29
+
+          /* allow to control kernel auditing activities by means of netlink sockets */
+          #define CAP_AUDIT_CONTROL 30
+
+          #define CAP_SETFCAP 31
+
+          /* override MAC access */
+          #define CAP_MAC_OVERRIDE 32
+
+          /* allow MAC configuration or state changes */
+          #define CAP_MAC_ADMIN 33
+
+          /* the latest valid capability */  
+          #define CAP_LAST_CAP CAP_MAC_ADMIN
+
+          #define cap_valid(x) ((x) >= 0 && (x) <= CAP_LAST_CAP)
+
+        main advantage of capabilities :
+          at any time,each program needs a limited number of them.consequently,even if a malicious
+          user discovers a way to exploit a buggy program,it can illegally perform only a limited
+          set of operations.
+
+        system call capget() and capset() :
+          they are defined in <kernel/capability.c>,and "get" is used to retrieve the capabilities
+          of current process,"set" is used to setup current process's capabilities.
+
+          <kernel/capability.c>
+            /**
+             * sys_capget - system call service routine used to get the capabilites of a given process
+             * @header:     pointer to struct that contains capability version and target pid data
+             * @dataptr:    pointer to struct that contains the effective permitted,and inheritable
+             *              capabilities that are returned
+             * return:      0 OR error code
+             * # this routine rely on cap_validate_magic() to check capability version in @header.
+             *   which function is static defined in the same source file,it returns the number of
+             *   u32s in each capability flag array.
+             *   later,sys_capget() use the number to start a for-cycle from 0 to this number,copy
+             *   capability flags into an array named @kdata is type of struct __user_cap_data_struct.
+             *   copy_to_user() on the array to pass it to userspace.
+             * # this routine rely on cap_get_target_pid() to get effective,permitted,inheritable
+             *   capabilites of a process which has the given PID.
+             */
+            SYSCALL_DEFINE2(capget, cap_user_header_t, header, cap_user_data_t, dataptr)
+            => asmlinkage long sys_capget(cap_user_header_t header, cap_user_data_t dataptr);
+
+            /**
+             * sys_capset - system call service routine used to set capabilities for a process or
+             *              a group of processes
+             * @header::    pointer to struct that contains capability version and target pid data
+             * @data:       pointer to struct that contains the effective,permitted,and inheritable
+             *              capabilites
+             * return:      0 OR error code
+             * # ! set capabilites for the current process only,the ability to any other process(es)
+             *     has been deprecated and removed.
+             * # I: any raised capabilites must be a subset of the old permitted
+             *   P: any raised capabilites must be a subset of the old permitted
+             *   E: must be set to a subset of new permitted
+             * # this routine rely on cap_validate_magic()
+             * # this routine use a new credentials to instead the older,for do these,it have to
+             *   invoke prepare_creds() at first,then invoke security_capset() to set capabilites
+             *   for the new credentials,finally,invoke commit_creds() to commit this new credentials.
+             */
+            SYSCALL_DEFINE2(capset, cap_user_header_t, header, const cap_user_data_t, data)
+            => asmlinkage long sys_capset(cap_user_header_t header, const cap_user_data_t data);
+
+        The capable() routine :
+          <kernel/capability.c>
+            /**
+             * capable - determine if the current task has a superior capability in effect
+             * @cap:     the capability to be tested for
+             * return:   TRUE => if the current task has the given superior capability currently
+             *                   available for use
+             *           FALSE => failed to pass the test
+             * # this routine set PF_SUPERPRIV on the task if the capability is available on the assumption
+             *   that it is about to be used
+             * # this routine first invoke cap_valid() to test whether @cap is invalid.
+             *   next,invoke security_capable() on @cap to test the capability,if _zero_ is returned,
+             *   enable PF_SUPERPRIV and return TRUE.
+             */
+            int capable(int cap);
+
+        ! each time a process sets the euid and fsuid fields to 0(root),the kernel sets all process capabilities
+          so that all checks will succeed.
+        
                 
             
           
