@@ -43467,6 +43467,201 @@ Chapter 20 : Program Execution
 
         ! each time a process sets the euid and fsuid fields to 0(root),the kernel sets all process capabilities
           so that all checks will succeed.
+
+      The Linux Security Modules Framework :
+        in Linux 2.6,capabilities are tightly integrated with the LSM framework,and which allows developers to
+        define several alternative models for kernel security.
+
+        ! each security model is implemented by a set of security hooks.a security hook is a function that is
+          invoked by the kernel when it is about to perform an important,security-related operation.
+          the hook determine whether the operation is permitted or is rejected.
+
+        The security module identifier :
+          a structure named @security_operations is composed by a name of model and a lot of function pointers,
+          each of them represent a security hook.we can makeup a new security model by assign different
+          implementations to them.
+
+          <linux/security.h>
+            #define SECURITY_NAME_MAX 10
+
+            /**
+             * security_operations - main security structure,as the security module identifier of LSM
+             * @name:                a string that acts as a unique identifier for the LSM with max
+             *                       number of characters = SECURITY_NAME_MAX
+             * ...
+             * @dentry_open:         save open-time permisson checking state for later use upon file_permisson,
+             *                       and recheck access if anything has changed since inode_permisson
+             * @task_create:         check permisson before creating a child process,@clone_flags contains the flags
+             *                       indicating what should be shared,return 0 if permission is granted
+             * @cred_alloc_blank:    @cred points to the credentials
+             *                       @gfp indicates the atomicity of any memory allocations
+             *                       only allocate sufficient memory and attach to @cred such that 
+             *                       cred_transfer() will not get ENOMEM
+             * @cred_free:           @cred points to the credentials
+             *                       deallocate and clear the @cred->security field in a set of credentials
+             * @cred_prepare:        @new => the new credentials
+             *                       @old => the original credentials
+             *                       @gfp => memory allocation flag
+             *                       prepare a new set of credentials by copying the data from the old set
+             * @cred_commit:         install a new set of credentials
+             * @cred_transfer:       transfer data from original creds to new creds
+             * ...
+             * # i would not list all its member at there,because that is too much.
+             * # the related kernel routines must do security test before start the exact work.
+             */
+            struct security_operations {
+                    char name[SECURITY_NAME_MAX + 1];
+                    ...
+                    int (*dentry_open)(struct file *file, const struct cred *cred);
+                    int (*task_create)(unsigned long clone_flags);
+                    int (*cred_alloc_blank)(struct cred *cred, gfp_t gfp);
+                    void (*cred_free)(struct cred *cred);
+                    int (*cred_prepare)(struct cred *new, const struct cred *old, gfp_t gfp);
+                    void (*cred_commit)(struct cred *new, const struct cred *old);
+                    void (*cred_transfer)(struct cred *new, const struct cred *old);
+                    ...
+            };
+
+          <security/security.c>
+            /* the global LSM identifier.
+             * when kernel is doing initialization,__init function security_init()
+             * will be called,which let @security_ops points to @default_security_ops.
+             * if we applied different LSM,then we can switch back to the default by
+             * invoke reset_security_ops(),which will reset @security_ops to 
+             * @default_security_ops.
+             */
+            static struct security_operations *security_ops;
+
+            /* the default LSM hook table */
+            static struct security_operations default_security_ops = {
+                    .name = "default",
+            };
+
+          <security/capability.c>
+            /**
+             * security_fixup_ops - use default hook to setup all NULL points in @ops,
+             *                      all of the default hook do nothing except return 0
+             *                      to caller,that means bypass capability test
+             * # this routine is called by security_init() and by verify().
+             *                                                    #^ verify the security_operations
+             *                                                       structure exists
+             */
+            void security_fixup_ops(struct security_operations *ops);
+
+        for an instance,the function cap_settime() is defined in <security/commoncap.c>,which is usually pointed by
+        @security_ops->settime,and they are wrapped by routine security_settime().when kernel is about to set time
+        for serve system call,it must invoke security_settime() at first.the routine just check whether current
+        task has CAP_SYS_TIME capability.if has not,return -EPERM,otherwise,it return 0 to indicate the action
+        is permitted.
+
+        ! SELinux also is based on LSM.
+
+    Command-Line Arguments and Shell Environment :
+      command line argument style >
+        "-identifier" "value"
+        "--long_identifier=value"
+
+      environment variable style >
+        "key=value"
+
+      the User Mode program stack layout >
+              /* suppose stack is grow from high address to low address */
+            
+                      [            ...                         ] => PAGE_OFFSET
+                      [            NULL                        ]
+                      [                                        ] => env_end
+                +---> [            environments                ]
+                |     [                                        ] => env start
+                |     [            NULL                        ]
+                |     [                                        ] => arg_end
+                |     [            cmd arguments               ] <---+
+                |     [                                        ]     | => arg_start
+                |     [            dynamic linker's tables     ]     |
+                +---- [            envp[]                      ]     | => array pointer stored in &envp,main() parameter
+                      [            argv[]                      ] ----+ => array pointer stored in &argv,main() parameter
+                      [            argc                        ]                            
+                      [            return address              ] <= ESP
+
+              /* the process name is pointed by argv[0] */
+              /* main() styles
+               *         int main(int argc, char *argv[]);
+               *         int main(int argc, char *argv[], char *envp[]);
+               */
+
+      i386 C program stack layout >
+              /* suppose stack is grow from high address to low address */
+
+                      [            NULL                        ] => env_end / PAGE_OFFSET
+                      [            environments                ] <---+
+                      [            envp                        ] ----+
+                      [            NULL                        ]
+                      [            cmd argN                    ]
+                      [            ...                         ]
+                      [            cmd arg1                    ] <= @argv[1]
+                      [            process name                ] <= @argv[0]
+                      [            arguments number            ]
+                      [            return address              ] <= ESP
+
+              on 32 bit platform,each entry is 4 bytes,on 64 bit platform,each entry is 8 bytes.
+              because command line arguments and environment parameters usually is a string has
+              styles "-identifier" "value" / "--long_identifier=value" or "key=value",thus these
+              entry saved a pointer to the memory unit where the string is stored.
+
+      the C library global variable @environ store the start address of @envp[].
+
+    Libraries :
+      each high-level source code file is transformed through several steps into an "object file",
+      which contains the machine code of the assembly language instructions corresponding to the
+      high-level instructions.
+      an object file cannot be executed,because it does not contain the linear address that
+      corresponds to each reference to a name of a global symbol external to the source code file.
+
+      the resolution is a linker program,which collects all the object files or the program and 
+      constructs the executable file,it also analyzes the library's functions used by the program
+      and glues them into the executable file.
+
+      for system call,such C library supported a lot of wrappers,when we want to issue a system call,
+      we actually call to the wrapper in the library,then the wrapper setup system call arguments,and
+      start system call through function syscall().but the truth is enter Kernel Mode by execute
+      instruction "int 0x80"(on x86 platform),this will trigger a softirq.
+
+      usually,our program file will linked with libc.so.6 together,in which a function named
+      __libc_start_main(),it is called in symbol "_start" of .text section.linker usually set the
+      program's start address to the position "_start",finally,our main() function is invoked.
+      /**
+       * compiler assemble the statements of high-level language to assembly language instructions,
+       * for main() function,it is defined as a function,and at the end,instruction "retq" is append,
+       * which instruction will let we return back to __libc_start_main() from main() function.
+       */
+
+      static libraries :
+        these library files usually has a suffix ".o",when we require linker to link library in
+        a static way,it will copy the library code into our object file.this will enlarge the disk
+        space used by our program file.and if there is several program linked the same static library,
+        then there will be several copying of the library in memory.
+        /* for gcc,option "--static" can be used to link object file in a static way */
+
+      shared libraries :
+        the executable file does not contain the library object code,but only a reference to the library
+        name.when the program is loaded in memory for execution,"dynamic linker" takes care of analyzing
+        the library names in the executable file,locating the library in the system's directory tree,and
+        making the requested code available to the executing process.
+        a process can also load additional shared libraries at runtime by using the dlopen() library
+        function.                                                                /* readonly,executable */
+        when dynamic linker must link a shared library to a process,it perform a "memory mapping" of the
+        relevant position of the library file into the process's address space,this allows the page frames
+        containing the machine code of the library to be shared among all processes that are using the
+        same code.
+        /* for gcc,option "-fPIC" can be used to makeup a shared library */
+
+      ! share linked program usually is slower than statically linked program at starting time.
+        share linked program is not portable as statically linked ones,because it may not execute
+        properly in systems that include a different version of the same library.
+
+              
+        
+      
+        
         
                 
             
