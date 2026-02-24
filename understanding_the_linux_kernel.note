@@ -43658,6 +43658,12 @@ Chapter 20 : Program Execution
         share linked program is not portable as statically linked ones,because it may not execute
         properly in systems that include a different version of the same library.
 
+      ! when we execute command "ldd" on a elf file,it may shows a library named "linux-vdso.so.1",
+        which is the system call compatible feature supported by Linux kernel,for different CPU
+        architecture,it will trigger system call in an appropriate way.
+        # sysenter, int 0x80, syscall ...
+        # this library file is not exist on disk,rather it is as a image in memory.
+
               
         
       
