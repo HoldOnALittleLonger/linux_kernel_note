@@ -43664,11 +43664,147 @@ Chapter 20 : Program Execution
         # sysenter, int 0x80, syscall ...
         # this library file is not exist on disk,rather it is as a image in memory.
 
-              
+    Program Segments and Process Memory Regions :
+      the linear address space of a Unix program is traditionally partitioned,in several linear
+      address intervals called segments(or sections).
+
+      text segment(.text) :
+        include the program's executable code.
+
+      initialized data segment(.data) :
+        contain the initialized data -- that is,the static variables and the global
+        variables whose initial values are stored in the executable file.
+
+      uninitialized data segment(.bss) :
+        contain the uninitialized data -- that is,all global variables whose initial
+        values are not stored in the executable file.
+
+      stack segment :
+        contain the program stack,which includes the return addresses,parameters,and
+        local variables of the functions being executed.
+
+      members in mm_struct they represent these segments :
+        @start_code : 
+          linear address that specify the start of text segment.
+        @end_code : 
+          linear address that specify the end of text segment.
+
+        @start_data:
+          linear address that specify the start of data segment.
+        @end_data:
+          linear address that specify the end of data segment.
+
+        @start_brk :
+          linear address that specify the start of heap.
+        @end_brk :
+          linear address that specify the end of heap.
         
-      
-        
-        
-                
+        @start_stack :
+          linear address that specify the start of stack.
+          /* push instruction will start from there.
+           * when we entered main(),there will store the
+           * return address where main() will return back.
+           * ESP points to it.
+           */
+
+        @arg_start :
+          linear address of stack portion that specify the start of
+          command line arguments.
+        @arg_end :
+          linear address of stack portion that specify the end of
+          command line arguments.
+
+        @env_start :
+          linear address of stack portion that specify the start of
+          environment variables.
+        @env_end :
+          linear address of stack portion that specify the end of
+          environment variables.
+
+      !! THE SHARED LIBRARIES AND FILE MEMORY MAPPING HAVE MADE THE CLASSIFICATION
+         OF THE PROCESS'S ADDRESS SPACE BASED ON PROGRAM SEGMENTS OBSOLETE,BECAUSE
+         EACH OF THE SHARED LIBRARIES IS MAPPED INTO A DIFFERENT MEMORY REGION
+         FROM THESE SEGMENTS.
+
+      Flexible memory region layout :
+        /* since Linux 2.6.9 */
+
+        essentially,each process gets a memory layout that depends on how much the User Mode
+        stack is expected to grow.however,the old classical layout can still be used when
+        kernel can not put a limit on the size of the User Mode stack of a process.
+
+        /* 80x86, 3 GB User Mode Space */
+                                            classical layout            flexible layout
+        Text segment(ELF)                           both starts from 0x08048000
+
+        Data and bss segments                       both starts right after the text segment
+
+        Heap                                        both starts right after the data and bss segments
+
+        File memory mappings and            starts from 0x40000000,     starts near the end(lower address)
+        anonymous memory regions            this address corresponds    of the User Mode stack;libraries
+                                            to 1 / 3 of the whole       added at successively lower
+                                            User Mode address space;    addresses.
+                                            libraries added at
+                                            successively higher
+                                            address.
+
+        User Mode stack                             both starts at 0xc0000000 and grows towards
+                                                    lower addresses
+
+                                                                                      <=
+        classical layout : L [ .text | .data | .bss | heap ... fmapping,_anon_mem ... stack ] H
+                                                      =>       =>
+                                                             
+                                                              <=                      <=
+        flexible layout : L [ .text | .data | .bss | heap ... fmapping,anon_mem | ... stack ] H
+                                                     =>                        #^ stack end
+
+        ! kernel typically usesthe flexible layout when it can get a limit on the size of the
+          User Mode stack by means of the RLIMIT_STACK resource limit.
+          it determine the size of the linear address space reserved for the stack,but this size
+          can not be smaller than 128 MB or larger than 2.5 GB.
+          if either the RLIMIT_STACK resource limit is set to "infinity",or the system administrator
+          has set to 1 the "sysctl_legacy_va_layout" variable(/proc/sys/vm/legacy_va_layout file),
+          or by issuing the proper sysctl() system call,the kernel can not determine an upper bound
+          on the size of the User Mode stack,thus it sticks to the classical memory region layout.
+
+        ! in classical layout,heap is limited to less than 1 GB,the other memory regions can fill up
+          to about 2 GB(minus the stack size).
+          in flexible layout,both heap and other memory regions can freely expand until all the
+          linear addresses left unused by the User Mode stack and the program's fixed-size segments
+          are taken. /* no 1 GB, 2 GB constraints. */
+
+        if we do not set RLIMIT_STACK to "unlimited",then we can see the flexible layout is selected
+        by kernel for current process in file "/proc/$pid/maps".
+          e.g.
+                  /* start -- end  permisson(p: private)  file-offset  block-device-number  inode  filename */
+                  00400000-00401000  r-xp  00000000  xx:xx  xxxx  filename      /* .text */
+                  00600000-00601000  r--p  00000000  xx:xx  xxxx  filename      /* .data */
+                  00601000-00602000  rw-p  00001000  xx:xx  xxxx  filename      /* .bss  */
+                  0103b000-0105c000  rw-p  00000000  00:00  0     [heap]
+                  xxxxxxxx-xxxxxxxx  r-xp  00000000  xx:xx  xxxx  libc.so       /* .text of C library */
+                  xxxxxxxx-xxxxxxxx  ---p  00xxxxxx  xx:xx  xxxx  libc.so
+                  xxxxxxxx-xxxxxxxx  r--p  00yyyyyy  xx:xx  xxxx  libc.so
+                  xxxxxxxx-xxxxxxxx  rw-p  00yyyxzz  xx:xx  xxxx  libc.so
+                  xxxxxxxx-xxxxxxxx  rw-p  00000000  00:00  0                   /* anonymous memory region */
+                  xxxxxxxx-xxxxxxxx  r-xp  00xxxxxx  xx:xx  xxxx  ld.so         /* .text of dynamic linker */
+                  xxxxxxxx-xxxxxxxx  rw-p  00000000  00:00  0                   /* anonymous memory region */
+                  xxxxxxxx-xxxxxxxx  r--p  00xxxxxx  xx:xx  xxxx  ld.so
+                  xxxxxxxx-xxxxxxxx  rw-p  00xxxxxx  xx:xx  xxxx  ld.so
+                  xxxxxxxx-xxxxxxxx  rw-p  00000000  00:00  0                   /* anonymous memory region */
+                  xxxxxxxx-xxxxxxxx  rw-p  00000000  00:00  0     [stack]
+                  xxxxxxxx-xxxxxxxx  r--p  00000000  00:00  0     [vdso]        /* kernel VDSO */
+                  xxxxxxxx-xxxxxxxx  --xp  00000000  00:00  0     [vsyscall]    /* system call */
+
+                  /* when we using classical layout,the file mapping of shared libraries and dynamic linker
+                   * is start from linear address "15xxxxxx",but stack is start from "7fxxxxxx".
+                   *                              # gap is very large.
+                   *
+                   * when we using flexible layout,the file mapping,the file mapping of shared libraries and
+                   * dynamic linker is start from linear address "7f29xxxx",stack is start from "7ffexxxx".
+                   *                              # gap is very small.
+                   */
             
-          
+        
+        
