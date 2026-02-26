@@ -3473,7 +3473,7 @@ Chapter 3 : Processes
 
           21> executes the SET_LINKS macro to insert the new process descriptor in the process list.
 
-          22> if the child must be traced(PT_PTRACED),it sets @tsk->parent to @current->parent and inserts the child
+          22> if the child been traced(PT_PTRACED),it sets @tsk->parent to @current->parent and inserts the child
               into the trace list of the debugger.
               this work is accomplished by tracehook_finish_clone().
 
@@ -20660,7 +20660,7 @@ Chapter 11 : Signals
             will call to do_send_sig_info(),thus finally call to __send_signal().
           ! do_send_sig_info() will lock up task's signal handler and disable local interrupt 
             before call to send_signal() 
-            # task->sighand->siglock,before lock up this spinlock,rcu_read_lock() will be called
+            # task->sighand->siglock,before lock this spinlock,rcu_read_lock() will be called
               at first for rcu_dereference(task->sighand)
           
       The signal_send() Function :
@@ -20989,9 +20989,15 @@ Chapter 11 : Signals
            * flag PF_FREEZING is enabled(before schedule()) and disabled(before leave refrigerator) in refrigerator().
            */
           next,acquires spinlock @current->sighand->siglock.
-          if @current->signal->flags enabled SIGNAL_CLD_MASK,disable the flag,if the process is traced by
+          if @current->signal->flags enabled SIGNAL_CLD_MASK,disable the flag.if the process is traced by
           a debugger,then do_notify_parent_cldstop() to tell the debugger the tracing process is stopped,
-          otherwise,get back to the starting of this routine.
+          otherwise,get back to the starting of this routine.  /**
+                                                                * do_notify_parent_cldstop() will send signal
+                                                                * SIGCHLD to @parent of current process.if
+                                                                * it is traced(checked by task_ptrace()),
+                                                                * @parent should been set to the debugger.
+                                                                * ! send signal via __group_send_sig_info().
+                                                                */
           enter an infinite for-cycle {
                   invoke tracehook_get_signal() to deliver synthetic signal to traced task,but this function
                   should always returns _zero_ in Linux 2.6.34.1.
@@ -43805,6 +43811,152 @@ Chapter 20 : Program Execution
                    * dynamic linker is start from linear address "7f29xxxx",stack is start from "7ffexxxx".
                    *                              # gap is very small.
                    */
+
+      Execution Tracing :
+        execution tracing is a technique that allows a program to monitor the execution of another program.
+        the traced program can be executed step by step,untial a signal is received,or until a system call
+        is invoked.
+
+        kernel system call ptrace() is used when a process which want traces execution of another process.
+        if the process has capability CAP_SYS_PTRACE,then it can traces every process in the system except
+        init process.
+        if the process has no such capability,then it can only traces the process which has the same owner.
+        ! a process can not be traced by two processes at the same time.
+
+        ptrace() :
+          when we at User Mode,we can start trace by issue system call via library wrappe ptrace().
+
+          <sys/ptrace.h>
+            long ptrace(enum __ptrace_request op, pid_t pid, void *addr, void *data);
+
+          a part of list of ptrace requests :
+            PTRACE_ATTACH                   start execution tracing for another process
+            PTRACE_CONT                     resume execution
+            PTRACE_DETACH                   terminate execution tracing
+            PTRACE_GET_THREAD_AREA          get the thread local storage(TLS) area on behalf of the traced process
+            PTRACE_GETEVENTMSG              get additional data from the traced process
+            PTRACE_GETFPREGS                read floating point registers
+            PTRACE_GETFPXREGS               read MMX and XMM registers
+            PTRACE_GETREGS                  read privileged CPU's registers
+            PTRACE_GETSIGINFO               get information on the last signal delivered to the traced process
+            PTRACE_KILL [deprecated]        kill the traced process
+            PTRACE_OLDSETOPTIONS            architecture-dependent command equivalent to PTRACE_SETOPTIONS
+            PTRACE_PEEKDATA                 read a 32-bit value fromn the data segment
+            PTRACE_PEEKTEXT                 read a 32-bit value from the text segment
+            PTRACE_PEEKUSR                  read the CPU's normal and debug registers
+            PTRACE_POKEDATA                 write a 32-bit value into the data segment
+            PTRACE_POKETEXT                 write a 32-bit value into the text segment
+            PTRACE_POKEUSR                  write the CPU's normal and debug registers
+            PTRACE_SET_THREAD_AREA          set the thread local storage(TLS) area on behalf of the traced process
+            PTRACE_SETFPREGS                write floating point registers
+            PTRACE_SETFPXREGS               write MMX and XMM registers
+            PTRACE_SETOPTIONS               modify ptrace() behavior
+            PTRACE_SETREGS                  write privileged CPU's registers
+            PTRACE_SETSIGINFO               forge the information on the last signal delivered to the traced process
+            PTRACE_SINGLESTEP               resume execution for a single assembly language instruction
+            PTRACE_SYSCALL                  resume execution until the next system call boundary
+            PTRACE_TRACEME                  start execution tracing for the current process
+
+          <kernel/ptrace.c>
+            /**
+             * sys_ptrace - system call service routine for ptrace()
+             * @request:    ptrace command
+             * @pid:        pid of the process will be traced
+             * @addr:       read buffer
+             * @data:       write buffer
+             * return:      0 OR error code
+             * # interpretation of @addr and @data is determined by what @request it is.
+             *   sometimes,they pointed to a special structure object,or normal variable.
+             * # work flow of this routine :
+             *     1> lock kernel.if @request is equal to PTRACE_TRACEME,invoke ptrace_traceme().
+             *     2> otherwise,invoke ptrace_get_task_struct() on @pid to get the task descriptor.
+             *     3> if @request is equal to PTRACE_ATTACH,invoke ptrace_attach() on the task.
+             *     4> invoke ptrace_check_attach() on the task,the second argument is "@request == PTRACE_KILL".
+             *     5> invoke arch_ptrace(),this routine will handle the exact ptrace request that depends on
+             *        current architecture,for x86 platform,it is defined in <arch/x86/kernel/ptrace.c>.
+             *        for all others that are not architecture-depend request,invoke ptrace_request() function,
+             *        which is defined in <kernel/ptrace.c> as a common path.
+             *     6> put the task descriptor,unlock kernel,return 0 OR error code.
+             *
+             *     ! ptrace_check_attach() is used to check whether we have traced the task.
+             *       if we have traced the task(no error occur),and @kill is not TRUE(current @request is not PTRACE_KILL),
+             *       wait_task_inactive() will be called on the task,the match state is TASK_TRACED.
+             *       # if @task is in TASK_STOPPED before,its state will be set to TASK_TRACED.
+             *       this routine will suspend execution,relax CPU,wait until the task is not running,and
+             *       if @match_state is specified,that means we expect the task is switched out and remain this state.
+             *       # if @task->state == @match_state,function will set return value to @task->nvcsw | LONG_MIN.
+             *         if the result is _zero_,that means its state have changed.
+             *         ! task_struct.nvcsw => context switch count.
+             *     ! PTRACE_KILL request of sys_ptrace() has no effect.
+             *     ! ptrace_attach() will send signal SIGSTOP to the task to stop its execution.
+             */
+            SYSCALL_DEFINE4(ptrace, long, request, long, pid, long, addr, long data)
+            => asmlinkage long sys_ptrace(long request, long pid, long addr, long data);
+
+          ptrace() system call modifies the @parent member of the task descriptor of the traced process,let it points
+          to the tracing process,therefore,the tracing process becomes the effective parent of the traced one.
+          when ptrace() is issued with PTRACE_DETACH,it restore the @parent member to the @real_parent,the original
+          parent of the traced process.
+
+          monitored events that can be associated with a traced program :
+            > end of execution of a single assembly language instruction
+            > entering a system call
+            > exiting from a system call
+            > receiving a signal
+
+            when a monitored event occurs,the traced program is stopped and a SIGCHLD signal is sent to its parent.
+
+            static inline defined function task_ptrace() is included in header <linux/ptrace.h>,it just return the
+            @ptrace member of the task.if the task is traced by another process,@ptrace should be set to PT_PTRACED.
+                                                                                #^ in ptrace_attach()
+
+
+            when a signal is deliver to tracee,its @parent will receive signal SIGCHLD.
+                                                   #^ get_signal_to_deliver() called do_notify_parent_cldstop().
+
+
+            when @request is PTRACE_SINGLESTEP,function ptrace_request() will invoke ptrace_resume().because current
+            request is PTRACE_SINGLESTEP,it will call to user_enable_single_step() on the tracee,if this platform
+            support single step.for x86 platform,such routine is defined in <arch/x86/kernel/step.c>,as a consequence,
+            function named enable_single_step() in the same file will be called,which will set TIF_SINGLESTEP in this
+            task's thread info flag,and set X86_EFLAGS_TF in its register info,finally,TF of eflags is set,and thread
+            flag TIF_FORCED_TF is set.            
+            after enable_single_step() accomplished,we will clear DEBUGCTLMSR_BTF flag of @debugctlmsr of the taks's
+            thread info;and if the @debugctlmsr become _zero_,we also clear TIF_DEBUGCTLMSR of the thread flag.
+            ! when TF is set,after a single assembly language instruction finished execution,CPU will raise a "Debug"
+              exception,the corresponding exception handler will clears TF flag,force the task stop,and send SIGCHLD
+              to the tracer.
+              the handler for Debug Exception is do_debug() function defined in <arch/x86/kenrel/traps.c>,it is called
+              by function debug().and the function debug() is defined as an entry of assembly language,included in
+              <arch/x86/kernel/entry_32.S>.
+              # do_debug() will operates on the debug registers of x86 architecture "dr0 -- dr7".
+              # flag PT_DTRACE of @ptrace member of a task only be used for architectures m68k and um.
+
+              ! parent can set debug registers by issue ptrace() with PTRACE_POKEUSR command.when an event monitored
+                by a debug register occurs,CPU raises the "Debug" exception,the exception handler can then suspend
+                the tracee and send the SIGCHLD to parent.
+
+
+            when @request is PTRACE_SYSCALL,it is handled by ptrace_request(),then is prace_resume().thread flag
+            TIF_SYSCALL_TRACE will be set for this case. /* if @request is not PTRACE_SYSCALL,then the flag in
+                                                          * thread info will be clear.
+                                                          */
+            this flag will be checked in syscall_trace_enter(),and which function is called in assembly entry
+            "syscall_trace_entry". /* for x64 platform,entry "syscall_trace_entry" is inclued in entry "tracesys" */
+            #^ <arch/x86/kernel/entry_32.S>
+            the task will be stopped twice.once is "syscall_trace_entry";once is "syscall_exit_work",and in which
+            function syscall_trace_leave() is invoked.
+            /* both syscall_trace_enter() and syscall_trace_leave() are defined in <arch/x86/kernel/ptrace.c> */
+            when enter syscall,function tracehook_report_syscall_entry() will be called.it is a static inline
+            defined function included in <linux/tracehook.h>.it call to ptrace_notify(),then ptrace_stop() is
+            called by the notify function.
+            ptrace_stop() is the path for all ptrace stops.on the path,function do_notify_parent_cldstop() will be
+            invoked with @wht = CLD_TRAPPED.finally,SIGCHLD is delivered to debugger.after tracee resume,it continue
+            the syscall.
+              
+            
+                      
+
             
         
         
