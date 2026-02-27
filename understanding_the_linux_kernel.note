@@ -1919,6 +1919,7 @@ Chapter 3 : Processes
           members :
           struct task_struct *task            # main task
           struct exec_domain *exec_domain     # execution domain
+                                                task's execution domain descriptor
           __u32 flags                         # low level flags
           __u32 status                        # thread synchronous flags
           __u32 cpu                           # current cpu
@@ -43954,9 +43955,188 @@ Chapter 20 : Program Execution
             invoked with @wht = CLD_TRAPPED.finally,SIGCHLD is delivered to debugger.after tracee resume,it continue
             the syscall.
               
-            
+    Executable Formats :
+      the standard Linux executable format is named "Executable and Linking Format". /* now using,it is much more practical */
+      Assembler OUTput Format(a.out) : used by older Linux version.
                       
+      except ELF,Linux also supports several different executable format,such MS-DOS EXE,BSD Unix's COFF...
+      /* bash script and java is executed by interpreter,they are platform independent */
 
-            
-        
-        
+      The linux_binfmt structure :
+        Linux use this structure to describe an executable format.
+
+        <linux/binfmts.h>
+          /**
+           * linux_binfmt - structure used to represents an executable format
+           * @lh:           used as a connector to register this executable format
+           * @module:       remove protector
+           * @load_binary:  method used to load binary file,to setup a new execution
+           *                environment for the current process
+           * @load_shlib:   method used to load shared library
+           *                dynamically binds a shared library to an already running
+           *                process,this is activated by uselib() system call
+           *                                             #^ deprecated
+           * @core_dump:    method used to procude core dump
+           *                usually called when a process receives a signal whose default
+           *                action is "dump"
+           * @min_coredump: the minimal size of coredump
+           * @hasvdso:      whether has virtual dynamic shared object
+           *
+          struct linux_binfmt {
+                  struct list_head lh;
+                  struct module *module;
+                  int (*load_binary)(struct linux_binprm *, struct pt_regs *regs);
+                  int (*load_shlib)(struct file *);
+                  int (*core_dump)(struct coredump_params *cprm);
+                  unsigned long min_coredump;
+                  int hasvdso;
+          };
+
+          ! for a script,the @load_binary method is set to load_script() which is defined
+            in <fs/binfmt_script.c>,the corresponding linux binfmt descriptor is @script_format.
+            function load_scripts() will checks whether the executable file starts with the "#!"
+            pair of characters.if so,it interprets the rest of the first line as the pathname
+            of another executable file and tries to execute it by passing the name of the script
+            file as a parameter.
+            # no "#!" is possible,if the script file can be recognized by a command shell.
+              but in this case,it may be interpreted by this interactive shell or by the
+              default Bourne shell "sh".
+
+      register and unregister a binfmt :
+        all binfmts that registered is linked into a singly linked list named @formats.
+        if the binfmt is compiled into kernel,they will be registered during system stratup phase;
+        or if they are implemented by a kernel module,then they will be registered when the module
+        is inserted into kernel.
+
+        <fs/exec.c>
+          /**
+           * list used to collects all registered binfmts
+           */
+          static LIST_HEAD(formats);
+
+          /* rw lock used to protect @formats
+          static DEFINE_RWLOCK(binfmt_lock);
+
+          /**
+           * __register_binfmt - kernel routine used to register a binfmt
+           * @fmt:               the linux binfmt descriptor
+           * @insert:            1 => insert @fmt at the front
+           *                     0 => append @fmt at the back
+           * return:             0 OR -EINVAL(NULL @fmt)
+           * # EXPORT_SYMBOL
+           * # this routine will try to acquire the lock and release it later
+           */
+          int __register_binfmt(struct linux_binfmt *fmt, int insert);
+
+          /**
+           * unregister_binfmt - unregister the specified binfmt
+           * @fmt:               the binfmt
+           * # EXPORT_SYMBOL
+           * # ! this function do not check whether @fmt is NULL,or it is not
+           *     been registered.
+           */
+          void unregister_binfmt(struct linux_binfmt *fmt);
+
+          /* module_put() @fmt->module */
+          static inline void put_binfmt(struct linux_binfmt *fmt);
+
+        ! linux allows users to register their own custom executable formats,each such format
+          may be recognized either by means of a magic number stored in the first 128 bytes of
+          the file,or by a filename extension that identifies the file type.        
+
+        when Linux determines that the executable file has a custom format,it starts the proper
+        interpreter program.the interpreter program runs in User Mode,receives a pathname of the
+        exeutable file,and deal with it.
+        we can register the custom format in User Mode,by write a special styled string into the
+        file "/proc/sys/fs/binfmt_misc/register".
+          the style => ":name:type:offset:string:mask:interpreter:flags"
+
+          name: an identifier for the new format
+          type: type of recognition(M -> magic number, E -> extension)
+          offset: starting offset of the magic number inside the file
+          string: byte sequence to be matched either in the magic number of in the extension
+          mask: string to mask out some bits in string
+          interpreter: full pathname of the interpreter program
+          flags: some optional flags that control how the interpreter program has to be invoked
+
+    Execution Domains :
+      linux is ability to execute files compiled for other operating systems,this is possible only
+      if the files include machine code for the same computer architecture on which the kernel
+      is running.
+
+      two kinds of support are offered for execute "foregin" programs :
+        1> emulated execution
+             necessary to execute programs that include system calls that are not
+             POSIX-compliant
+             /* mostly implemented as User Mode applications,such "wine" */
+        2> native execution
+             valid for program whose system calls are totally POSIX-compliant
+
+      when linux need to a POSIX-compliant program,it must iron out usually refer to how
+      system calls are invoked or how the various signals are numbered.
+      this information is stored in "execution domain descriptors",type of struct exec_domain.
+
+      <linux/personality.h>
+        /**
+         * exec_domain - structure used to represents an execution domain
+         * @name:        name of this exec domain
+         * @handler:     handler for syscalls
+         * @pers_low:    lowest personality
+         * @pers_high:   highest personality
+         * @signal_map:  signal mapping
+         * @signal_invmap:
+         *               reverse signal mapping
+         * @err_map:     error mapping
+         * @socktype_map:
+         *               socket type mapping
+         * @sockopt_map: socket option mapping
+         * @af_map:      address family mapping
+         * @module:      module context of the exec domain
+         * @next:        linked list(internal)
+         */
+        struct exec_domain {
+                const char *name;
+                handler_t handler;
+                unsigned char pers_low;
+                unsigned char pers_high;
+                unsigned long *signal_map;
+                unsigned long *signal_invmap;
+                struct map_segment *err_map;
+                struct map_segment *socktype_map;
+                struct map_segment *sockopt_map;
+                struct map_segment *af_map;
+                struct module *module;
+                struct exec_domain *next;
+        };        
+
+        ! a task's execution domain descriptor is stored in its thread info,the member @exec_domain.
+          and it can change its execution domain by issue system call personality().
+          but programmer are not expected to directly change the personality of their programs,instead,
+          the system call should be issued by the glue code that sets up the execution context of the
+          process.
+
+          some typical value of personality() system call :
+            PER_LINUX                                standard execution domain
+            PER_LINUX_32BIT                          linux with 32-bit phyiscal address in 64-bit architectures
+            PER_LINUX_FDPIC                          linux program in ELF FDPIC format
+            PER_SVR4                                 System V Release 4
+            PER_SVR3                                 System V Release 3
+            PER_SCOSVR3                              SCO Unix Version 3.2
+            PER_OSR5                                 SCO OpenServer Release 5
+            PER_WYSEV386                             Unix System V/386 Release 3.2.1
+            PER_ISCR4                                Interactive Unix
+            PER_BSD                                  BSD Unix
+            PER_SUNOS                                Sun OS
+            PER_XENTX                                Xenix
+            PER_LINUX32                              emulation of Linux 32-bit programs in 64-bit architectures
+                                                     (4 GB User Mode address space)
+            PER_LINUX32_3GB                          emulation of Linux 32-bit programs in 64-bit architectures
+                                                     (3 GB User Mode address space)
+            PER_IRIX32                               SGI IRIX-5 32 bit
+            PER_IRIXN32                              SGI IRIX-6 32 bit
+            PER_IRIX64                               SGI IRIX-6 64 bit
+            PER_RISCOS                               RISC OS
+            PER_SOLARIS                              Sun's Solaris
+            PER_UW7                                  SCO's(formerly Caldera's) UnixWare 7
+            PER_OSF4                                 Digital Unix(Compaq Tru64 UNIX)
+            PER_HPUX                                 Hewlett-Packard's HP-UX
