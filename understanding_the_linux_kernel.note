@@ -44114,6 +44114,7 @@ Chapter 20 : Program Execution
           but programmer are not expected to directly change the personality of their programs,instead,
           the system call should be issued by the glue code that sets up the execution context of the
           process.
+          # the execution domain can be inherited even exec function is invoked.
 
           some typical value of personality() system call :
             PER_LINUX                                standard execution domain
@@ -44140,3 +44141,381 @@ Chapter 20 : Program Execution
             PER_UW7                                  SCO's(formerly Caldera's) UnixWare 7
             PER_OSF4                                 Digital Unix(Compaq Tru64 UNIX)
             PER_HPUX                                 Hewlett-Packard's HP-UX
+
+    The exec Functions :
+      exec functions provided by Unix system >
+        function                PATH search                Command-line arguments                Environment array
+        execl                   F                          list                                  F
+        execlp                  T                          list                                  F
+        execle                  F                          list                                  T
+        execv                   F                          array                                 F
+        execvp                  T                          array                                 F
+        execve                  F                          array                                 T
+
+        PATH search => T : we can pass it relative file path(if CWD is inclued in PATH)
+                       F : we need to pass it full file path
+
+        Command-line arguments => list : we need to pass it arguments follow the style
+                                                 execl(@filename, @arg0, @arg1, @arg2, ..., NULL)
+                                  array : we need to pack the arguments in an array of string pointers,
+                                          and the last element must be a NULL pointer.
+                                                 execv(@filename, @args[]);
+                                                                  /* @args[sizeof(@args) - 1] = NULL */
+        Environment array => T : the function do not receives environment variables,instead,it inherit
+                                 them from its parent. /* the @environ global variable */
+                             F : the function requires an array of environment variables,during replacing,
+                                 the environment variables also be replaced by the given array.
+                                                 execve(@filename, @args[], @envs[]);
+                                                                            /* @envs[sizeof(@envs) - 1] = NULL */
+                                 ! the array stores pointers to environment variable strings.
+
+        'l' : lookup
+        'v' : vector
+        'e' : environment
+
+        ! all exec functions,with the exception of execve(),are wrapper routines defined in the C library and
+          use execve(),which is the only system call offered by Linux to deal with program execution.
+
+      The sys_execve() system call :
+        this system call service routine is a little special.for x86_32 platform,its enter point is named
+        ptregs_execve(),defined in <arch/x86/kernel/entry_32.S>;for x86_64 platform,its enter point is
+        named execve(),defined in <arch/x86/kernel/entry_64.S>.
+        after enter the exec area,both of them are call to sys_execve() function,which is defined in
+        <arch/x86/kernel/process.c>.so,it is architecture-dependent.
+                                    /* it does not appear in /kernel, /fs and others.it is defined without
+                                     * SYSCALL_DEFINE macro.
+                                     */
+
+        <arch/x86/kernel/process.c>
+          /**
+           * sys_execve - system call service routine for execve()
+           * @name:       the executable file's name
+           * @argv:       command line arugments vector
+           * @envp:       environment variables vector
+           * @regs:       caller's registers info
+           * return:      0 OR error code
+           * # this function is very simple :
+           *     1> invoke getname() on @name,if failed to get file name,return error.
+           *     2> invoke do_execve(),pass it the file name, @argv, @envp, @regs.
+           *        this function is the common area for execute a new program.
+           *     3> put file name and return result.
+           *     # ifdef CONFIG_X86_32
+           *         it will set TIF_IRET for the process,if we succeed to do_execve().
+           */
+          long sys_execve(char __user *name, char __user * __user *argv,
+                          char __user * __user *envp, struct pt_regs *regs);
+
+        The structure linux_binprm :
+          <linux/binfmts.h>
+            /**
+             * linux_binprm - structure is used to hold the arguments that are used when loading binaries
+             * @buf:          used to read binary file's the first 128 bytes
+             * @vma:          VMA of stack
+             * @page:         stack pages for nommmu architecture
+             * @mm:           memory descriptor for new program
+             * @p:            current top of mem
+             * @cred_prepared:
+             *                bit field,TRUE => creds already prepared
+             *                          FALSE => have not prepared
+             * @cap_effective:
+             *                bit field,TRUE => has elevated effective capabilities
+             *                          FASLE => has not;except for init which inherits its
+             *                                   parent's caps anywaty
+             * @taso:         bit field,for alpha architecture
+             * @recursion_depth:
+             *                recursion depth recorder for search_binary_handler()
+             * @file:         file pointer to the binary file
+             * @cred:         new credentials
+             * @unsafe:       how unsafe this exec is (mask of LSM_UNSAFE_*)
+             * @per_clear:    bits to clear in @current->personality
+             * @argc:         number of command line arguments,include argv[0]
+             * @envc:         number of environment variables
+             * @filename:     string to the filename of the program file
+             * @interp:       string to the filename of the interpreter
+             * @interp_flags: flags need pass to interpreter
+             * @interp_data:  private data for interpreter
+             * @loader:       loader for alpha architecture,ELF format do not use this member
+             * @exec:         where to start execution
+             */
+            struct linux_binprm {
+                    char buf[BINPRM_BUF_SIZE];
+
+            #ifdef CONFIG_MMU
+                    struct vm_area_struct *vma;
+            #else
+            #define MAX_ARG_PAGES 32
+                    struct page *page[MAX_ARG_PAGES];
+            #endif
+
+                    struct mm_struct *mm;
+                    unsigned long p;
+                    unsigned int cred_prepared:1,
+                                 cap_effective:1;
+
+            #ifdef __alpha__
+                    unsigned int taso:1;
+            #endif
+
+                    unsigned int recursion_depth;
+                    struct file *file;
+                    struct cred *cred;
+                    int unsafe;
+                    unsigned int per_clear;
+                    int argc,envc;
+                    char *filename;
+                    char *interp;
+
+                    unsigned interp_flags;
+                    unsigned interp_data;
+                    unsigned long loader, exec;
+            };
+
+          
+        <fs/exec.c>
+          /**
+           * do_execve - common function for sys_execve(),used to execute a new program
+           * @filename:  executable file's name
+           * @argv:      command line arguments vector
+           * @envp:      environment variable vector
+           * @regs:      caller's registers info
+           * return:     0 OR error code
+           */
+          int do_execve(char *filename, char __user * __user *argv,
+                        char __user * __user *envp, struct pt_regs *regs);
+
+          what do_execve() does :
+            1> invoke unshare_files(),pass it a local pointer named @displaced is type of struct files_struct.
+               the result is stored in local variable @retval.
+               /* this routine is defined in <kernel/fork.c>.
+                * it invoke unshare_fd() with flag CLONE_FILES,that means,it will duplicate file descriptors in
+                * the @files member of previous process,and use the copy to replace @files.
+                * @displaced set to the @files member of previous process.
+                * ! we stop sharing the files,rather to make a copy for ourselves.
+                */
+               if failed,goto label "out_ret".
+            2> set @retval to -ENOMEM.
+               invoe kzalloc() with gfp flag GFP_KERNEL,to allocate memory for an object is type of 
+               struct linux_binprm,initializes it to _zero_.
+               if allocation failed,goto label "out_files".
+            3> call to prepare_bprm_creds() on @bprm,it is a local pointer used points to the allocated
+               linux_binprm object.
+               result is stored in @retval.if failed,goto label "out_free.
+               /**
+                * int prepare_bprm_creds(*@bprm); <fs/exec.c>
+                * - it attempts to prepare credential for exec.
+                *   first,it lock @current->cred_guard_mutex,and let task get into TASK_INTERRUPTIBLE.
+                *   if failed to get lock,return -ERESTARTNOINTR.
+                *   set @bprm->cred to the result of prepare_exec_creds(),if succeed,return 0 without
+                *   release the mutex.
+                *   otherwise,release the mutex and return -ENOMEM.
+                *
+                * struct cred *prepare_exec_creds(void); <kernel/cred.c>
+                * - invoke prepare_creds() to get a new credentials,and return it.
+                *   # ifdef CONFIG_KEYS
+                *       in this case,function need to kmalloc() an object is type of struct thread_group_cred.
+                *       key_put() new creds's @thread_keyring member,reset it to NULL.
+                *       next,memcpy() new creds's @tgcred member into the new allocated thread_group_cred.
+                *       set its usage to 1,spinlock init @lock member of @tgcred(the new allocated).
+                *       invoke key_get() on @tgcred->session_keying,set @tgcred->process_keyring to NULL.
+                *       call to release_tgcred() on @new(returned by prepare_creds()),set @new->tgcred to
+                *       tgcred.
+                *     ! newly exec'd tasks do not get a thread keyring,thus we key_put() it.
+                *     ! create a new per-thread-group creds for all this set of threads of share.
+                */
+            4> invoke check_unsafe_exec() on @bprm,if an error is returned,goto label "out_free".
+               /**
+                * int check_unsafe_exec(*@bprm); <fs/exec.c>
+                * - this routine is used to determine how safe it is to execute the proposed program.
+                *   when call this function,caller must hold @current->cred_guard_mutex to protect
+                *   against PTRACE_ATTACH.
+                * - use a local variable @n_fs to records number of threads sharing current task's
+                *   @fs member.
+                *   if @current->fs->users is greater than @n_fs,that means except the threads in
+                *   current thread group,there is another users on this @fs member,so enable
+                *   LSM_UNSAFE_SHARE in @bprm->unsafe.
+                *   for the case @current->fs->users less than or equal to @n_fs,check whether
+                *   @in_exec member of @fs is _zero_,if it is,set it to 1 and return 1 to caller;
+                *   otherwise,return -EAGAIN.
+                * ! when check threads,need to acquire RCU read lock.
+                * ! after called to tracehook_unsafe_exec(@current) at the beginning,function need
+                *   to acquire @current->@fs->lock for next checkings,and relesae it before return.
+                */
+            5> we record the result of check_unsafe_exec() in local bool variable @clear_in_exec.
+               set @current->in_execve to 1,this means current task is processing execve.
+               invoke open_exec() on @filename,if failed,goto label "out_unmark".
+               /* this function invoke do_filp_open() with dir fd AT_FCWD,and flags
+                * O_LARGEFILE | O_RDONLY | FMODE_EXEC,@acc_mode is MAY_EXEC | MAY_OPEN,to
+                * open the @filename.
+                * invoke S_ISREG() on @i_mode of the opened file's dentry.if it is not a
+                * regular file,we return -EACCESS.
+                * next,invoke fsnotify_open() on the file's dentry to tell filesystem we just
+                * opened a file.
+                * invoke deny_write_access() on the file,we forbid write accessing on it.
+                * finally,return the file pointer to caller.
+                */
+               the returned file pointer is stored in local pointer @file.
+            6> invoke sched_exec().
+               /* this function is defined in <kernel/sched.c>.
+                * execve() is a valuable balancing opportunity,because at this point,the task
+                * has the smallest effective memory and cache footprint.
+                * routine try to migrate current task to another CPU,the target CPU is selected
+                * by select_task_rq(),with flag SD_BALANCE_EXEC.
+                * if we need to migrate the task(different CPU is returned),we force the process
+                * onto the specified CPU,so we create a migration request,and wake up the
+                * @migration_thread of the running queue to handle migration work.
+                * # migration request is created via migrate_task().
+                */
+            7> set @bprm {
+                 .file = @file
+                 .filename = @filename
+                 .interp = @filename        /* interpreter */
+               }
+            8> invoke bprm_mm_init() on @bprm,if failed,goto label "out_file".
+               set @bprm->argc to result of count(),pass it @argv,MAX_ARG_STRINGS.
+               set @bprm->envs to result of count(),pass it @envp,MAX_ARG_STRINGS.
+               if either of them is less than 0,goto label "out",that means detected bad
+               arguments passing.
+            9> invoke prepare_binprm() on @bprm,if failed,goto label "out".
+               invoke copy_strings_kernel() to copy one string in the @filename of @bprm,
+               to the new process stack page at a suitable position.
+               /* note,@filename is stored in the kernel space and belongs to the previous
+                * process,we need it to be stored in the new process's stack.
+                * ! copy_strings_kernel() will temporarily set data segment to KERNEL_DS,
+                *   then invoke copy_strings(),after the function returned,it restore the
+                *   old data segment.
+                * ! we only copied filename of the executable file at there.
+                */
+               if copying failed,goto label "out".
+           10> set @bprm->exec to @bprm->p.
+               invoke copy_strings(),pass it @bprm->envc,@envp and @bprm,to copy environment
+               strings.
+               invoke copy_strings(),pass it @bprm->argc,@argv and @bprm to copy command line
+               arguments.
+               if either of them is failed,goto label "out".
+           11> disable PF_KTHREAD in @current->flags,we are no longer is a kernel thread.
+               invoke search_binary_handler(),pass it @bprm,@regs.this function will
+               lookup @formats for a suit load_binary() method,and invoke it to load binary file.
+               if failed,goto label "out".
+           12> set @current->fs->in_exec to 0.
+               set @current->in_execve to 0.
+               call to acct_update_integrals() on @current.
+               invoke free_bprm() on @bprm to recycle its memory.
+               if @displaced is not NULL,we put_files_struct() on it,to put the old files.
+                                                                     /* we have duplicated them */
+               return @retval to caller.
+           
+           /* exception handling path */
+           "out":
+             if @bprm->mm is not NULL,invoke mmput() on it to destroy memory descriptor.
+
+           "out_file":
+             if @bprm->file is not NULL,we restore write accessing and fput() it.
+           
+           "out_unmark": /* clear execve state */
+             if @clear_in_exec is TRUE,we set @current->fs->in_exec to 0.
+             set @current->in_execve to 0.
+
+           "out_free":
+             invoke free_bprm() on @bprm to destroy it.
+
+           "out_files":
+             if @displaced is not NULL,we reset_files_struct() on it.
+
+           "out_ret":
+             return @retval to caller,in this case,it is an error code.
+
+           !! IF EXEC SUCCEED,THE SYSTEM CALL SHOULD NOT RETURN TO THE CALLER,RATHER IT START
+              TO EXECUTE THE NEW PROGRAM.
+              CONVERSELY,IF WE FAILED TO EXEC,THEN THE OLD TASK SHOULD CONTINUE ITS EXECUTION.
+
+          /**
+           * free_bprm - free a given binary arugment descriptor.this will free @bprm->vma or @bprm->page,
+           *             and if @bprm->cred is not NULL,it also abort_creds() on the @cred.finally,invoke
+           *             kfree() to free memory of the binary argument descriptor.
+           */
+          void free_bprm(struct linux_binprm *bprm);
+
+          /**
+           * bprm_mm_init - function used to init new context according to specified binary arguments
+           * @bprm:         arguments used to loading binary
+           * return:        0 OR error code
+           * # this routine hands the main work over to __bprm_mm_init().
+           * # this function will try to allocates a new memory descriptor through mm_alloc().
+           * # this routine first try to init_new_context() for @current task with the new memory descriptor,
+           *   then call to __bprm_mm_init(),pass it @bprm.
+           *   if everything is OK,return 0 tocaller.
+           *   if __bprm_mm_init() failed,mmdrop() the new context,and set @bprm->mm to NULL.
+           * # init_new_context() usually is architecture-dependent,it the LDT data pointed by memory descriptor's
+           *   @context member.if the context of old mm(@current->mm) is not NULL and size is greater than 0,it
+           *   will invoke copy_ldt() to copy the context from the old one to the new one.
+           */
+          int bprm_mm_init(struct linux_binprm *bprm);
+
+          /**
+           * __bprm_mm_init - initialize memory for new task according to the loading binary arguments
+           * @bprm:           binary arguments
+           * return:          0 OR error code
+           * # this function has two version.for MMU installed architecture,it will operates on
+           *   @bprm->vma;for NOMMU,it will operates on @bprm->page.
+           */
+          static int __bprm_mm_init(struct linux_binprm *bprm);
+
+          description for __bprm_mm_init() :
+            /* we forcus on MMU version */
+            first,it invoke kmem_cache_zalloc() to allocate a new VMA for @bprm->vma,gfp flag is
+            GFP_KERNEL,slab cache is @vm_area_cachep.
+            if allocation failed,return -ENOMEM.
+            acquire semaphore of @bprm->mm->mmap_sem.
+            let VMA->vm_mm points to @bprm->mm.
+            setup VMA {
+                    .vm_end = STACK_TOP_MAX                 /* linear address,usually is PAGE_OFFSET */
+                    .vm_start = vma->vm_end - PAGE_SIZE     /* one page */
+                    .vm_flags = VM_STACK_FLAGS              /* this VMA as stack */
+                    .vm_page_prot = vm_get_page_prot(VMA->vm_flags)  /* protection flag for stack */
+            }
+            initialize VMA->anon_vma_chain.
+            insert VMA into @bprm->mm.(through insert_vm_struct())
+            set @bprm->mm->stack_vm and @bprm->mm->total_vm both to 1. /* we only have one VMA now */
+            release semaphore.
+            set @bprm->p to "VMA->vm_end - sizeof(void *)". /* the stack top.
+                                                             * usually,it is the eip(or rip) pushed by
+                                                             * previous process
+                                                             */
+            return 0 to caller.
+            /* if any error happend,it will destroy the VMA and return error code */
+
+          /**
+           * prepare_binprm - fill the binprm structure from the inode,check permissions,then read the
+           *                  the first 128 bytes from the file into internal buffer
+           * @bprm:           binprm
+           * return:          0 OR error code
+           */
+          int prepare_binprm(struct linux_binprm *bprm);
+
+          description for prepare_binprm() :
+            get @indoe of @bprm->file,if file operations is not implemented,return -EACCESS.
+            set @euid and @egid of @bprm->cred to @current task's.
+            if vfsmount flag of the file's path have not set MNT_NOSUID,then check whether need
+            to setuid or set gid {
+                    it get the @inode's mode.
+                    if S_ISUID is set,then 
+                            let @bprm->per_clear |= PER_CLEAR_ON_SETID
+                            let @bprm->cred-euid = @inode->i_uid /* file owner uid */
+
+                    next check setgid.
+                    if S_ISGID AND S_IXGRP is set in mode,then
+                            enable PER_CLEAR_ON_SETID in @bprm->per_clear
+                            let @bprm->cred->egid = @inode->i_gid /* file owner gid */
+            }
+            invoke security_bprm_set_creds() on @bprm. /* LSM checking */
+            if operation is not permitted,return error code to caller.
+            after security test,set @bprm->cred_prepared to 1.
+            finally,invoke kernel_read() on the binary file to read the first 128 bytes into
+            @bprm->buf,return the number of bytes been readed.
+                           /* kernel_read() will temporarily change current segment to KERNEL_DS,
+                            * and restore to the old segment later.
+                            */
+
+          search_binary_handler()
+               
+                
