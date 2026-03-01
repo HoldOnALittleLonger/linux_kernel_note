@@ -20197,7 +20197,7 @@ Chapter 11 : Signals
            *                   thread group
            * @notify_count:  used when killing a whole thread group
            *                 # overloaded :
-           *                     - notify @gourp_exit_task when @count is equal to @notify_count
+           *                     - notify @group_exit_task when @count is equal to @notify_count
            *                     - everyone except @group_exit_task is stopped during signal delivery
            *                       of fatal signals,@group_exit_task processes the signal
            * @group_exit_task: used when killing a whole thread group
@@ -44213,7 +44213,7 @@ Chapter 20 : Program Execution
              * @vma:          VMA of stack
              * @page:         stack pages for nommmu architecture
              * @mm:           memory descriptor for new program
-             * @p:            current top of mem
+             * @p:            current top of mem(usually is the position where stack top at)
              * @cred_prepared:
              *                bit field,TRUE => creds already prepared
              *                          FALSE => have not prepared
@@ -44235,7 +44235,7 @@ Chapter 20 : Program Execution
              * @interp_flags: flags need pass to interpreter
              * @interp_data:  private data for interpreter
              * @loader:       loader for alpha architecture,ELF format do not use this member
-             * @exec:         where to start execution
+             * @exec:         position of stack exec
              */
             struct linux_binprm {
                     char buf[BINPRM_BUF_SIZE];
@@ -44516,6 +44516,322 @@ Chapter 20 : Program Execution
                             * and restore to the old segment later.
                             */
 
-          search_binary_handler()
-               
+          /**
+           * search_binary_handler - cycle the list of binary formats handler,until one recognizes
+           *                         the image
+           * @bprm:                  binary parameters
+           * @regs:                  register info of previous task
+           * return:                 0 OR error code
+           */
+          int search_binary_handler(struct linux_binprm *bprm, struct pt_regs *regs);
+
+          description for search_binary_handler() :
+            use a local variable named @depth to recored the @bprm->recursion_depth.
+            does LSM checking on @bprm through security_bprm_check(),if it not passed test,
+            return the reason returned by the function to caller.
+            change current data segment to USER_DS.
+            invoke audit_bprm() to audit the parameters.
+            /* function defined in <kernel/audits.c>.
+             * it try to kmalloc() a new audit_aux_data_execve object with GFP_KERNEL.
+             * setup the object from @bprm,and let @current->audit_context->aux points to this
+             * object.
+             * # type is AUDIT_EXECVE
+             * # if allocated failed,return -ENOMEM
+             * # if audit is not activated OR (@current->audit_context is NULL OR is dummy),
+             *   return 0 with do nothing.
+             */
+            for each format registered in @formats,retrieve the load_binary() function of
+            current format,invoke the method by pass it @bprm and @regs {
+                    when access to @formats,we need to hold @binfmt_lock for READ.
+                    if current format has not load_binary(),we simply skip it.
+                    before we invoke the method,we have to try_module_get() @fmt->module,
+                    this is for protect the context of the registered format,we must to ensure
+                    it is valid during when we entered it.
+
+                    after we have called the load_binary() method,we restore @bprm->recursion_depth
+                    from depth.
+                    /* restore the depth counter to its starting value in this call,so we do not 
+                     * have to rely on every load_binary() function to restore it on return.
+                     */
+
+                    result of load_binary() :
+                      >= 0 {
+                            invoke tracehook_report_exec(),pass it @fmt,@bprm,@regs,if current @depth
+                            is _zero_.
+                            put_binfmt() on @fmt,because we have succeed to load binary.
+                            restore write accessing on the binary file.
+                            # we denied it previous in open_exec() called by do_execve().
+                            fput() @bprm->file,if it is not NULL.
+                            set @current->did_exec to 1.
+                            invoke proc_exec_connector() on @current.
+                                   /**
+                                    * this function is declared in header <linux/cn_proc.h>,
+                                    * and implementation is defined in <drivers/connector/cn_proc.c>.
+                                    * it is used to announce a kernel event via NETLINK.
+                                    * but the group id is specified to _zero_,that means kernel have to
+                                    * search cn_dev objects to find out the one whose id is matched the
+                                    * id contained in message,and announce the message on its group.
+                                    */
+                            return the result of load_binary() to caller.
+
+                            ! this is the return path when we succeed to load it.
+                      }
+                      else {
+                            /* need acquire @binfmt_lock for READ at there */
+                             put_binfmt() on @fmt.
+                             if result is not -ENOEXEC OR @bprm->mm is NULL,we break the search of this time.
+                             check,if @bprm->file is NULL,we just return the result to caller.
+                                                           /* need to release @binfmt_lock before return */
+                                                           /* bad return */
+                      }
+                    /* to next format in @formats... */
+
+                    /* we traversed once all of registered formats,and may need retry searching */
+                    check result of the last load_binary() invoking,if the result is not equal to -ENOEXEC
+                    OR @bprm->mm is NULL,we give up try again,just return the result to caller.
+                    /* if we defined CONFIG_MODULES,               /* bad return */
+                     * there is another branch will be executed.
+                     * 
+                     * result is not satisfies the test at above =>
+                     * check if
+                     *         all of bytes in range [@bprm->buf[0], @brpm->buf[3]] satisfied the condition
+                     *           equal to '\t' OR equal to '\n' OR the value in range [0x20, 0x7e]
+                     *         we give up loading. # -ENOEXEC,not recognizable executable format
+                     * otherwise,we call to request_module(),pass it "binfmt-%04x", *(unsigned short *)(&@brpm->buf[2]).
+                     * this macro is defined in <linux/kmod.h>,it will invoke __request_module() with parameter @wait 
+                     * is TRUE.__request_module() will try to load a kernel module with the name has the style
+                     *         binfmt-00xx
+                     *                  ++--> @bprm->buf[2]
+                     * # actually,it invoke modprobe command from User Mode try to load the module.
+                     */
+            }
+
+      The load_binary() method of ELF :
+        <fs/binfmt_elf.c>
+          /**
+           * load_elf_binary - load_binary() for ELF,this function is contained in @elf_format the
+           *                   struct linux_binfmt object for ELF
+           * @bprm:            binary arguments
+           * @regs:            registers info of previous task
+           * return:           0 OR error code
+           */
+          static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs);
+
+          what load_elf_binary() does :
+            1> kmalloc() a struct object,which contains two members {@elf_ex, @interp_elf_ex},both
+               of them are is type of struct elfhdr.
+               the linear address pointed by local variable @loc,gfp flag is GFP_KERNEL.
+               if failed on allocation,set @retval(local variable) to -ENOMEM,goto label "out_ret".
+               otherwise,we let @loc->elf_ex points to @bprm->buf.  /* exec header */
+            2> copy ELFMAG(expanded to "\177ELF") into @loc->elf_ex.e_ident,size is 4 bytes.
+               goto label "out",@retval is -ENOEXEC,if one of the following conditions is satisfied
+                       copy magic string failed
+                       @loc->elf_ex.e_type neither is ET_EXEC,nor is ET_DYN
+                       elf_check_arch() on @loc->elf_ex failed(returned FALSE)
+                       @bprm->file has no file operations implemented or no file mmap() method implemented
+                       @loc->elf_ex.e_phentsize is not equal to sizeof(struct elf_phdr)
+                       @loc->elf_ex.e_phnum is less than 1 OR it is greater than "65536U / sizeof(struct elf_phdr)"
+               use a local variable named @size to store the result of "@loc->elf_ex.e_phnum * sizeof(struct elf_phdr)".
+            3> call kmalloc() to allocate an array of object is type of struct elf_phdr,gfp flag is GFP_KERNEL,total
+               size is @size.if failed,set @retval to -ENOMEM,goto label "out_ret".
+               the returned address is pointed by local pointer @elf_phdata.
+            4> call to kernel_read() to read ELF file,offset is @loc->elf_ex.e_phoff,into buffer @elf_phdata,with @size.
+               we need to read the whole data block,if @retval(returned value of kernel_read()) is not equal to @size,
+               then we need goto label "out_free_ph". /* @retval = @retval >= 0 ? -EIO : @retval */
+            5> setup some local variables {
+                       @elf_ppnt = @elf_phdata
+                       @elf_bss = 0
+                       @elf_brk = 0
+                       @start_code = ~0UL
+                       @end_code = @start_data = @end_data = 0
+               }
+            6> make use of a for-cycle to traverse each phdr readed from the ELF file {
+                       /* local variable @i is used to record the index of phdr,and
+                        * @elf_ppnt is used as an iterator.
+                        */
+
+                       if @elf_ppnt->p_type is equal to PT_INTERP
+                       then
+                               /* we need to read the interpreter file */
+                               set @retval to -ENOEXEC.
+                               if @elf_ppnt->p_filesz > PATH_MAX OR @elf_ppnt->p_filesz < 2,goto label "out_free_ph".
+                               set @retval to -ENOMEM.
+                               kmalloc() memory space for size is @elf_ppnt->p_filesz,gfp flag GFP_KERNEL,returned 
+                               address stored in local variable @elf_interpreter.if failed,goto label "out_free_ph".
+                               
+                               /* actually,it is the path string where is the interpreter */
+                               kernel_read() the interpreter for the ELF file,offset is @elf_ppnt->p_offset,into buffer
+                               elf_interpreter,size is @elf_ppnt->p_filesz.
+                               if we did not read the size of data we expected,goto label "out_free_interp".
+                                             /* @retval = @retval >= 0 ? -EIO : @retval */
+                               ensure the path string is null terminated,if the last element is not '\0',goto label
+                               "out_free_interp",in this case,@retval is set to -ENOEXEC.
+
+                               open_exec() on the interpreter,file pointer is stored in local pointer @interpreter.
+                               /* if open failed,goto label "out_free_interp",error code -ENOEXEC */
+
+                               does some permission test,it is not MAY_READ,enable BINPRM_FLAGS_ENFORCE_NONDUMP in
+                               @bprm->interp_flags.
+                               
+                               kernel_read() on @interpreter,offset is 0,into buffer @brpm->buf,size is BINPRM_BUF_SIZE.
+                                                /* we reuse the buffer,to read the first 128 bytes of interpreter */
+                               /* if reading failed,goto label "out_free_dentry".@retval = @retval >= 0 ? -EIO : @retval */
+
+                               we readed interpreter,so let @loc->interp_elf_ex points @bprm->buf,and stop traversing.
+                       otherwise,we advance @elf_ppnt.
+               }
+            7> reset @elf_ppnt to @elf_phdata.
+               make use of a for cycle,to traverse each phdr in @elf_phdata,@elf_ppnt used as an iterator {
+                       if @elf_ppnt->p_type is equal to PT_GNU_STACK
+                       then
+                               set local variable @executable_stack to
+                                       EXSTACK_ENABLE_X => @elf_ppnt->p_flags & PF_X yield TRUE
+                                       EXSTACK_DISABLE_X => else
+                                       /* executable on stack */
+                               stop traversing.
+               }
+            8> if @elf_interpreter is not NULL,that means it points to the path of interpreter,
+               then
+                       set @retval to -ELIBBAD.
+                       copy ELFMAG into @loc->interp_elf_ex.e_ident,size is SELFMAG(4 bytes).
+                       if copy failed,goto label "out_free_dentry".
+                       verify the interpreter has a valid arch by invoke elf_check_arch() on
+                       @loc->interp_elf_ex;if failed to pass test,goto label "out_free_dentry".
+               /* check interpreter architecture */
+            9> invoke flush_old_exec() on @bprm,this function will flush all traces of the currently running
+               executable.
+               /**
+                * int flush_old_exec(*@binprm)
+                * - invoke de_thread() on @current to let it has its own signal table,so that flush_signal_handlers
+                *   can later reset the handlers withou disturbing other processes.de_thread() will let @current
+                *   leave current thread group,if the leader is not us.for does that,we need to let other threads
+                *   get exit before,so we have to invoke zap_other_threads() -- for each thread,we send SIGKILL to
+                *   it,and wake up it to let it handle this signal.
+                *   # if signal_group_exit() on @tsk->signal returned TRUE,then we return -EAGAIN,because all
+                *     threads except @signal->group_exit_task have pending SIGKILL,we let them process this.
+                *     if returned FLASE,we set @tsk->group_exit_task to ourselves(@tsk).
+                *     # signal_group_exit(*@signal)
+                *       => return @signal->flags is set SIGNAL_GROUP_EXIT OR @signal->group_exit_task is not NULL
+                *   # if thread group leader's @exit_state is not _zero_,we let the @tsk become the group leader
+                *     with the old leader's pid,the old leader becomes a thread of the this thread group.
+                *     it use @tsk->tasks to replace leader's @tasks,via list_replace_rcu().
+                *     and use list_replace_init() to replace leader's @sibling to @tsk's @sibling(new one will got the
+                *     position where old one was).
+                *     @tsk->group_leader is @tsk,leader's @group_leader is @tsk,@tsk->exit_signal is SIGCHLD.
+                *     set leader's @exit_state to EXIT_DEAD,and invoke release_task() on leader.
+                *   # for reset signal actions,de_thread() will kmem_cache_alloc() a new sighand_struct object,
+                *     copy @tsk's @sighand to the new one,use the new one to replace the old one,and cleanup the old
+                *     sighand.but this is happens if the old one's refcount is not 1 => someone also refers to it.
+                *
+                *   after de_thread(),flush_old_exec() proceeding call to set_mm_exe_file(),use @binprm->file to
+                *   replace @binprm->mm->exe_file,and reset @binprm->mm->num_exe_file_vmas to 0.
+                *           /* this operation will get the new file,and put the old file */
+                *   next,invoke exec_mmap() on @binprm->mm,this function will use @binprm->mm to replace the @mm
+                *   of @current. # mm_release() the old mm,set @current->mm and @current->active_mm to the new one,
+                *                  invoke activate_mm(),to reload cr3 register from @mm if the old @active_mm is
+                *                  different from @mm,mmput() the old @mm,mmdrop() the old @activate_mm.
+                *   finally,set @binprm->mm to NULL to prevent it will be unexpected destroyed,disable PF_RANDOMIZE
+                *   flag in @current->flags.invoke flush_thread() to reset ptrace hardware breakpoints,FPU environment,
+                *   Math registers,and @tls_array of the thread info.disable @binprm->per_clear in @current->personality.
+                *   return 0 to caller.
+                */
+               if we failed to flush old exec,we goto label "out_free_dentry",the error code is returned by flush_old_exec().                       
+           10> disable PF_FORKNOEXEC flag,and set @current->mm->def_flags to local variable @def_flags(default value is 0).
+               invoke SET_PERSONALITY() on @loc->elf_ex,to setup execution domain for us.
+               if elf_read_implies_exec() on @loc->elf_ex with @executable_task returned TRUE,we enable READ_IMPLIES_EXEC
+               in current task's personality.
+               if current taks's personality has not set ADDR_NO_RANDOMIZE AND @randomize_va_space is TRUE,we enable
+               PF_RANDMIZE flag for the process.
+           11> call to setup_new_exec(),pass it @bprm.this function will reset @sas_ss_sp and @sas_ss_size to 0,if we
+               can dump,then set_dumpable() on the @mm,use @bprm->filename to replace @current's @comm(skipped '/'),
+               set current->@mm->task_size to TASK_SIZE(PAGE_OFFSET).set @current->pdeath_signal to 0 if @bprm->cred->uid
+               and @bprm->cred->gid is not same as @current's euid and egid;if the condition is not met,we test
+               @bprm->file permission and @bprm->interp_flags,if MAY_READ is true OR BINPRM_FLAGS_ENFORCE_NONDUMP is set
+               in the flags,we set dumpable for @current->mm,this involved a global variable named @suid_dumpable.
+                                                /* 0 => no MMF_DUMPABLE,no MMF_DUMP_SECURELY
+                                                 * 1 => has MMF_DUMPABLE,no MMF_DUMP_SECURELY
+                                                 * 2 => has MMF_DUMP_SECURELY,has MMF_DUMPABLE
+                                                 */
+               after we set dumpable for memory,if @mm is not dumpable,we feed a performace event about exit task. 
+               finally,increase @current->self_exec_id,invoke flush_signal_handlers() to reset signal actions,and
+               invoke flush_old_files() on @current->files to close file descriptors they have close on exec is set.
+               /* end of setup_new_exec() */
+           12> set @current->mm->free_area_cache to @current->mm->mmap_base.
+               set @current->mm->cached_hole_size to 0.
+               because we have not mapped anything.
+
+               invoke setup_arg_pages(),pass it @bprm,result of randomize_stack_top(STACK_TOP),@executable_stack.
+               this function will finalizes stack VMA,and the flags,permissons are updated,the stack is optionally
+               relocated,and preserve some extra space. /* @current->mm->arg_start will points to the linear address
+                                                         * fall into the VMA where arguments are stored.
+                                                         * @bprm->p is the start of stack top.
+                                                         */
+               /* this routine is defined in <fs/exec.c>.usually,we limit stack size to 1GB,and we get the base
+                * linear address of the stack that aligned to PAGE_SIZE.
+                * the linear address we need to align is computed by "@stack_top(STACK_TOP) - stack base size(1GB)".
+                * we must ensure the VMA is not larger than the base stack size 1GB,because we do not want the argument
+                * array grow too large.
+                * next,we calculate the stack shift into the VMA,this depends the grow direction of stack.
+                * use the stack shift to modify @bprm->p,use @bprm->p to setuo @mm->arg_start.
+                * # because we modified @bprm->p,so we also need to modify @bprm->exec,and modify @bprm->loader if necessary.
+                * at the end,we expand_stack() to let the VMA conver stack base.
+                */
+               if we failed to setup_arg_pages(),we send SIGKILL to ourselves,and goto label "out_free_dentry".
+               otherwise,we set @current->mm->start_stack to @bprm->p.
+           13> now we do a little grungy work by mapping the ELF image into the correct location in memory,load shard library
+               files.   /* because it is too many,we wont fully describe it at there */
+               the mapping is rely on elf_map(),we traverse each phdr,and to map the file portions that described by the phdr,
+               to the correct virtual linear address in the memory,such data,bss,text.
+               after mapping finished,we invoke set_brk(),pass it @elf_bss and @elf_brk,the @start_brk of memory descriptor
+               should behind bss section.
+           14> after we finished image mapping,and setup brk.we may need to load interpreter into the memory,if @elf_interpreter
+               is not NULL.(path of interpreter,for Linux,it usually is /lib/ld-linux.so.2)
+               we need it,because the program may need some shared libraries during runtime.
+           15> kfree() @elf_phdata.invoke set_binfmt() on @elf_format,this function will let @current->mm->binfmt points to it.
+               when we need shared library,the interpreter will switch context from User Mode into Kernel Mode,by this member,
+               we can know which load_shlib() method should be called for current program,and load them.
+               /* actually,this is happend before the section .text of the program to be executed.
+                * because the interpreter runs before our program.
+                */
+               proceeding to setup @current->mm members,such @end_code,@start_code,@end_data,@start_data,@start_stack,etc.
+           16> if @current->personality has set MMAP_PAGE_ZERO,then we map page 0 with read-only,executable.
+               /* SVr4 maps page 0 as read-only,and some applications "depend" upon this behavior */
+           17> invoke start_thread(),pass it @regs,@elf_entry(a local unsigned long object),@bprm->p.
+               set @retval to 0.             /* the function is architecture-dependent,either defined in
+                                              * <arch/x86/kernel/process_32.c> or <arch/x86/kernel/process_64.s> for
+                                              * x86 platform,exported as GPL symbol.
+                                              * it modify contents of @regs {
+                                              *   set gs to the User Mode gs
+                                              *   set fs to 0
+                                              *   set ds,es,ss,cs to __USER_DS
+                                              *   set ip to @new_ip => the argument @elf_entry
+                                              *   set sp to @new_sp => the @bprm->p
+                                              * }
+                                              * it free_thread_xstate() for @current task
+                                              */
+                                             ! if has interpreter,@elf_entry store the return value from load_elf_interp().
+                                               otherwise,it is the @loc->elf_ex.e_entry.      /*^ interpreter's start code */
+           "out": /* the normal return path */
+             kfree() @loc
+
+           "out_ret":
+             return @retval to caller.
+
+           "out_free_dentry": /* the bad return path */
+             allow write access on @interpreter.
+             if @interpreter is not NULL,fput() it.
+
+           "out_free_interp":
+             kfree() @elf_interpreter,the path string of interpreter.
+
+           "out_free_ph":
+             kfree() @elf_phdata.   /* if we succeed to load ELF,this object should be deallocated in step 15> */
+             goto label "out".
                 
+             
+
+                
+               
+               
+
+        
