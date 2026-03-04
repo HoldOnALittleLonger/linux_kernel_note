@@ -6102,9 +6102,9 @@ Chapter 4 : Interrupts and Exceptions
             /*  __create_workqueue_key - create a workqueue,and several cpu_workqueue_struct structures also
              *                           will be created and associated to the new created workqueue.
              *  @name:                   workqueue name.
-             *  @singlethread:           if singlethread?
-             *  @freezeable:             if freezeable?
-             *  @rt:                     rt.
+             *  @singlethread:           is singlethread?
+             *  @freezeable:             is freezeable?
+             *  @rt:                     run times count
              *  @key:                    lock_class_key pointer.
              *  @lock_name:              lock_name.
              *  return - NULL or the new created workqueue_struct pointer.
@@ -7055,7 +7055,7 @@ Chapter 5 : Kernel Synchronization
                 /*  raw_spin_can_lock() checks whether the lock is able to be holden.
                  *  lock->break_lock = 1 means a kernel control path is waiting on the lock,but kernel
                  *  is allowed to be preempted.
-                 *  arch_spin_relax() is equal to cpu_relax().
+                 *  arch_spin_relax() is equal to cpu_relax()(for x86, it is rep_nop())
                  */
                 
                 if the lock can be holded,then break while-cycle and try to get the lock again.(jump to 2>)
@@ -44827,6 +44827,188 @@ Chapter 20 : Program Execution
            "out_free_ph":
              kfree() @elf_phdata.   /* if we succeed to load ELF,this object should be deallocated in step 15> */
              goto label "out".
+
+Append :
+
+    Stop Machine >
+      when we need to modify a critical data area,on SMP system,we may need to stop all other CPUs except ourselves.
+      stop machine provide synchronization between CPUs.
+
+      <kernel/stop_machine.c>
+        /**
+         * stop_machine - stop machine to stop CPUs not included in the given cpumask,and process
+         *                the special task
+         * @fn:           the function that handle the special task
+         * @data:         data will passed to @fn
+         * @cpus:         CPU mask to specified who can run the task
+         * return:        result of @fn OR error code
+         * # EXPORT_SYMBOL_GPL
+         */
+        int stop_machine(int (*fn)(void *), void *data, const struct cpumask *cpus);
+
+        description for stop_machine() :
+          first,we need to create a workqueue named "kstop",we let the static pointer @stop_machine_wq
+          points to it. /* if failed,return error code */
+          spin all online cpus through get_online_cpus().
+          call to helper __stop_machine().
+          we then un-spin online cpus,and destroy the workqueue.
+                  /* put_online_cpus()    stop_machine_destroy() */
+          return the result of the helper to caller.
+
+          /* destroy to stop machine workqueue take more times.                                    #v void *
+           * first,we need to acquire @setup_lock(mutext lock),it is used to protect @refcount and @stop_machine_wq,
+           * @stop_machine_work.                                                                   #^ per-CPU variable
+           * if we can get the lock,that means current no one is setting up stop machine work.
+           * --refcount,if it is not _zero_,we can not destroy the work,because someone is in working.
+           * otherwise,we destroy_workqueue() on @stop_machine_wq,free_percpu() the per-CPU variable
+           * @stop_machine_work.
+           * before return,we release the lock.
+           */
+
+        /**
+         * __stop_machine - queue stop work and let them run
+         * @fn:             function
+         * @data:           @fn argument
+         * @cpus:           cpu mask
+         * return:          succeed => return value of @fn
+         *                  failed => error code
+         */
+        int __stop_machine(int (*fn)(void *), void *data, const struct cpumask *cpus);
+
+        description for __stop_machine() :
+          first,we acquire the mutext lock @lock,it is defined in the same file
+          with a static linkage.
+          setup @active and @active_cpus,they are static defined in the same file.
+          /**
+           * # information of the task function
+           * struct stop_machine_data {
+           *         int (*fn)(void *);
+           *         void *data;
+           *         int fnret; /* ret value */
+           * ; # @active is type of struct stop_machine_data.
+           *     another is @idle,it also the same type
+           * @active_cpus is type of static const struct cpumask *active_cpus.
+           */
+          we set @num_threads to the number of current online CPUs(num_online_cpus()).
+                 #^ static defined,unsigned int
+          setup @active_cpus from @cpus,and setup @active fron @fn and its argument,@fnret is 0.
+          setup @idle,the @fn is chill(),@data is NULL.         
+          set current status to STOPMACHINE_PREPARE(state of stop state machine).
+          we get_cpu() on current CPU.
+          for each online CPU we {
+                  retrieve the per-CPU work(@stop_machine_work)
+                  init it,set the action to function stop_cpu()
+                  queue it on @stop_machine_wq,the CPU number is current CPU
+                                                       /* start from number 0 */
+          }
+          after this done,we put_cpu(),flush_workqueue() the @stop_machine_wq.
+          set return value to @acitve.fnret.
+          release @lock and return the result to caller.
+
+        /**
+         * stop_cpu - stop unexpected CPU,and run task on specified CPU.
+         */
+        static void stop_cpu(struct work_struct *unused);
+
+        description for stop_cpu() :
+          we set @curstate to STOPMACHINE_NONE. /* initial state */
+          and set @smdata to &@idel.
+          check @active_cpus,
+          NULL => if we is the first online CPU,we can run the task.
+          NOT NULL => we can run the task if we in @active_cpus.
+          so,if we can run it,we let @smdata points to @active_data.
+          enter a do-while() cycle,until @curstate become STOPMACHINE_EXIT {
+                  cpu_relax(),chill out and ensure we re-read stopmachine_state.
+                  check current @state(static linkage,enum stopmachine_state).
+                  if @state is not equal to @curstate {
+                          /* state changed */
+                          set @curstate to @state.
+                          @curstate is
+                                  STOPMACHINE_DISABLE_IRQ
+                                    disable local interrupt
+                                    disable Hard IRQ
+                                  STOPMACHINE_RUN
+                                    we run @smdata->fn(@smdata->data).
+                                    if error happened,we record it in @smdata->fnret
+                          ack_state(),that we have did our work when we in the specified
+                          state.
+                  }
+                  /* we get into next iteration,may be work finished,or state unchanged */
+          }
+          finally,enable local interrupt and return.
+
+          /**
+           * enum stopmachine_state {
+           *         STOPMACHINE_NONE,
+           *         STOPMACHINE_PREPARE,
+           *         STOPMACHINE_DISABLE_IRQ,
+           *         STOPMACHINE_RUN,
+           *         STOPMACHINE_EXIT,
+           * }
+           *
+           * /* counter for state ack of threads */
+           * static atomic_t thread_ack;
+           *
+           * static void set_state(enum stopmachine_state newstate)
+           * - atomic set @thread_ack to @num_threads.
+           *   after a SMP wmb,we set @state to @newstate
+           * static void ack_state(void)
+           * - atomic_dec_and_test() @thread_ack.
+           *   if we acked a state(let it increase by 1),and current ack counter
+           *   is 0,that means all CPU have acked current state,so we invoke
+           *   set_state() with "@state + 1",to let them enter next step.
+           */
+
+          <================================================================>
+          ||                            CPU 0             CPU 1           ...
+          VV
+
+          STOPMACHINE_NONE              /* @curstate when enter stop_cpu() */
+
+          ||
+          VV
+
+          STOPMACHINE_PREPARE           /* the state set by __stop_machine */
+          
+          ||                            no equal detected,so we just ack_state() as weall
+          VV
+
+          STOPMACHINE_DISABLE_IRQ       /* after ack_state() */
+
+          ||                            every CPU needs to disable IRQ
+          VV
+
+          STOPMACHINE_RUN               /* after ack_state() */
+
+          ||                            every CPU needs to run the @fn,but for
+          VV                            un-expected CPU,they just process chill() /* the @idel */
+
+          STOPMACHINE_EXIT              /* after ack_state(),task finished */
+
+          !! IF NOT ALL CPU HAVE ACK CURRENT STATE,THE @state WOULD NOT CHANGE,THUS THE FASTER CPU
+             MAY SEE @curstate IS SAME AS @state AFTER IF DID cpu_relax(),IN THIS CASE,IT JUST
+             GO THROUGH THE NEXT ITERATION.THIS MEANS,THE CPU WILL ENTER SPIN STATE,CPU TIME WILL BE
+             WASTED.
+
+      by use stop machine mechanism,we can do some special work such replace system call table entry
+      on a SMP system.
+        e.g.
+                cpumask_t run_task;
+                cpumask_set(smp_processor_id(), &run_task);
+                preempt_disable();
+                local_irq_disable();
+                stop_machine(fn, new_entry, &run_task);
+                ...              #^ new syscall table entry
+                local_irq_enable();
+                preempt_enable();
+
+                /* because stop machine,we can ensure when we replacing the entry,no CPU is processing
+                 * system call.
+                 * ! insert new LKM would not trigger interrupt.
+                 */
+
+    
+          
                 
              
 
