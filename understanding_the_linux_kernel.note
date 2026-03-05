@@ -705,6 +705,10 @@ Chapter 2 : Memory Addressing
           if cr0.PG = 1,enable page;
           if cr0.PG = 0,linear addresses are interpreted as physical addresses;
 
+      ! the flag WP in cr0 control register :
+          WP = 1 => write into readonly page will raise Page Fault
+          WP = 0 => allow write into readonly page
+
     regular paging :
       start with 80386,a page handles 4kB memory.
 
@@ -36447,7 +36451,7 @@ Chapter 16 : Accessing Files
                        set @dio->curr_page to 0.
                        set @dio->total_pages to 0.
 
-                       if @user_addr & PAGE_SIZE - 1 is TRUE,then
+                       if @user_addr & (PAGE_SIZE - 1) is TRUE,then
                        /* suppose PAGE_SIZE is 4096 => 0001000000000000 (0x1000)
                         * PAGE_SHIFT is 12
                         * PAGE_SIZE - 1 is 4095 => 0000111111111111 (0x0fff)
@@ -42995,7 +42999,601 @@ Chapter 18 :
 /* END OF CHAPTER18 */
 
 
-CHapter 19 :
+Chapter 19 : Process Communication
+    ! we forcus on how kernel to implements them,omit the User Mode interfaces.
+
+    Pipes :
+      half-duplex pipe > data direction from A to B,can not reserve.    /* POSIX */
+      full-duplex pipe > data direction from A to B,can reserve.        /* SystemV 4 */
+
+      on Linux :
+        each pipe's file descriptors are still one-way,but do not require to close one of them
+        before using the other.
+
+      ! the general shell just allow a pipe is used between two processes,if we want to use them between
+        more than two processes,we have to code it. /* fork, execve, and we must sync them by ourselves */
+
+      Pipe Data Structures :
+        when we create a new pipe,the kernel have to create an inode object,a pipe resides on the inode,
+        and create two file descriptors on it,one for reading,another one for writing.
+
+        member struct inode.@i_pipe is used to represent a pipe.in that union,the corresponding bdev or cdev
+        is included.the member is type of struct pipe_inode_info.
+
+        <linux/pipe_fs_i.h>
+          #define PIPEFS_MAGIC 0x50495045   /* pipe filesystem magic number */
+
+          #define PIPE_BUFFERS (16)         /* size of pipe buffer array in a pipe inode info object */
+
+          #define PIPE_BUF_FLAG_LRU 0x01    /* page is on the LRU */
+          #define PIPE_BUF_FLAG_ATOMIC 0x02 /* was atomically mapped */
+          #define PIPE_BUF_FLAG_GIFT 0x04   /* page is a gift */
+
+          /**
+           * pipe_buf_operations - operations on pipe buffer
+           * @can_merge:           1 => the generic pipe read/write may coalesce
+           *                            data into an existing buffer
+           *                       0 => a new pipe page segment is always used for new data
+           * @map:                 method to makeup a mapping of the pipe buffer,return the
+           *                       virtual address of the mapping.
+           *                       the third parameter is a flag,to reflects whether this should be
+           *                       an atomic mapping or not.
+           *                       atomic => faster,but can not take page faults before calling
+           *                                 @unmap() again
+           *                       not atomic => allow eg access user data through copy_to/from_user()
+           *                       # this method use KM_USER0 atomic slot for atomic maps,and can only
+           *                         map one piper buffer at once
+           *                         ! if we want to kmap another page,must use others than KM_USER0
+           * @unmap:               finishes the virtual mapping of the pipe buffer
+           * @confirm:             verifies that the data in the pipe buffer is there and that the contents
+           *                       are good.if the pages in the pipe belong to a filesystem,we may need to
+           *                       wait I/O completion.return 0 for good,otherwise return error code
+           * @release:             when the contents of this pipe buffer has been completely consumed by a
+           *                       reader,this method is called
+           * @steal:               attempt to take ownership of the pipe buffer and its contents.
+           *                       if we succeed(returned 0),the contents of the pipe(but->page) is locked
+           *                       and now completely owned by the caller.
+           *                       the page may then be transferred to a different mapping,the most often used
+           *                       case is insertion into different file address space cache.
+           * @get:                 get a reference to the pipe buffer.
+           */
+          struct pipe_buf_operations {
+                  int can_merge;
+                  void *(*map)(struct pipe_inode_info *, struct pipe_buffer *, int);
+                  void (*unmap)(struct pipe_inode_info *, struct pipe_buffer *, void *);
+                  int (*confirm)(struct pipe_inode_info *, struct pipe_buffer *);
+                  void (*release)(struct pipe_inode_info *, struct pipe_buffer *);
+                  int (*steal)(struct pipe_inode_info *, struct pipe_buffer *);
+                  void (*get)(struct pipe_inode_info *,struct pipe_buffer *);
+          };
+
+          /* PIPE_SIZE is the length of the actual memory allocation */
+          #define PIPE_SIZE PAGE_SIZE
+
+          /**
+           * pipe_buffer - structure used to represent pipe buffer
+           * @page:        the page containing the data for the pipe buffer
+           * @offset:      offset of data inside the @page
+           * @len:         length of data inside the @page
+           * @ops:         operations associated with this buffer
+           * @flags:       pipe buffer flags
+           * @private:     private data owned by the @ops
+           */
+          struct pipe_buffer {
+                  struct page *page;
+                  unsigned int offset, len;
+                  const struct pipe_buf_operations *ops;
+                  unsigned int flags;
+                  unsigned long private;
+          };
+
+          /**
+           * pipe_inode_info - a linux kernel pipe
+           * @wait:            reader/writer wait point in case of empty/full pipe
+           * @nrbufs:          number of non-empty pipe buffers in this pipe
+           * @curbuf:          current pipe buffer entry
+           * @tmp_page:        cached released page
+           * @readers:         number of current readers of this pipe
+           * @writers:         number of current writers of this pipe
+           * @waiting_writers: number of writers blocked waiting for room
+           * @r_counter:       reader counter
+           * @w_counter:       writer counter
+           * @fasync_readers:  reader side fasync
+           * @fasync_writers:  writer side fasync
+           * @inode:           inode this pipe is attached to
+           * @bufs:            the circular array of pipe buffers
+           */
+          struct pipe_inode_info {
+                  wait_queue_head_t wait;
+                  unsigned int nrbufs, curbuf;
+                  struct page *tmp_page;
+                  unsigned int readers;
+                  unsigned int writers;
+                  unsigned int waiting_writers;
+                  unsigned int r_counter;
+                  unsigned int w_counter;
+                  struct fasync_struct *fasync_readers;
+                  struct fasync_struct *fasync_writers;
+                  struct inode *inode;
+                  struct pipe_buffer bufs[PIPE_BUFFERS];
+          };
+
+        for reasons of efficiency,the data yet to be read can be spread among several partially filled pipe buffers;
+        if current remaining space is not enough to contain PIPE_SIZE data,a new empty buffer will be selected to
+        store the data.
+
+                                            +--> new buffer,free space is PIPE_SIZE
+        read start at there <-+             |
+                              |      |<------------->|
+                [ ############|....] [ ............. ]
+                              |<-->| |
+                                |    +--> write operation will start at there
+                                +--> free space
+
+        kernel have to track :
+          1> which buffer is selected for read,and where to start in that pipe buffer.
+          2> the first empty page buffer,its index can be computed by
+               (@curbuf + @nrbufs) / PIPE_BUFFERS
+
+        ! kernel use the inode's @i_sem member to protect pipe object.
+
+      The pipefs special filesystem :
+        the special filesystem pipefs is used to implement linux kernel pipe,that let the pipe is fully
+        integrated in the VFS layer,it has not mount point.
+
+        kernel function init_pipe_fs() is used to initialize pipefs and register it in VFS.
+        <fs/pipe.c>
+          /* pipefs */
+          static struct file_system_type pipe_fs_type = {
+                  .name = "pipefs",
+                  .get_sb = pipefs_get_sb,      /* just invoke get_sb_pseudo() with PIPEFS_MAGIC */
+                  .kill_sb = kill_anon_super,
+          };
+
+          /* VFS mount point for pipefs */
+          static struct vfsmount *pipe_mnt __read_mostly;
+        
+          /**
+           * init_pipe_fs - initialize and register pipefs
+           * return:        0 OR error code
+           * # this function invoke register_filesystem() to register @pipe_fs_type.
+           *   after registered,invoke kern_mount() to mount it.
+           * # either succeed or unregistered and unmounted.
+           * # function "static void __exit exit_pipe_fs(void);" is used to unregister
+           *   pipefs,and put its mount point(@pipe_mnt).
+           * # init_pipefs() is called by fs_initcall(),and exit_pipe_fs() is called by
+           *   module_exit().
+           */
+          static int __init init_pipe_fs(void);
+
+      Creating and Destroying a Pipe :
+        system call service routine sys_pipe() is used to create a pipe for User Mode process,which
+        returned by invoke sys_pipe2() routine.
+        
+        <fs/pipe.c>
+          SYSCALL_DEFINE1(pipe, int __user *, fildes)
+          => asmlinkage long sys_pipe(int __user * fildes);
+
+          /**
+           * sys_pipe2 - the generic entry point of creating pipe for User Mode process
+           * @fildes:    array is type of int[2],one for read,another for write
+           * @flags:     pipe flags
+           * return:     0 OR error code
+           * # this function just invoke do_pipe_flags() try to create a pipe,and two file descriptors,
+           *   @flags is used to control its behavior.
+           *   if do_pipe_flags() succeed,invoke copy_to_user() to copy the file descriptors to userland,
+           *   if copy failed,close them and return -EFAULT.
+           */
+          SYSCALL_DEFINE2(pipe2, int __user *, fildes, int, flags)
+          => asmlinkage long sys_pipe2(int __user *fildes, int flags);
+
+          /**
+           * do_pipe_flags - setup a new pipe,and create two file descriptors for I/O
+           * @fd:            where store the fds
+           * @flags:         pipe flags
+           * return:         0 OR error code
+           * # this function rely on create_write_pipe() and create_read_pipe() to create pipe,
+           *   and rely on get_unused_fd_flags() to get proper file descriptors,rely on fd_install()
+           *   to associate file descriptor and file pointer.
+           * # first,invoke create_write_pipe() to create a new pipe,of course,a new inode in pipefs
+           *   is automatically created,then invoke create_read_pipe() on the just created file pointer
+           *   to create another file pointer,but this one can only be used for reading.
+           *   second,get two file descriptors for these two file pointers.
+           *   third,audit the file descriptors,and install them by fd_install(),use them to setup
+           *   @fd.
+           * # at the beginning,function will test @flags,if it has set open flags except O_CLOEXEC and
+           *   O_NONBLOCK,-EINVAL will be returned.
+           * # error handling : either succeed or no effect,this means if we failed on an operation
+           *                    described above,the previous operations will be UNDO.
+           *                    the error code is returned by the failed operation.
+           */
+          int do_pipe_flags(int *fd, int flags);
+
+          /**
+           * create_write_pipe - create a new pipe for write
+           * @flags:             behavior control
+           * return:             file pointer OR a pointer containing error code
+           */
+          struct file *create_write_pipe(int flags);
+
+          description for create_write_pipe() :
+            first invoke get_pipe_inode(),this function will get a new inode from pipefs,and create
+            a pipe_inode_info object on it,initialize the inode and the pipe_inode_info,return the
+            inode pointer back to create_write_pipe(),it will be stored in @inode the local pointer.
+            if failed,set return value to -ENFILE,and goto label "err".
+              /**
+               * function get_pipe_inode() will
+               *   allocate new inode through new_inode(),on @pipe_mnt->mnt_sb.
+               *   allocate new pipe inode info through alloc_pipe_info() on the new inode.
+               *   set @i_pipe to the new pipe.
+               *   set @readers and @writers of new pipe to 1.
+               *     # we creating the new pipe,so we is the only process can access the new pipe,
+               *       both for reading and writing.
+               *       both of them is 1 if and only if this pipe's file object is still opened by a process.
+               *     ! forking would not increase them,so they never rise above.
+               *       but forking will increase the usage counters of all opened file object that still used
+               *       by parent.
+               *   set new inode's @i_fop to @rdwr_pipefifo_fops.
+               *   mark inode dirty(state is I_DIRTY).
+               *   set @i_mode to S_IFIFO | S_IRUSR | S_IWUSR.
+               *   set @i_uid to current fsuid of user.
+               *   set @i_gid to current fsgid of user.
+               *   set @i_atime,@i_mtime,@i_ctime to CURRENT_TIME.
+               * ! this function do not return error code,when failed,it just return NULL pointer.
+               */
+
+                        /* alloc from dcache,and the parent is @s_root */
+            next,invoke d_alloc() on @pipe_mnt->mnt_sb->s_root to create dentry object,name is stored
+            in a local object named @name is type of struct qstr,the dentry is stored in a local object
+            named @path,it is type of struct path.
+            if failed,set return value to -ENOMEM,and goto label "err_inode".
+
+            invoke mntget() on @pipe_mnt,the vfsmount object also is stored in @path.
+            set dentry operations to @pipefs_dentry_operations.
+            invoke d_instantiate(),pass it @path.dentry,@inode.this function will fill inode information for
+            the dentry. /* also need to pass LSM test */
+
+            now,we have the dentry and inode,so we need to create a file pointer on them,the file has no disk
+            image.
+            invoke alloc_file() on @path,file mode is FMODE_WRITE,operation is @write_pipefifo_fops,the returned
+            file pointer stored in local pointer @f.
+            if we failed,set return value to -ENFILE,and goto label "err_dentry".
+            set @f->f_mapping to @inode->i_mapping.
+            set @f->@f_flags to O_WRONLY | (@flags & O_NONBLOCK).
+            set @f->f_version to 0.
+            finally,we return @f.
+
+            "err_dentry":
+              free_pipe_info() on @inode.
+              /**
+               * this function free each buffer in the pipe at first,then free the one page cache @tmp_page,
+               * next is the pipe itself.                                 #^through __free_page()
+               *             #^through kfree()
+               * finally,set @inode's @i_pipe to NULL.
+               * ! during free buffer,the destructor is the method @release() in the pipe buffer operations.
+               */
+              path_put() @path.
+              return error code.
+
+            "err_inode":
+              free_pipe_info() on @inode.
+              iput() the @inode.
+            "err":
+              return the error code.
+
+          /**
+           * create_read_pipe - create a read pipe on the exist write pipe,actually,is the file object
+           *                    based by the write pipe
+           * @wrf:              file based by write pipe
+           * @flags:            pipe flags
+           * return:            file pointer OR a pointer containing error code
+           * # this routine is very simple,it just alloc_file() on the same path,but file mode is FMODE_READ,
+           *   and file operation is @read_pipefifp_fops.
+           *   path_get() the path,set the file's @f_flags to O_RDONLY | (@flags & O_NONBLOCK).
+           */
+          struct file *create_read_pipe(struct file *wrf, int flags);
+
+          ! when the based file object of a pipe is no longer used by any one process,that means,the fput()
+            on the file let the usage counter become 0.then file's release method is invoked.that is pipe_read_release()
+            or pipe_write_release(),both of them invoke pipe_release() with different arguments.
+            which function invoke free_pipe_info() on the inode if @readers and writers both become _zero_.
+
+      Reading from a Pipe :
+        when we want to read a pipe,the corresponding file operations is @read_pipefifo_fops.
+
+        <fs/pipe.c>
+          const struct file_operations read_pipefifo_fops = {
+                  /* pipe does not allow seek */
+                  .llseek = no_llseek,
+
+                  /* sync reading */
+                  .read = do_sync_read,
+
+                  /* async reading */
+                  .aio_read = pipe_read,
+
+                  /* pipe read file descriptor do not support write operation */
+                  .write = bad_pipe_w,
+
+                  /* pipe poll on the fd */
+                  .poll = pipe_poll,
+
+                  /* ioctl */
+                  .unlocked_ioctl = pipe_ioctl,
+
+                  /* pipe open for read */
+                  .open = pipe_read_open,
+
+                  /* pipe read release */
+                  .release = pipe_read_release,
+
+                  /* pipe read fasync,that is send a signal when read become possible on the pipe */
+                  .fasync = pipe_read_fasync,
+          };
+
+        we have known the do_sync_read() just a special wrapper of aio_read() method of the file,so we
+        forcus on it.
+
+        <fs/pipe.c>
+          /**
+           * pipe_read - routine handle async read on the file based by a pipe
+           * @iocb:      kiocb
+           * @_iov:      io vector array,the buffer in User Mode is contained in it
+           * @nr_segs:   number of segments
+           * @pos:       offset of the file,but because we are operating on a pipe,so
+           *             this parameter is useless.
+           * return:     size of data been readed OR error code
+           */
+          static ssize_t pipe_read(struct kiocb *iocb, const struct iovec *_iov,
+                                   unsigned long nr_segs, loff_t pos);
+          
+          description for pipe_read() :
+            the reading operation can be classified to two cases :
+              1> pipe buffer containing some data.
+                 we need to read it.
+              2> nothing is contained in pipe buffer.
+                 no writers => stop reading
+                 no writers,and no writer is waiting => stop reading,return been readed(may be 0).
+                                                        O_NONBLOCK => return -EAGAIN.
+
+              after once reading period is finished,signal test and fasync wakeup need to be handled.
+
+            # this routine will convert away const of @_iov,store the pointer in local pointer @iov.
+
+            if total length of io vector is 0,we can not reading,because invalid buffer,in this case,return
+            0.
+            before we start a cycle to handle reading operation,we need acquire @i_mutex.
+            make use of a infinity cycle {
+                    we get current @nrbufs of @pipe in @bufs(local variable).
+                    @bufs is not _zero_ => containing some data
+                            get current index @curbuf of @pipe.
+                            get the current buffer through @curbuf in the pipe.
+                            if @buf->len is greater than total length of io vector,then we can only read the
+                            data has the length that suitable to be stored in the vector;otherwise,we can read
+                            all remaining data of current buffer.
+                            the size is stored in local variable @chars.
+
+                            confirm the pipe buffer through @confirm method.
+                            /* confirm failed,we break cycle,we can not perform reading */
+                            test whether we can use atomic copies,by invoke iov_fault_in_pages_write(@iov, @chars),
+                            store the "!@result" in local variable @atomic.
+                            /* this test rely on iov_fault_in_pages_write(),this function
+                             * will advance @iov to the first vector whose @iov_len is not _zero_.
+                             * next,we use a cycle to traverse vectors they covered length @chars.
+                             * for each of them,we invoke fault_in_pages_writeable() to test should we can
+                             * write into it at its beginning and write into it at the end(the remaining @chars
+                             * may less than vector's length).
+                             * if any one vector is not writeable,we break cycle,and return the remaining size.
+                             * so,we can know,if all vectors is writeable,0 will be returned.
+                             */
+
+                            "redo":
+
+                            map buffer page through @map method of pipe buffer operations.
+                            invoke pipe_iov_copy_to_user(),pass it @iov,@addr + @buf->offset, @chars, @atomic as
+                            arguments. /* this function take care of copy to user.
+                                        * if we can not atomic copy to user,__copy_to_user_inatomic() will be
+                                        * used;otherwise,copy_to_user() will be used.
+                                        * return 0 means succeed,return -EFAULT means copy failed.
+                                        */
+                            use @unmap method to unmap buffer page.
+                            if we failed on copying >
+                              test @atomic => 1 -> we goto "redo" with no atomic copying.
+                                              0 -> we continue to test @ret(local variable,used to store return value,initial 0)
+                                                   it is 0 => use it store the error code.
+                              break cycle and stop reading.
+                            /* we succeed */
+                            update @ret,@buf->offset,@buf->len.
+                            if @buf->len become _zero_,we need to update the pipe,release this empty pipe buffer.
+                               /* set @buf->ops to NULL
+                                * invoke @release method of pipe buffer(we can store the descriptor in local)
+                                * compute next buffer index.
+                                * reset @pipe->curbuf to the new index,decrease @pipe->nrbufs.
+                                * set local variable @do_wakeup to 1.
+                                *                    #^if @do_wakeup is TRUE,we will notify writer later.
+                                */
+                            update the total length,if we readed all we want,break.
+                    @bufs => not _zero_ /* because we read it into local variable @bufs,if @nrbufs been updated,
+                                         * @bufs will remain the old value,and it will be updated in next iteration.
+                                         */
+                            continue to next iteration.
+
+                    /* no thing to read */
+                    check @pipe->writers,_zero_ => break cycle. /* no writers on the pipe */
+                    check @pipe->waiting_writers,_zero_ => no writer is waiting for room,we stop reading.
+                                                 /* @ret is not _zero_ => readed something,break cycle.
+                                                  * O_NONBLOCK is set => set @ret to -EAGAIN and break.
+                                                  */
+                    check signal_pending() on @current,if @ret is _zero_,we set it to -ERESTARTSYS,because we
+                    interrupted before we read pipe.so,if signal is pending,we break cycle.
+
+                    check @do_wakeup,1 => need to notify waiting writers.
+                    /* just wake_up_interruptible_sync() on @pipe->wait.
+                     * invoke kill_fasync() on @pipe->fasync_writers,signal is SIGIO,@band is POLL_OUT.
+                     *                                                               #^as reason
+                     */                  
+                    invoke pipe_wait() on @pipe,this function will release @i_mutex before enter waiting state,
+                    and lock pipe(acquire @i_mutex) after switched back.
+                    /* has writers,has waiting writers,not interrupted by a signal,so we wait for writer prepare
+                     * pipe data.
+                     */
+            }
+            cycle breaked,because exception or we have readed all we want.
+            release @i_mutex.if @do_wakeup is TRUE,we wake up waiter on the @pipe,kill_fasync() with signal SIGIO,
+            and reason POLL_OUT(same as before).
+            if @ret is greater than 0,that means we readed something(error code is a negative value),so we invoke
+            file_accessed() on the based file.
+            finally,return @ret.
+
+      Writing to a Pipe :
+        the write operations for a pipe is @write_pipefifo_fops,also defined in <fs/pipe.c>.
+        it = {
+                .llseek = no_llseek,
+                .read = bad_pipe_r,
+                .write = do_sync_write,
+                .aio_write = pipe_write,
+                .poll = pipe_poll,
+                .unlocked_ioctl = pipe_ioctl,
+                .open = pipe_write_open,
+                .release = pipe_write_release,
+                .fasync = pipe_write_fasync,
+        }
+
+        an object is named @anon_pipe_buf_ops,it is defined in the same file,it will be installed into
+        a pipe buffer which has been written.
+        @anon_pipe_buf_ops = {
+                .can_merge = 1,
+                .map = generic_pipe_buf_map,
+                .unmap = generic_pipe_buf_unmap,
+                .confirm = generic_pipe_buf_confirm,
+                .release = anon_pipe_buf_release,
+                .steal = generic_pipe_buf_steal,
+                .get = generic_pipe_buf_get,
+        }
+
+        <fs/pipe.c>
+          /**
+           * pipe_write - routine handle async write on file based by a pipe
+           * @iocb:       kiocb
+           * @_iov:       io vector array
+           * @nr_segs:    number of segments
+           * @pos:        useless
+           * return:      size of data have written OR error code
+           */
+          static ssize_t pipe_write(struct kiocb *iocb, const struct iovec *_iov,
+                                    unsigned long nr_segs, loff_t ppos);
+        
+          description for pipe_write() :
+            ! write operation also need @i_mutex,thus no reading and writing can performed at the same time.
+
+            first test @pipe->readers,if no readers,we send signal SIGPIPE to @current,@priv is 0;set @ret
+            to -EPIPE,and goto label "out".because,we try to write a pipe without a reader on it.
+
+            second,check whether we can merge small writes,that is,if total length of vector can be stored 
+            in the last written pipe buffer,then we store the data in the buffer,do not need to allocate new buffer.
+            set local variable @chars to "total length & (PAGE_SIZE - 1)",this is size of the last buffer.
+            if @pipe->nrbufs is TRUE AND @chars is not _zero_           #because offset 4096 into a page fall into the next page
+            then
+                    /* should we can merge them? */
+
+                    get the last buffer's index through "(@pipe->curbuf + @pipe->nrbufs - 1) & (PIPE_BUFFERS - 1)".
+                    get the last buffer's descriptor @buf,and the @offset into buffer page "@buf->offset + @buf_len",
+                    the @offset is the position we start merge.
+                    test,if @can_merge in pipe buffer operations is TRUE AND (@offset + @chars) <= PAGE_SIZE
+                    then                                                     # we can store data in the last page
+                            similar as reading,we first @confirm it,if failed,goto label "out".
+                            invoke iov_fault_in_pages_read(),pass it @iov and @chars.
+                                   /* this function is similar to iov_fault_in_pages_write(),but it has no return value.
+                                    * we try fault_in_pages_readable() on the vectors,but we do not use its return value.
+                                    * that routine will try to read data from userland buffer.
+                                    * ! optimistic performance hint rather than a strict requirement for correctness.
+                                    *   we do not check fail at there,because the fault will be detected by copy from user.
+                                    */
+                            
+                            "redo1":
+
+                            atomic map buffer page,invoke pipe_iov_copy_to_user(),pass it "@offset + @addr(just mapped)",
+                            @iov, @chars, @atomic(default is 1) as arguments.
+                              /* @atomic = 1 => atomic copy,the copy_from_user()
+                               *         = 0 => no atomic copy,the __copy_from_user_inatomic()
+                               */
+                            unmap buffer page.
+                            now set @ret(used as return value) to the result of the copy.
+                            set @do_wakeup to 1.
+                            if we failed on copy,we can retry it agian with no atomic(restart from "redo1";if we had redo,
+                            goto label "out".
+                            everything is OK,update @buf->len,total length of vectors,set @ret to @chars.
+                            if all thing we want to write have consumed,goto label "out". /* succeed */
+
+            if we can not merge them,then we need a new buffer.
+            make use of a infinity cycle {
+                    if @pipe has no readers,send SIGPIPE to @current,@priv is 0.@ret is -EPIPE,break cycle.
+                    the remaining work is similar to pipe_read().
+                    we get @pipe->nrbufs in @bufs(local variable).
+                    if @bufs less than PIPE_BUFFERS,that means we can get a new buffer for write.
+                            @newbuf(the index) is get through "(@pipe->curbuf + @bufs) & (PIPE_BUFFERS - 1)".
+                            we retrieve @tmp_page of @pipe in @page.
+                            
+                            if @page is NULL,we allocate it with GFP_HIGHUSE,and set @pipe->tmp_page points to @page.
+                              /* if failed,and we have not written anything,set @ret to -ENOMEM.
+                               * break cycle,stop writing.
+                               */
+                            set @do_wakeup to 1.
+                            set @chars to min(PAGE_SIZE, total length)
+                            iov_fault_in_pages_read(),same as above,but again.
+
+                            "redo2"
+
+                            if @atomic is 1(default is 1),we atomic map @page with KM_USER0,otherwise,just kmap() it.
+                            address is stored in @src.
+
+                            invoke pipe_iov_copy_from_user(),similar to above.
+                    
+                            unmap @page(@src),kunmap_atomic() KM_USER0 or just kunmap().
+
+                            if we failed,and @atomic is TRUE,we disable @atomic(set to 0) and goto label "redo2".
+                            if we have been retried,and no thing we have written,we set @ret to error code.break cycle.
+
+                            /* copy succeed */
+                            set @buf->page to @page,set @buf->ops to @anon_pipe_buf_ops.
+                            set @buf->offset to 0,set @buf->len to @chars.
+                            increase @pipe->nrbufs.
+                            set @pipe->tmp_page to NULL. /* we allocate new one,and it is the last written page */
+
+                            update total length.
+                            if we have written everything,break.
+                    if @bufs less than PIPE_BUFFERS,continue to next iteration. /* similar to pipe_read(),the updating
+                                                                                 * will be seen in next iteration.
+                                                                                 */
+                    if @f_flags of the file has O_NONBLOCK,set @ret to -EAGAIN if @ret is 0;break.
+
+                    /* we interrupted by signal */
+                    if @current is signal pending,set @ret to -ERESTARTSYS,if @ret is 0;break.
+
+                    /* we need to wakeup reader */
+                    @do_wakeup is TRUE => wakeup @pipe->wait.
+                                         kill_fasync() on @pipe->fasync_reads,signal is SIGIO,@band is POLL_IN.
+                                         reset @do_wakeup to 0.
+            
+                    increase @pipe->waiting_writers,because we are going to pipe_wait(),the member will be decreased
+                    after we have been switched back.
+            }
+
+            "out":
+              relese @i_mutex.
+              if @do_wakeup is TRUE,we wakeup them as above.
+              if @ret greater than 0 => we written something,invoke file_update_time() on the based file.
+              finally,return @ret.
+
+            
+                            
+
+            
+          
+                 
+                        
+
+        
 
 
 /* END OF CHAPTER19 */
@@ -44999,13 +45597,14 @@ Append :
                 local_irq_disable();
                 stop_machine(fn, new_entry, &run_task);
                 ...              #^ new syscall table entry
-                local_irq_enable();
-                preempt_enable();
+                local_irq_enable();     # we should disable cr0.WP flag in the task function,to avoid race,
+                preempt_enable();         that right before we hook the entry.
 
                 /* because stop machine,we can ensure when we replacing the entry,no CPU is processing
                  * system call.
                  * ! insert new LKM would not trigger interrupt.
                  */
+
 
     
           
