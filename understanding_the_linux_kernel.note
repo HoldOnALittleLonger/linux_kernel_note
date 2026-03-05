@@ -43135,7 +43135,7 @@ Chapter 19 : Process Communication
           2> the first empty page buffer,its index can be computed by
                (@curbuf + @nrbufs) / PIPE_BUFFERS
 
-        ! kernel use the inode's @i_sem member to protect pipe object.
+        ! kernel use the inode's @i_mutex member to protect pipe object.
 
       The pipefs special filesystem :
         the special filesystem pipefs is used to implement linux kernel pipe,that let the pipe is fully
@@ -43432,8 +43432,10 @@ Chapter 19 : Process Communication
                      * invoke kill_fasync() on @pipe->fasync_writers,signal is SIGIO,@band is POLL_OUT.
                      *                                                               #^as reason
                      */                  
+
                     invoke pipe_wait() on @pipe,this function will release @i_mutex before enter waiting state,
                     and lock pipe(acquire @i_mutex) after switched back.
+                             /* rely on prepare_to_wait() on @pipe->wait,invoke schedule() after queued */
                     /* has writers,has waiting writers,not interrupted by a signal,so we wait for writer prepare
                      * pipe data.
                      */
@@ -43444,6 +43446,19 @@ Chapter 19 : Process Communication
             if @ret is greater than 0,that means we readed something(error code is a negative value),so we invoke
             file_accessed() on the based file.
             finally,return @ret.
+                                                                                    +-- or write start at there(can merge)
+                                                                                    |
+                                            +--> reading start at there             |        +--> write start at there
+                                            |                                       |<-->|   |
+        +---> <= [ ........... ] [ .........####### ] [ ############## ] [ #########.... ] [ ............. ]=> ----+
+        |                                                                                                          |
+        +------------------------------------------<<--------------------------------------------------------------+
+
+        ! because either reading or writing will acquire @i_mutex,thus there always only one reader and one writer
+          at the same time.but,when we want to share the pipe among several tasks,we must serialize them manually.
+                                                                                  #^even kernel protect concurrent,
+                                                                                    but the order of tasks to read pipe
+                                                                                    is not inclued.
 
       Writing to a Pipe :
         the write operations for a pipe is @write_pipefifo_fops,also defined in <fs/pipe.c>.
@@ -43459,7 +43474,7 @@ Chapter 19 : Process Communication
                 .fasync = pipe_write_fasync,
         }
 
-        an object is named @anon_pipe_buf_ops,it is defined in the same file,it will be installed into
+        an object is named @anon_pipe_buf_ops,it is defined in the same file.it will be installed into
         a pipe buffer which has been written.
         @anon_pipe_buf_ops = {
                 .can_merge = 1,
@@ -43493,8 +43508,13 @@ Chapter 19 : Process Communication
             in the last written pipe buffer,then we store the data in the buffer,do not need to allocate new buffer.
             set local variable @chars to "total length & (PAGE_SIZE - 1)",this is size of the last buffer.
             if @pipe->nrbufs is TRUE AND @chars is not _zero_           #because offset 4096 into a page fall into the next page
-            then
-                    /* should we can merge them? */
+            then    /* shall we can merge them? */
+                                                    /* @chars is _zero_,either it is "greater than or equal to" 4096,or
+                                                     * total length is _zero_.
+                                                     * in this case,we can not merge them,instead,use a new buffer.
+                                                     * we do not splite the data to get a piece that is suitable to
+                                                     * be stored in the last buffer.
+                                                     */
 
                     get the last buffer's index through "(@pipe->curbuf + @pipe->nrbufs - 1) & (PIPE_BUFFERS - 1)".
                     get the last buffer's descriptor @buf,and the @offset into buffer page "@buf->offset + @buf_len",
@@ -43532,20 +43552,24 @@ Chapter 19 : Process Communication
                     we get @pipe->nrbufs in @bufs(local variable).
                     if @bufs less than PIPE_BUFFERS,that means we can get a new buffer for write.
                             @newbuf(the index) is get through "(@pipe->curbuf + @bufs) & (PIPE_BUFFERS - 1)".
-                            we retrieve @tmp_page of @pipe in @page.
+                            we retrieve @tmp_page of @pipe in @page. /* the first empty pipe buffer */
                             
                             if @page is NULL,we allocate it with GFP_HIGHUSE,and set @pipe->tmp_page points to @page.
                               /* if failed,and we have not written anything,set @ret to -ENOMEM.
                                * break cycle,stop writing.
                                */
+                              ! @tmp_page is a one page cache,it is get from the recently released pipe buffer.
+
                             set @do_wakeup to 1.
                             set @chars to min(PAGE_SIZE, total length)
                             iov_fault_in_pages_read(),same as above,but again.
 
-                            "redo2"
+                            "redo2":
 
                             if @atomic is 1(default is 1),we atomic map @page with KM_USER0,otherwise,just kmap() it.
                             address is stored in @src.
+                            ! note,we map it through kmap routine,not the @map method,because a free pipe buffer has
+                              no pipe buffer operations is specified.
 
                             invoke pipe_iov_copy_from_user(),similar to above.
                     
@@ -43585,13 +43609,103 @@ Chapter 19 : Process Communication
               if @ret greater than 0 => we written something,invoke file_update_time() on the based file.
               finally,return @ret.
 
-            
-                            
+    FIFOs :
+      there is no way to open an already existing pipe,so the general pipe is the anonymous pipe.so,we can only
+      share the anonymous pipe among process has the same ancestor.
 
-            
-          
-                 
-                        
+      FIFO - named pipe,a special file type.the first byte written into FIFO is the first byte read from FIFO.
+             FIFO is implemented by anonymous pipe,it use the same data structures and methods.
+
+      two significant differences :
+        1> FIFO inodes appear on the system directory tree rather than on the pipefs special filesystem.
+        2> FIFOs are a bidirectional communication channel,that is,it is possible to open a FIFO in read/write mode.
+
+      Creating and Opening a FIFO :
+        a process creates a FIFO by issuing a mknod() system call,passing to it as parameters the pathname of the new
+        FIFO and the value S_IFIFO logically ORed with the permission bit mask of the new file.
+        POSIX implemented mkfifo() function,which is based on mknod() to create FIFO.
+
+        because FIFO is a special device file,so the function init_special_inode() will be invoked,and S_IFIFO is
+        set in the device file mode,therefore the routine will set the @i_fop to @def_fifo_fops.
+
+        <fs/fifo.c>
+          const struct file_operations def_fifo_fops = {
+                  .open = fifo_open,
+          };
+
+          /* only open method is implemented,so when we open the fifo file,this method will be invoked */
+
+          /**
+           * fifo_open - method to open a FIFO
+           * @inode:     the special device file inode
+           * @filp:      the file pointer to the FIFO file
+           * return:     0 OR error code
+           */
+          static int fifo_open(struct inode *inode, struct file *filp);
+
+          description for fifo_open() :
+            ! we need to acquire @i_mutex at beginning,and release it before return.
+
+            this function will create pipe_inode_info,if @inode->i_pipe is NULL.creation is rely on
+            alloc_pipe_info(),if failed,return -ENOMEM.
+            next,set @filp->f_version to 0,clear other flags except FMODE_READ | FMODE_WRITE in @filp->f_mode.
+
+            @filp->f_mode is FMODE_READ
+                    O_RDONLY is specified.
+                    replace @filp->f_op to @read_pipefifo_fops.
+                    increase @pipe->r_counter.
+
+                    if @pipe->readers is 0,increase it and invoke wake_up_partner() on @inode.
+                                                                  #^wake_up_interruptible() on @i_pipe->wait.
+                    if @pipe->writers is 0
+                            O_NONBLOCK mode :
+                                    set @filp->f_version to @pipe->w_counter
+                            blocking mode :
+                                    invoke wait_for_partner() on @inode,the second parameter is &@pipe->w_counter.
+                                    if we interrupted by a signal,goto label "err_rd".
+                                    /* wait_for_partner() - pipe_wait() until the value pointed by second parameter
+                                     *                      has changed.
+                                     */
+            @filp->f_mode is FMODE_WRITE
+                    O_WRONLY is specified.
+                    set @ret to -ENXIO(@ret is a local variable,default is 0).
+                    if we are in O_NONBLOCK mode AND current is no readers,goto label "err".
+                    replace @filp->f_op to @write_pipefifo_fops.
+                    increase @pipe->w_counter.
+
+                    /* no other writer currently */
+                    if @pipe->writers is _zero_,increase it,and invoke wake_up_partner() on @inode,this will
+                    wakeup the reader waiting a writer.
+
+                    if @pipe->readers is _zero_,we need to wait reader,so invoke wait_for_partner(),but the second
+                    parameter is &@pipe->r_counter.if we are interrupted by a signal,goto label "err_wr".
+            @filp->f_mode is FMODE_READ | FMODE_WRITE
+                    O_RDWR is specified.
+                    so we replace file operation to @rdwr_pipefifo_fops.
+                    increase @piper->readers,@pipe->writers,@pipe->r_counter,@pipe_w_counter,because we is the reader,
+                    and also is the writer.
+                    but we expect more reader and writer,however,if @pipe->readers is 1 OR @pipe->writers is 1,we
+                    wake_up_partnet() on @inode.this will wake up the reader and the writer on the FIFO.
+            others
+                    set @ret to -EINVAL,and goto label "err".
+            finally,return 0 to caller.
+                            
+            "err_rd":
+              decrease @pipe->readers,if it become _zero_,invoke wake_up_interruptible(),to wake up task waiting on
+              @pipe->wait.
+              set @ret to -ERESTARTSYS.
+              goto label "err".
+
+            "err_wr":
+              similar as "err_rd",but decrease @pipe->writers.
+
+            "err":
+              test if @pipe has no readers AND has no writers,we invoke free_pipe_info() on @inode to destroy
+              the anonymous pipe.
+
+            "err_nocleanup":
+              release @i_mutex.
+              return @ret,at there,it storing the error code,it usually is -ERESTARTSYS.
 
         
 
