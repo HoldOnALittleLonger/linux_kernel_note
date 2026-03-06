@@ -43707,6 +43707,348 @@ Chapter 19 : Process Communication
               release @i_mutex.
               return @ret,at there,it storing the error code,it usually is -ERESTARTSYS.
 
+    System V IPC :
+      IPC,Interprocess Communication.It commonly refers to a set of mechanisms that allow a User Mode process to
+      do these :
+        > synchronize itself with other process by means of semaphores.
+        > send messages to other processes or receive messages from them.
+        > share a memory area with other processes.
+
+      IPC data structures are created dynamically when a process requests an IPC resource.
+      new created IPC only will be removed if process remove it explicitly or when system shutdown.the shell
+      command "ipcs" can show current in-memory IPCs,and shell command "ipcrm" can be used to remove IPC,of course,
+      the process issue system call also can remove them.
+      ! an IPC resource may be used by every process,including those that do not share the ancestor that created
+        the resource.
+
+      IPC key : 32 bit key value,used as 32 bit IPC identifier.
+                IPC identifier is associated with IPC resource by kernel,and the identifier is unique in system.
+
+      The SystemV IPC includes,the semaphore,the shared memory,and the message queue.each of them has a interface
+      with the style "*ctl()" used to control the exact IPC resource.the detail should be contained in the man page 7
+      "sysvipc".
+        e.g. 
+          msgget    create
+          msgsnd    send
+          msgrcv    receive
+          msgctl    control
+
+          semget    create
+          semop     operation
+          semctl    control
+        
+          shmget    create
+          shmat     attach
+          shmdt     detach
+          shmctl    control
+
+        ! new created IPC will has the larger identifier than the previously created.and if an IPC is freed,kernel
+          does not recycle it,rather than let the identifer overflow and goes to this value again.
+        ! each IPC identifier iscomputed by combining a "slot usage sequence number" relative to the resource type,
+          an arbitrary "slot index" for the allocated resource,and an arbitrary value chosen in the kernel that is
+          greater than the maximum number of allocatable resources.
+                  IPC identifier = s * M + i
+                  # where 's' is sequence number,'M' is allocatable resources,'i' is slot index.
+        ! C library provides ftok() function to create a key value,but it has a small change to return the same key.
+
+      ! We forcus on how kernel handles them.
+
+      The structure ipc_ids :
+        each type of IPC resource have a structure named @ipc_ids associated with it.
+
+        <linux/ipc_namespace.h>
+          /**
+           * ipc_ids - identifier for the exact IPC type
+           * @in_use:  number of allocated IPC resources
+           * @seq:     slot usage sequence number for the next allocation
+           * @seq_max: maximum slot usage sequence number
+           * @rw_mutex:
+           *           concurrent protection
+           * @ipcs_idr:
+           *           linux IDR
+           *           when we want to get a IPC descriptor on this type,we can
+           *           use its key value to find it in linux IDR,that is on this member,
+           *           through idr_find();of course,if we want to register a new key value,
+           *           we can use the function idr_get_new() for it.
+           *           this is what linux IDR does,it associated pointer to an object and
+           *           a key value.
+           */
+          struct ipc_ids {
+                  int in_use;
+                  unsigned short seq;
+                  unsigned short seq_max;
+                  struct rw_semaphore rw_mutex;
+                  struct idr ipcs_idr;
+          };
+
+      The structure kern_ipc_perm :
+        in User Mode,each IPC has a relative @ipc_perm structure,which contains the information about IPC permisson.
+        and in Kernel Mode,also has a structure contains these information,which is named @kern_ipc_perm.
+
+        <linux/ipc.h>
+          /**
+           * kern_ipc_perm - IPC permission structure used by in-kernel data structures(such the IPC descriptor in kernel)
+           * @lock:          protect IPC resource descriptor
+           * @deleted:       flag set if the resource has been released
+           * @id:            result of "(IPCMNI) * @seq + id"
+           *                 where "id" is get from Linux IDR.
+           * @key:           IPC key
+           * @uid:           owner uid
+           * @gid:           owner gid
+           * @cuid:          creator uid
+           * @cgid:          creator gid
+           * @mode:          permission bit mask
+           * @seq:           slot usage sequence number
+           * @security:      security structure,used by SELinux
+           */
+          struct kern_ipc_perm {
+                  spinlock_t lock;
+                  int deleted;
+                  int id;
+                  key_t key;
+                  uid_t uid;
+                  gid_t gid;
+                  uid_t cuid;
+                  gid_t cgid;
+                  mode_t mode;
+                  unsigned long seq;
+                  void *security;
+          };
+
+      The ipc() system call :
+        this system call is similar to ioctl() system call.the User Mode wrappers can operate the IPC resource
+        through this system call,with the specified subcommand.in 80x86 architecture,there is just on IPC
+        system call,that is it. /* multiplexer */
+        in older Linux versions,which included the IPC code in a dynamic module.it did not make much sense to
+        reserve several system call entries in the system_call table for a kernel component that could be missing,
+        so the kernel adopted the multiplexer approach.but nowadays,SystemV IPC can no longer be compiled as a
+        dynamic module,so there is no reason to using a single IPC system call.
+
+        ! LINUX 2.6.34.1 PROVIDED SYSTEM CALLS CORRESPONDING TO EACH WRAPPER IN THE USER MODE.AND THE SYSTEM CALL
+          sys_ipc() IS COMPOSED BY THESE SYSTEM CALLS.THAT IS,IT INVOKE sys_*() SYSTEM CALL DEPENDS ON THE SUBCOMMAND.
+
+      IPC Semaphores :
+        similar to the kernel semaphore,provide controlled access to shared data structures for multiple processes.
+
+        semaphore value is positive : resource avaiable.
+        semaphore value is 0        : resource unavailable.
+
+        when the resource is not available,kernel will block current task until someone released resource,that is
+        the value become positive value.
+
+        different than Kernel Mode semaphore :
+          1> each IPC semaphore is a set of one or more semaphore values,not just a single value like a
+             kernel semaphore.this means that the same IPC resource can protect several independent shared
+             data structures.the number of semaphore values in each IPC semaphore must be specified as a
+             parameter in the creation function semget(). /* counters inside an IPC semaphore,primitive semaphores */
+          2> System V IPC semahpores provide a fail-safe mechanism for situations in which a process dies
+             without being able to undo the operations that is previously issued on a semaphore.
+             /* undoable semaphore operations */
+
+        ! THE DETAIL OF IMPLEMENTATION IS IN <ipc/sem.c>.
+
+        The relative data structures :
+          ! we only list in-kernel structures.
+
+          <linux/sem.h>
+            /**
+             * sem - one semaphore structure for each semaphore in the system */
+             * @semval:
+             *       current value
+             * @sempid:
+             *       who have issued the last operation on this
+             * @sem_pending:
+             *       pending single-sop operations
+             */
+            struct sem {
+                    int semval;
+                    int sempid;
+                    struct list_head sem_pending;
+            };
+
+            /**
+             * sem_array - on sem_array data structure for each set of semaphores in the system,
+             *             used as semaphore set
+             * @sem_perm:  permissions
+             * @sem_otime: the last semop time
+             * @sem_ctime: the last change time
+             * @sem_base:  pointer to first semaphore in array
+             * @sem_pending:
+             *             pending operations to be processed
+             *             # list of sem_queue structures
+             * @list_id:   UNDO requests on this array
+             * @sem_nsems: number of semaphores in array
+             * @complex_count:
+             *             pending complex operations
+             */
+            struct sem_array {
+                    struct kern_ipc_perm sem_perm;
+                    time_t sem_otime;
+                    time_t sem_ctime;
+                    struct sem *sem_base;
+                    struct list_head sem_pending;
+                    struct list_head list_id;
+                    int sem_nsems;
+                    int complext_count;
+            };
+
+            /**
+             * sem_queue - one queue for each sleeping process in the system.
+             *             used to hold requests pending on a semaphore.
+             * @simple_list:
+             *             queue of pending operations,as a connector will be
+             *             linked into list sem.@sem_pending
+             * @list:      queue of pending operations,as a connector will be
+             *             linked into list sem_array.@sem_pending
+             * @sleeper:   this process
+             * @undo:      UNDO structure,for undoable operations
+             * @pid:       process id of requesting process
+             * @status:    completion status of operation
+             * @sops:      array of pending operations
+             * @nsops:     number of operations
+             * @alter:     does the operation alter the array?
+             */
+            struct sem_queue {
+                    struct list_head simple_list;
+                    struct list_head list;
+                    struct task_struct *sleeper;
+                    struct sem_undo *undo;
+                    int pid;
+                    int status;
+                    struct sembuf *sops;
+                    int nsops;
+                    int alter;
+            };
+
+            /**
+             * sem_undo - each task has a list of undo requests.they are executed automatically
+             *            when the process exists
+             * @list_proc:
+             *            per-process list: all undos from one process,@rcu protected
+             * @rcu:      rcu for sem UNDO
+             * @ulp:      undo list for the process
+             * @list_id:  per semaphore array list: all undos for one array
+             * @semid:    semaphore set identifier
+             * @semadj:   array of adjustments,one per semaphore
+             */
+            struct sem_undo {
+                    struct list_head list_proc;
+                    struct rcu_head rcu;
+                    struct sem_undo_list *ulp;
+                    struct list_head list_id;
+                    int semid;
+                    short *semadj;
+            };
+
+            /**
+             * sem_undo_list - controls shared access to the list of sem_undo structures that
+             *                 may be shared among all a CLONE_SYSVSEM task group
+             * @refcnt:        refcount
+             * @lock:          concurrent protection
+             * @list_proc:     list of processes shared sem_undo structures
+             */
+            struct sem_undo_list {
+                    atomic_t refcnt;
+                    spinlock_t lock;
+                    struct list_head list_proc;
+            };
+
+            /* per-process list includes all sem_undo data structures corresponding to IPC
+             * semaphores on which the process has performed undoable operations.
+             * the task_struct has a member named @sysvsem,which is type of struct sysv_sem *.
+             * ! CLONE_SYSVSEM will let threads share the same list of undoable semaphore operations.
+             */
+            struct sysv_sem {
+                    struct sem_undo_list *undo_list;
+            };
+
+        when we create a new semaphore set,kernel will allocate memory space is large enough to
+        contains a sem_array object and some sem objects,that is the sem objects following after
+        the sem_array object.
+        
+                            +--> &@sma[1] <-- @sem_base
+                +--> *@sma  |
+                |           |
+                +-------------------------------------------------+
+                | sem_array | sem 0 | sem 1 | sem 2 | ... | sem N |
+                +-------------------------------------------------+
+                |<--- size of sem_array + size of sem * nsems --->|
+
+          ! when create new IPC,the member in @nsproxy->ipc_ns in current process's task_struct will be 
+            selected as the IPC namespace.the corresponding *get() system call service routine pass the
+            namespace to function ipcget() to create private or public IPC resource.what the type of
+            IPC resource need to be created is described by the @ipc_ops structure's @getnew method.
+              <ipc/util.h>
+                /**
+                 * ipc_params - structure used to collects parameters from User Mode wrapper
+                 * @key:        key value
+                 * @flg:        control flag
+                 * @size:       for shared memories
+                 * @nsems:      for semaphores
+                 * @u:          used to holds the getnew() specific param
+                 */
+                struct ipc_params {
+                        key_t key;
+                        int flg;
+                        union {
+                                size_t size;
+                                int nsems;
+                        } u;
+                };
+
+                struct ipc_ops {
+                        /* method used to create new IPC resource */                        
+                        int (*getnew)(struct ipc_namespace *, struct ipc_params *);
+
+                        /* method used to check permissions for a new ipc object */
+                        int (*associate)(struct kern_ipc_perm *, int);
+
+                        /* method used for an extra check if needed */
+                        int (*more_checks)(struct kern_ipc_perm *, struct ipc_params *);
+                };
+
+        UNDOABLE semaphore operations :
+          flag SEM_UNDO passed to semop() will let kernel UNDO semaphore operations when process exit.
+          for example,if we did semaphore operations "-1, -1, +1, -1, -1",then abort().and kernel will
+          UNDO them with "+1, +1, -1, +1, +1".
+          suppose initial value is 3,the results will be :
+            3, 2, 1, 2, 1, 0 => process
+            0, 1, 2, 1, 2, 3 => kernel
+
+          when we specified SEM_UNDO in semop(),kernel will try to retrieve the process's @sysvsem.
+          if its @undo_list is NULL,kernel will allocate a new one for it.
+          then lookup sem_undo on the @undo_list,to find out a sem_undo has the same @semid.
+          if no such sem_undo,kernel also allocate a new one,and insert it into @undo_list->list_proc,
+          insert it into sem_array.@list_id.
+
+            task_struct->sysvsem->undo_list <---+       task_struct->nsproxy->ipc_ns-> ... +
+                                  ->list_proc   |  +---------------------------------------+
+                                        |   +---+  |         
+                                 +------+   |      +--> sem_array->list_id ----+  (per-semaphore sem_undo list)
+                                 |  +-------+ @ulp                             |
+                                 |  |  +---------------------------------------+
+                                 |  |  |
+                                 V  |  V
+                    ... <-> [ sem_undo 0 ] <-> [ sem_undo 1] <-> ...
+                                 |
+                                 |
+                                 +--> @semadj [ short v 0 ] [ short v 1 ] [ short v 2 ] ...
+                                              |<------------ sem_array.nsems ------------>|
+
+          per-process list is used when a process terminates,the exit_sem() function invoked by do_exit().
+          exit_sem() walks through the list and reverses the effect of any unbalanced operation for every IPC
+          semaphore touched by the process.
+          per-semaphore list is mainly used when a process invokes the semctl() function to force an explicit
+          value into a primitive semaphore.but kernel do not reverses such operation,because it is no sense.
+          when an IPC semaphore is destroyed,all related sem_undo data are invalidated by setting the @semid
+          to -1.    /* freeary() function,defined in <ipc/sem.c> */
+          
+        The queue of pending requests :
+          kernel associates a queue of pending requests with each IPC semaphore to identify processes that are
+          waiting on one(or more) of the semaphores in the array.
+
+
+
         
 
 
