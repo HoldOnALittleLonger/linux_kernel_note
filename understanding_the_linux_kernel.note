@@ -10584,7 +10584,7 @@ Chapter 7 :
                    * @se.exec_start updated to @clock
                    */
               7>  release runqueue lock.
-              8>  call to perf_event_task_tick(@curr) sign a performance event associated
+              8>  call to perf_event_task_tick(@curr) feed a performance event associated
                   with task tick.
               #ifdef CONFIG_SMP
               9>  call to idle_cpu(cpu) to check whether local cpu is idle.
@@ -10893,7 +10893,7 @@ Chapter 7 :
             11> if @prev != @next
                 then
                         process sched info switch between @prev and @next
-                        sign a performance event about to task sched out
+                        feed a performance event about to task sched out
                         increase @rq->nr_switches
                         set @rq->curr to @next,it as the current process of @rq
                         increase *@switch_count /* @prev->nivcsw */
@@ -37898,7 +37898,7 @@ Chapter 17 : Page Frame Reclaiming
                    * valid anon_vma descriptor.(return NULL if failed,and without held any lock)
                    */
                   if NULL is returned,this routine return SWAP_AGAIN to caller.
-                  next.traverse VMAs that sharing "this" anon_vma {
+                  next,traverse VMAs that sharing "this" anon_vma {
                           /* retrieve the next element in @anon_vma->head,the list
                            * collecting anon_vma_chain object.
                            * then,traverse each anon_vma_chain objects in the list @same_anon_vma
@@ -39362,7 +39362,9 @@ Chapter 17 : Page Frame Reclaiming
                                                 failed -> activate it
                                 /* if we added it to swap cache,then @may_enter_fs is set to 1 */
 
-                        /* we invoke page_mapping() on the page at there,to get @mapping member of this page descriptor.
+                        /* we invoke page_mapping() on the page at there,to get @mapping member of this page descriptor,
+                         * store it the local pointer named @mapping.
+                         *
                          * <linux/mm.h>
                          *   static inline struct address_space *page_mapping(struct page *page);
                          *   - retrieve @page->mapping in local pointer @mapping.
@@ -39374,6 +39376,8 @@ Chapter 17 : Page Frame Reclaiming
                          *     ! we do not modify @mapping member of @page to @swapper_space when it is in swap cache,
                          *       but we return @swapper_space to caller.hence,pageout() called by shrink_page_list()
                          *       will invoke @swapper_space.writepage() to writeback this swap entry.
+                         *
+                         * ! BECAUSE WE ADDED THIS PAGE INTO SWAP CACHE,THUS IT IS IN SWAP CACHE WHEN WE ENTERED page_mapping().
                          */
 
                         it is mapped and its mapping is not NULL,try_to_unmap() on it returned SWAP_SUCCESS /* User Mode process referenced to it */
@@ -44185,6 +44189,278 @@ Chapter 19 : Process Communication
           WILL DESTROY THE msg_msg OBJECT,THUS THERE WILL BE FREE SPACE FOR SEND NEW MESSAGE.
         ! THE DETAIL OF IMPLEMENTATION IS IN <ipc/msg.c>.
 
+      IPC Shared Memory :
+        IPC shared memory allows two or more processes to access some common data structures by placing them in an IPC shared
+        memory region.
+        when a process need to access shared memory,it must add to its address space a new memory region which maps the page
+        frames associated with the IPC shared memory region.
+
+        in order to avoid overuse of memory by User Mode processes,there are some limits on the allowed number of IPC shared
+        memory regions(default 4096),on the size of each segment(default 32 MB),and on the maximum total size of all segments(default 8 GB)
+          /proc/sys/kernel/shmmni   => maximal number of memory regions
+          /proc/sys/kernel/shmmax   => size of segment
+          /proc/sys/kernel/shmall   => maximum total size
+
+        The relative data structures :
+          <linux/shm.h>
+            /**
+             * shmid_kernel - IPC shared memory descriptor in Kernel Mode
+             * @shm_perm:     permission
+             * @shm_file:     the file used to map shared memory
+             * @shm_nattch:   number of current attaches
+             * @shm_segsz:    size of segment in bytes
+             * @shm_atim:     last access time
+             * @shm_dtim:     last detach time
+             * @shm_ctim:     last change time
+             * @shm_cprid:    creator pid
+             * @shm_lprid:    pid of last accessing process
+             * @mlock_user:   pointer to the user_struct descriptor of the user that locked
+             *                in RAM the shared memory resource
+             * ! in particular,each IPC shared memory region is associated with a file belonging to
+             *   the "shm" special filesystem,but this filesystem has no mount point,so we can not
+             *   see it in the system directory tree.
+             * ! the @i_ino member of the inode corresponding to this "shm" file,stores the slot index
+             *   of the IPC shared memory region.
+             * ! the address space operations for "shm" page cache is @shmem_aops,this constant is
+             *   defined in <mm/shmem.c>
+             */
+            struct shmid_kernel {
+                    struct kern_ipc_perm shm_perm;
+                    struct file *shm_file;
+                    unsigned long shm_nattch;
+                    unsigned long shm_segsz;
+                    time_t shm_atim;
+                    time_t shm_dtim;
+                    time_t shm_ctim;
+                    pid_t shm_cprid;
+                    pid_t shm_lprid;
+                    struct user_struct *mlock_user;
+            };
+
+          <linux/shmem_fs.h>
+            /**
+             * shmem_inode_info - special inode info used when swap-out shared memory page frames
+             * @lock:             concurrent protection
+             * @flags:            flags
+             * @alloced:          data pages alloced to file
+             * @swapped:          subtotal assigned to swap
+             * @next_index:       highest alloced index + 1
+             * @policy:           NUMA memory alloc policy
+             * @i_indirect:       top indirect blocks page
+             * @i_direct:         first blocks
+             * @swaplist:         chain of maybes on swap
+             * @vfs_inode:        the inode in "shm" filesystem
+             */
+            struct shmem_inode_info {
+                    spinlock_t lock;
+                    unsigned long flags;
+                    unsigned long alloced;
+                    unsigned long swapped;
+                    unsigned long next_index;
+                    struct shared_policy policy;
+                    struct page *i_indirect;
+                    swp_entry_t i_direct[SHMEM_NR_DIRECT];
+                    struct list_head swaplist;
+                    struct inode vfs_inode;
+            };
+
+            /**
+             * shmem_sb_info - special super block info for "shm" filesystem
+             * @max_blocks:    how many blocks are allowed
+             * @free_blocks:   how many are left for allocation
+             * @max_inodes:    how many inodes are allowed
+             * @free_inodes:   how many are left for allocation
+             * @stat_lock:     serialize shmem_sb_info changes
+             * @uid:           mount uid for root directory
+             * @gid:           mount gid for root directory
+             * @mode:          mount mode for root directory
+             * @mpol:          default memory policy for mappings
+             */
+            struct shmem_sb_info {
+                    unsigned long max_blocks;
+                    unsigned long free_blocks;
+                    unsigned long max_inodes;
+                    unsigned long free_inodes;
+                    spinlock_t stat_lock;
+                    uid_t uid;
+                    gid_t gid;
+                    mode_t mode;
+                    struct mempolicy *mpol;
+            };
+
+          <mm/shmem.c>
+            static struct vfs_mount *shm_mnt;   /* VFS mount point for "shm" filesystem */
+
+            /* operations for compat with VFS */
+
+            static const struct address_space_operations shmem_aops = {
+                    .writepage = shmem_writepage,
+                    .set_page_dirty = __set_page_dirty_no_writeback,
+            #ifdef CONFIG_TMPFS
+                    .readpage = shmem_readpage,
+                    .write_begin = shmem_write_begin,
+                    .write_end = shmem_write_end,
+            #endif
+                    .migratepage = migrate_page,
+                    .error_remove_page = generic_error_remove_page,
+            };
+
+            static const struct file_operations shmem_file_operations = {
+                    .mmap = shmem_map,
+            #ifdef CONFIG_TMPFS
+                    .llseek = generic_file_llseek,
+                    .read = do_sync_read,
+                    .write = do_sync_write,
+                    .aio_read = shmem_file_aio_read,
+                    .aio_write = generic_file_aio_write,
+                    .fsync = simple_sync_file,
+                    .splice_read = generic_file_splice_read,
+                    .splice_write = generic_file_splice_write,
+            #endif
+            };
+
+        Swapping out pages of IPC shared memory regions :
+          pages of an IPC shared memory region are swappable,and not syncable,because they map a special inode that has
+          no image on disk.
+          because IPC shared memory is persistent,thus its page frames must be reserved even when the segment is not attached
+          to any process.(kernel can not simply discard these pages,even they are no longer used by any process)
+
+          ! page frames of IPC shared memory regions are marked PG_dirty when they are allocated.
+
+          a new page frame of IPC shared memory is treated as a file mapped page.in shrink_page_list(),the action that is
+          test page whether it is anonymous page,if it is,try to add it into swap cache,this action will not be taken.
+          as instead,pageout() will try to page it out,so the method shmem_writepage() of address space of this page will
+          be invoked.
+
+          int shmem_writepage(*@page, *@wbc) :
+            if @wbc->for_reclaim is set,this function will try to get a free slot in swap cache through get_swap_page(),
+            use a local object @swap to store it;otherwise,it set @swap.val to 0.
+            this function will try to find out the swap vector position in the shmem_inode_info object,this object is allocated
+            when super block try to allocate a new inode,and the VFS inode returned by that function is the member @vfs_inode
+            of shmem_inode_info.
+            so routine shmem_swp_entry() is invoked.
+            that function will first test whether @info->i_direct has free space,if it is,then use the free space.otherwise,
+            it use the third parameter,which is type of struct page **,the page will be set to @i_indirect of @info.
+            if both conditions are not satisfied,NULL will be returned by shmem_swp_entry().
+            if we can do indirect finding,then work on @info->i_indirect to get a free swap entry,the found swap entry
+            will be mapped by shmem_swp_map(),which maps the page through kmap_atomic() with KM_USER1.
+            after we get the swap entry,we try add_to_swap_cache() to add it into swap cache.
+            if succeed,we remove it from page cache,and invoke shmem_swp_set(),pass it @info, @entry,
+            @swap.val. /* @entry is returned by shmem_swp_entry() */
+                       /* function shmem_swp_set() will increase @info->swapped by 1 OR -1,depends
+                        * on whether @swap.val is _zero_. # _zero_ => -1
+                        * if "@entry - @info->i_direct" is less than or equal to SHMEM_NR_DIRECT,
+                        * then
+                        *         kmap_atomic_to_page() on @entry to get the page descriptor.
+                        *         set the page's private data to ""the old private data" + 1 OR -1".
+                        *         # +1, -1 depend on @swap.val whether is _zero_.
+                        */
+            invoke swap_shmem_alloc() on @swap,this function actually __swap_duplicate() @swap with usage
+            SWAP_MAP_SHMEM.
+            page_cache_release() the shmem page,and invoke swap_writepage() to swap it out.
+            if @inode /* @page->mapping->host */ is not NULL,we move @info->swaplist into @shmem_swaplist.
+            finally,iput() the @inode and return 0. /* this is the swapped-out path */
+            /* we may return 0 to caller in "redirty" path */
+
+        Demand paging for IPC shared memory regions :
+          when issued sys_shmat(),a virtual file is created on the in-kernel shmid_kernel for the given key value.
+          do_mmap() is called to map this file into @curren's address space,but do not allocate new page frame.
+          the allocation will be delayed until Page Fault is happen.the file's mode is depends on shmem flags passed
+          to shmat().
+
+          the Page Fault handler for IPC shared memory is shmem_fault(),which is defined in <mm/shmem.c>.
+          that function will invoke shmem_getpage() to allocate new page frame.
+          if we failed because the page frame is not present,we then check whether there is a swap entry for it and
+          if we can swap it into memory.
+            first,we try to lookup it in swap cache,if it is in the cache,we can use it;otherwise,we need to swap it
+            in from the swap area,this is handled by shmem_swapin().
+                                                     #^ pass it @swap(returned by shmem_swp_alloc()), gfp flags
+                                                        from mapping_gfp_mask() on the mapping of inode, shmem inode @info of
+                                                        the inode, and index of the page frame.
+            if we succeed swapped it in,then restore it back to process address space.
+            /* if we can get it from the inode's page cache through find_lock_page(),
+             * we remove the swapped in page from swap page,copy the contents into the page in page cache,then do
+             * some recycle and update works.
+             * #^ this is rarely,because in shmem_writepage(),we usually write it into swap area and release the
+             *    the page into buddy system.
+             *
+             * otherwise,we try use this swap page to replace the page in inode's page cache.
+             * if both branches are failed,we have to repeat again if the error is not because no memory available;if it is the
+             * case,we must failed.                                                            #^ because we tried to replace it
+             *                                                                                    in branch 2 through
+             *                                                                                    add_to_page_cache_locked().
+             */
+            if the page is not swapped out,it is not exist,we need to allocate a new page frame,this is rely on shmem_alloc_page(),
+            after we allocated new page,add it into page cache.
+
+            ! there is another case that @sgp(third parameter of shmem_getpage()) is SGP_READ AND file page is NULL.however,we come
+              from Page Fault,thus @sgp must be SGP_CACHE.
+
+    POSIX Message Queues :
+      introduced in POSIX.1.
+      the advantages over the old queues :
+        1> a much simpler file-based interface to the applications.
+        2> native support for message priorities(the priority ultimately determines the position of the message in the queue).
+        3> native support for asynchronous notification of message arrivals,either by means of signals or thread creation.
+        4> timeouts for blocking send and receive operations.
+
+      the C library interfaces :
+        mq_open
+        mq_close
+        mq_unlink
+        mq_send
+        mq_timedsend
+        mq_receive
+        mq_timedreceive
+        mq_notify
+        mq_getattr
+        mq_setattr
+
+      the "mqueue" special filesystem :
+        a special filesystem named "mqueue" has been introduced,which contains an inode for each existing queue.
+        the "mqueue" special filesystem must not necessarily be mounted over the system directory tree.however,
+        if it is mounted,a user can create a POSIX message queue by touching a file in the root directory of the
+        filesystem,and can get information about the queue by reading the corresponding file.
+        an application can use select(),poll() to make use I/O multiplex on it.
+
+        <ipc/mqueue.c>
+          /**
+           * mqueue_inode_info - the special structure used to embodied inode for "mqueue" filesystem
+           * @lock:              concurrent protection
+           * @vfs_inode:         VFS inode
+           * @wait_q:            wait queue
+           * @messages:          the SystemV message descriptors,collected in an array
+           * @mq_attr:           attributes
+           * @notify:            signal event notify
+           * @notify_owner:      user who created,for accounting
+           * @notify_sock:       notify based socket
+           * @notify_cookie:     network information cookie
+           * @e_wait_q:          for tasks waiting for free space[0] and messages[1]
+           * @qsize:             size of queue in memory(sum of all msgs)
+           */
+          struct mqueue_inode_info {
+                  spinlock_t lock;
+                  struct inode vfs_inode;
+                  wait_queue_head_t wait_q;
+
+                  struct msg_msg **messages;
+                  struct mq_attr attr;
+
+                  struct sigevent notify;
+                  struct pid *notify_owner;
+                  struct user_struct *user;
+                  struct sock *notify_sock;
+                  struct sk_buff *notify_cookie;
+                
+                  struct ext_wait_queue e_wait_q[2];
+
+                  unsigned long qsize;
+          };
+
+        ! from this structure,we can easily to know the POSIX message queue is based on SystemV msg queue,but only
+          used structure msg_msg as message descriptor.
+
+
 /* END OF CHAPTER19 */
 
 
@@ -45939,7 +46215,7 @@ Chapter 20 : Program Execution
                                                  * 1 => has MMF_DUMPABLE,no MMF_DUMP_SECURELY
                                                  * 2 => has MMF_DUMP_SECURELY,has MMF_DUMPABLE
                                                  */
-               after we set dumpable for memory,if @mm is not dumpable,we feed a performace event about exit task. 
+               after we set dumpable for memory,if @mm is not dumpable,we feed a performance event about exit task. 
                finally,increase @current->self_exec_id,invoke flush_signal_handlers() to reset signal actions,and
                invoke flush_old_files() on @current->files to close file descriptors they have close on exec is set.
                /* end of setup_new_exec() */
@@ -46193,15 +46469,3 @@ Append :
                  * system call.
                  * ! insert new LKM would not trigger interrupt.
                  */
-
-
-    
-          
-                
-             
-
-                
-               
-               
-
-        
