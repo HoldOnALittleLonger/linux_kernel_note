@@ -26442,10 +26442,11 @@ Chapter 13 : I/O Architecture and Device Drivers
         the official registry of allocated device numbers and "/dev" directory nodes is stored in the text
         file "Documentation/devices.txt",and the macros are defined in <linux/major.h>.
         traditionaly,the major number and minor number are represents by a 8-bit unsigned integer,it is not
-        suffice.and in Linux 2.6.34.1 dev_t is typedefed to __u32.
+        sufficient.and in Linux 2.6.34.1 dev_t is typedefed to __u32.
         the methods to encode and decode device number are defined in <linux/kdev_t.h>.
         major number is encoded to 12-bit,minor number is encoded to 20-bit.                    
         Kernel also reserved the 8-bit major number and minor number for compatible to old device files.
+        in this case,the major number and minor number are 8-bits,they are combined into a u16 integer.
 
         <linux/kdev_t.h>
           #define MINORBITS 20
@@ -27351,14 +27352,27 @@ Chapter 13 : I/O Architecture and Device Drivers
              *   hash table;undo the operation if failed
              * # the calling to __register_chrdev_region() is like this
              *           __register_chrdev_region(MAJOR(n), MINOR(n), next - n, name);
-             *   in this,@n is iterator,@next is the next device number,for @n to @from + @count,
-             *   @next can not greater than @from + @count (@next := MKDEV(MAJOR(n) + 1, 0))
-             *   the region : [(@from, 0) (@from + 1, 0) (@from + 2, 0) ... ]
-             *                 |          |            |              |
-             *                 |          +-------> interval <--------+
-             *                 |                       |
-             *                 +-----> interval <------+
+             *                                              |         ^minor number count
+             *                                              ^base minor number
+             *   the @n is an iterator,@next is the next device number,for @n in @from to @from + @count - 1,
+             *   @next can not greater than @from + @count (@next := MKDEV(MAJOR(n) + 1, 0)).
+             *
+             *   the region : [(@from, 0) | (@from + 1, 0) | (@from + 2, 0) | ... | (@from + @count - 1, 0)]
+             *                |           |                |
+             *                |           +----------------+
+             *                |           |    interval
+             *                +-----------+
+             *                   interval # the traditional interval contains 256 minor numbers,
+             *                            # both major number and minor number is u8.
+             *
              *   thus,for each interval,__register_chrdev_region() is be called once to register it
+             * # let's suppose the major number is 5,minor number is 0,and count is 10 :
+             *     the initial device number is 0x500000
+             *     the end range is 0xf00000
+             *     @next device number is MKDEV(5 + 1, 0) => 0x600000
+             *     @n is 0x500000
+             *     so the minor count is @next - @n => 0x100000
+             *     ! major number is 12-bits,and minor number is 20-bits,combined to a u32 integer.
              */
             int register_chrdev_region(dev_t from, unsigned count, const char *name);
             
