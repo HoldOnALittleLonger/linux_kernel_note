@@ -277,6 +277,10 @@ struct folio :
            * need the head page descriptor,use the folio as instead.
            * if we need to destroy the head page,we can easily convert the folio descriptor
            * to page descriptor,and destroy the memory this descriptor has ocuppied.
+           *
+           * ! size of struct page usually is 64 bytes.
+           *   size of struct folio usually is 256 bytes.
+           *                                   #^ @page @__page_1 @__page_2 @__page_3
            */
 
           macro function page_folio(@p) can return the folio which contains the tail page.
