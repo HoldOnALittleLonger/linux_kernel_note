@@ -1,0 +1,308 @@
+
+struct folio :
+        clarifying memory management with page folios.
+        this structure based on the base page structure,which
+        usually has the size same as the hardware's page size.
+        This structure appears first time in kernel v5.16,by
+        Jonathan Corbet since 2021.
+
+        Every base page of memory managed by the kernel is
+        represented by a page structure in the system memory map.
+        When a compound page is created out of a set of base pages,
+        the page structure for the first page in the set(head page)
+        is specially marked(PG_head) to make its compound 
+        nature explicit.The other information in that structure
+        refers to the compound page as a whole.All of the other
+        pages(tail pages) are marked(PG_tail) as such,with a pointer to
+        the page structure for the associated head page.
+
+        ! 64-bit : PG_head the head page and PG_tail the tail pages.
+                   PageHead(), PageTail()
+          32-bit : PG_compound all the pages in the compound page,
+                   PG_reclaim all the taile pages in the compound page.
+                   PageCompound()
+                   # compound page can not be represented in the page cache,
+                     thus that flag(PG_reclaim) can be reused for
+                     compound page.
+
+        struct page.@first_page: pointer to the head page of the compound
+                                 page in which this tail page is contained.
+        struct page.@ptl:        hold when the page has a Page Table Entries.
+        struct page.@slab:       not NULL if the page is owned by a slab allocator.
+
+        compound_head() : routine can be used to find out the head page associated
+                          with tail page.
+                          # this is an inline function,thus will enlarge kernel size.
+
+        the first tail page :
+          # compound page's meta information.
+          @lru.prev => stores the order of the compound page
+          @lru.next => stores the destructor for the compound page
+
+          [0]         [1]
+        +------------------------------------------------------+
+        |           |                 |                  |     |
+        | head page | first tail page | second tail page | ... |    => page descriptor array
+        |           |                 |                  |     |
+        +------------------------------------------------------+
+          ^           | |   |
+          |           | |   |
+          |           | |   +--> @lru.next => destructor of compound page
+          |           | +--> @lru.prev => order of compound page
+          +-----------+ @first_page
+
+
+        Ambiguity :
+                If a function is passed a pointer to a page structure
+                for a tail page,is it expected to act on that tail page
+                or on the compound page as a whole?
+
+                A function which has a struct page argument might
+                be expecting a head or base page and will BUG if
+                given a tail page of a compound page.
+                It might work with any kind of page and operate
+                on PAGE_SIZE bytes.
+                It might work with any kind of page and operate
+                on page_size() bytes if given a head page but
+                PAGE_SIZE bytes if given a base or tail page.
+                It might operate on page_size() bytes if passed
+                a head or tail page.
+
+                ! page_size(@page) => PAGE_SIZE << compound_order(@page)
+                  if @page is a base page,then compound_order() will BUG,
+                  because it assume @page is an array of pages in one
+                  compound page.
+
+        The folio type itself is defined as a simple wrapper structure :
+                struct folio {
+                        struct page page;
+                };
+
+                get_folio() => increase refcount of foilo
+                put_folio() => decrease refcount of folio
+
+        <linux/mm_types.h> /* kernel version 6.19.6 */
+          /**
+           * folio - represents a contiguous set of bytes.
+           * # public:
+           * @flags: identical to the page flags
+           * @lru:   Least Recently Used list,tracks how recently this folio was used
+           * @mlock_count:
+           *         number of times this folio has been pinned by mlock()
+           * @mapping:
+           *         the file this page belongs to,or refers to the anon_vma for
+           *         anonymous memory
+           * @index: offset within the file,in units of pages.for anonymous memory,
+           *         this is the index from the beginning of the mmap
+           * @share: number of DAX mappings that reference this folio
+           *         # dax_associate_entry
+           * @private:
+           *         filesystem per-folio data
+           * @swap:  used for swp_entry_t if folio_test_swapcache()
+           * @_mapcount:
+           *         do not access this member directly,use folio_mapcount() to find out
+           *         how many times this folio is mapped by userspace
+           * @_refcount:
+           *         do not access this member directly,use folio_ref_count() to find how
+           *         many references there are to this folio
+           * @memcg_data:
+           *         memory cgroup data
+           * @pgmap: metadata for ZONE_DEVICE mappings
+           * @virtual:
+           *         virtual address in the kernel direct map
+           * @_last_cpupid:
+           *         IDs of last CPU and last process that accessed the folio
+           * @_entire_mapcount:
+           *         do not use directly,call folio_entire_mapcount()
+           * @_large_mapcount:
+           *         do not use directly,call folio_mapcount()
+           * @_nr_pages_mapped:
+           *         do not use outside of rmap and debug code
+           * @_pincount:
+           *         do not use directly,call folio_maybe_dma_pinned()
+           * @_nr_pages:
+           *         do not use directly,call folio_nr_pages()
+           * @_mm_id:
+           *         do not use outside of rmap code
+           * @_mm_ids:
+           *         do not use outside of rmap code
+           * @_mm_id_mapcount:
+           *         do not use outside of rmap code
+           * @_hugetlb_subpool:
+           *         do not use directly,use accessor in hugetlb.h
+           * @_hugetlb_cgroup:
+           *         do not use directly,use accessor in hugetlb_cgroup.h
+           * @_hugetlb_cgroup_rsvd:
+           *         do not use directly,use accessor in hugetlb_cgroup.h
+           * @_hugetlb_hwpoison:
+           *         do not use directly,call raw_hwp_list_head()
+           * @_deferred_list: 
+           *         folios to be split under memory pressure
+           * @_unused_slab_obj_exts:
+           *         placeholder to match obj_exts in struct slab
+           * # folio is a physically,virtually,and logically contiguous set of bytes.
+           *   it is a power-of-two in size,and it is aligned to that same power-of-two.
+           *   it is at least as large as %PAGE_SIZE.
+           *   if it is in the page cache,it is at a file offset which is a multiple of
+           *   that power-of-two.
+           *   it may be mapped into userspace at an address which is at an arbitrary page
+           *   offset,but its kernel virtual address is aligned to its size.
+           * # some private members are not used currently.
+           */
+          struct folio {
+                  /* private: do not document the anon union */
+                  union {
+                          struct {
+                  /* public: */
+                                  memdesc_flags_t flags;
+                                  union {
+                                          struct list_head lru;
+                  /* private: avoid cluttering the output */
+                                          /* For the Unevictable "LRU list" slot */
+                                          struct {
+                                                  /* Avoid compound_head */
+                                                  void *__filler;
+                  /* public: */
+                                                  unsigned int mlock_count;
+                  /* private: */
+                                          };
+                  /* public: */
+                                          struct dev_pagemap *pgmap;
+                                  };
+                                  struct address_space *mapping;
+                                  union {
+                                          pgoff_t index;
+                                          unsigned long share;
+                                  };
+                                  union {
+                                          void *private;
+                                          swp_entry_t swap;
+                                  };
+                                  atomic_t _mapcount;
+                                  atomic_t _refcount;
+          #ifdef CONFIG_MEMCG
+                                  unsigned long memcg_data;
+          #elif defined(CONFIG_SLAB_OBJ_EXT)
+                                  unsigned long _unused_slab_obj_exts;
+          #endif
+          #if defined(WANT_PAGE_VIRTUAL)
+                                  void *virtual;
+          #endif
+          #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
+                                  int _last_cpupid;
+          #endif
+                  /* privte: the union with struct page is transitional */
+                          };
+                          struct page page;
+                  };
+
+                  union {
+                          struct {
+                                  unsigned long _flags_1;
+                                  unsigned long _head_1;
+                                  union {
+                                          struct {
+                  /* public: */
+                                                  atomic_t _large_mapcount;
+                                                  atomic_t _nr_pages_mapped;
+          #ifdef CONFIG_64BIT
+                                                  atomic_t _entire_mapcount;
+                                                  atomic_t _pincount;
+          #endif
+                                                  mm_id_mapcount_t __mm_id_mapcount[2];
+                                                  union {
+                                                          mm_id_t _mm_id[2];
+                                                          unsigned long _mm_ids;
+                                                  };
+                  /* private: the union with struct page is transitional */
+                                          };
+                                          unsigned long _usable_1[4];
+                                  };
+                                  atomic_t _mapcount_1;
+                                  atomic_t _refcount_1;
+                  /* public: */
+
+          #ifdef NR_PAGES_IN_LARGE_FOLIO
+                                  unsigned int _nr_pages;
+          #endif
+                  /* private: the union with struct page is transitional */
+                          };
+                          struct page __page_1;
+                  };
+
+                  union {
+                          struct {
+                                  unsigned long _flags_2;
+                                  unsigned long _head_2;
+                  /* public: */
+                                  struct list_head _deferred_list;
+          #ifndef CONFIG_64BIT
+                                  atomic_t _entire_mapcount;
+                                  atomic_t _pincount;
+          #endif
+                  /* private: the union with struct page is transitional */
+                          };
+                          struct page __page_2;
+                  };
+
+                  union {
+                          struct {
+                                  unsigned long _flags_3;
+                                  unsigned long _head_3;
+                  /* public: */
+                                  void *_hugetlb_subpool;
+                                  void *_hugetlb_cgroup;
+                                  void *_hugetlb_cgroup_rsvd;
+                                  void *_hugetlb_hwpoison;
+                  /* private: the union with struct page is transitional */
+                          };
+                          struct page __page_3;
+                  };
+          };
+
+        ! folio is used only for compound page,and routine folio_alloc() is used to
+          allocate a folio.
+          this function relies on __alloc_pages_noprof(),and which will return a 
+          page descriptor.
+
+          because sizeof(struct page) is larger than sizeof(struct folio),and all
+          members of a folio is inclued in the unions.thus we can convert the head page
+          descriptor to the folio descriptor.
+          /**
+           * the first union of folio at least is large enough to contain a 
+           * struct page object,and the second,the third,the fourth are so on.
+           * when we convert a head page descriptor to a folio page descriptor,actually,
+           * we only used the first union.
+           * when we decided to use folio to represents compound page,we will no longer
+           * need the head page descriptor,use the folio as instead.
+           * if we need to destroy the head page,we can easily convert the folio descriptor
+           * to page descriptor,and destroy the memory this descriptor has ocuppied.
+           */
+
+          macro function page_folio(@p) can return the folio which contains the tail page.
+          macro function folio_page(@folio, @n) can return the tail page in @folio has
+          index @n. /* the first head page has index 0 */
+
+        Layout :
+          +--------------------------------------------------------------+
+          |                   |                 |                  |     |
+          | folio (head page) | first tail page | second tail page | ... |
+          |                   |                 |                  |     |
+          +--------------------------------------------------------------+
+            ^                   |
+            |                   |
+            +-------------------+ @compound_head
+                                   bit 0 => 1 PageTail
+                                   bit 1 -- 31 => head page descriptor
+
+          the macor folio_page(@folio, @n) is expanded to
+                  (&(folio)->page + (n))
+          this is OK,because the structure folio is composed in several unions,
+          so we can consider the struct folio is the struct page because
+                  struct folio { <------------------------+
+                          union {                         |
+                                  struct page page; ------+
+                          };
+                  };
+                  ! union's magic
+          hence,we finally we get the right address of tail page.
