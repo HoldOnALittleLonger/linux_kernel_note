@@ -1,134 +1,134 @@
 Linux Kernel note >
 
-  Multiple ways to hook syscall :
-    syscall table hijacking -- The good old way >
-      hooking syscall via syscall table hijacking,this require write access syscall table.
-      the syscall table is a mapping between syscall number and the kernel address of its implementation.
-      but syscall table is write protecting,that is its address in kernel space is read only.
+Multiple ways to hook syscall :
+  syscall table hijacking -- The good old way >
+    hooking syscall via syscall table hijacking,this require write access syscall table.
+    the syscall table is a mapping between syscall number and the kernel address of its implementation.
+    but syscall table is write protecting,that is its address in kernel space is read only.
+    
+    CR0 register controls write protecting,if its 16th bit(WP bit) is opened,that is write protecting is enable,
+    so close the bit to disable write protecting.
+
+    the general ways to get sys_call_table :
+      1>  grep /proc/kallsyms | grep -E sys_call_table \| ia32_sys_call_table
+          the file /proc/kallsyms contains all kernel symbols in kernel space.
       
-      CR0 register controls write protecting,if its 16th bit(WP bit) is opened,that is write protecting is enable,
-      so close the bit to disable write protecting.
+      2>  call function "unsigned long kallsyms_lookup_name(@name)" which is defined in kallsyms.h,
+          it is used to get address of functions.
+          but in the newer kernel,this function becomes did not exported,that means can not call it
+          in kernel code.
 
-      the general ways to get sys_call_table :
-        1>  grep /proc/kallsyms | grep -E sys_call_table \| ia32_sys_call_table
-	    the file /proc/kallsyms contains all kernel symbols in kernel space.
-        
-	2>  call function "unsigned long kallsyms_lookup_name(@name)" which is defined in kallsyms.h,
-	    it is used to get address of functions.
-	    but in the newer kernel,this function becomes did not exported,that means can not call it
-	    in kernel code.
+          e.g.
+            void *sys_call_open = (void *)kallsyms_lookup_name("sys_open");
+            void *sys_call_table_address = (void *)kallsyms_lookup_name("sys_call_table");
+  
+            set_WP();  /*  disable WP  */
+            
+            sys_call_table_address[__NR_open] = (void *)my_sys_open;  /*  change address of sys_open  */
+  
+            set_WP();  /*  enable WP  */
+  
+          value __NR_<syscall_name> is the index of this syscall_name in sys_call_table.
+          value NR_syscalls is the total number of all syscalls is installed in sys_call_table.
 
-	    e.g.
-	      void *sys_call_open = (void *)kallsyms_lookup_name("sys_open");
-	      void *sys_call_table_address = (void *)kallsyms_lookup_name("sys_call_table");
+      3>  read /boot/System.map-`uname -r` file to find address of sys_call_table.
+          this file is produced while compiling kernel,many kernel process read its text to find function's
+          address.
+          each line text has format : <address> <flag> <symbol name>
 
-	      set_WP();  /*  disable WP  */
-	      
-	      sys_call_table_address[__NR_open] = (void *)my_sys_open;  /*  change address of sys_open  */
+          but kernel is not recommend read file from kernel space,if have to do,there is some interfaces
+          to help reading from kernel space :
+            filp_open
+            filp_close
+            vfs_read
+            vfs_write
+  
+            /*  in newer version  */
+            kernel_read
+            kernel_write  /*  kernel_read and kernel_write dont updates loff_t object  */
+  
+            some symbols is exported with GPL.
+            !!  vfs_read and vfs_write will test buffer address if it is from user space,that is they are
+                  refuse kernel space address.
+            set_fs() and get_fs() to change behavior of address examining.
+            e.g.
+              mm_segment_t old_fs = get_fs();
+              set_fs(KERNEL_DS);
+              ...
+              set_fs(old_fs);
+  
+            #  set_fs() will be abandoned in future.
+            #  possible value is KERNEL_DS and USER_DS
 
-	      set_WP();  /*  enable WP  */
+      4>  sys_close -- the brute force method
+          the sys_close() syscall is exported in older kernels,so there is a method to get sys_call_table,
+          that is traverse address from sys_close(),if encountered an address that is a void ** pointer and
+          at the unit index is __NR_close where saved sys_close()'s address,then this void ** pointer is the 
+          sys_call_table's address.
+          e.g.
+            unsigned long addr_sys_close = (unsigned long)sys_close;
+            unsigned long offset_addr = addr_sys_close;
+            while (offset_addr < ULLONG_MAX) {
+                    if (((void **)offset_addr)[__NR_close] == addr_sys_close)
+                        return offset_addr;
+                offset_addr += sizeof(void *);
+            }
+  
+          dont recommend use this way to find sys_call_table.
 
-	    value __NR_<syscall_name> is the index of this syscall_name in sys_call_table.
-	    value NR_syscalls is the total number of all syscalls is installed in sys_call_table.
+VFS hooking >
+  the newer method to hooking file operation is the VFS hooking.
+  VFS is virtual file-system,it is an abstract layer of file-system.
+  process can accesses files with regardless of underlying file-system via VFS.
+  the primary abstract objects in VFS is :
+    super block object
+    i_node object
+    dentry object
+    file object
 
-        3>  read /boot/System.map-`uname -r` file to find address of sys_call_table.
-	    this file is produced while compiling kernel,many kernel process read its text to find function's
-	    address.
-	    each line text has format : <address> <flag> <symbol name>
+  file.f_path(object).dentry(pointer).d_inode(pointer).i_sb(pointer)
 
-	    but kernel is not recommend read file from kernel space,if have to do,there is some interfaces
-	    to help reading from kernel space :
-	      filp_open
-	      filp_close
-	      vfs_read
-	      vfs_write
+  in inode structure,pointer i_op points to a structure which contains some methods to operates file-system.
+  the inode object represents all the information needed by the kernel to manipulate a file or a directory.
 
-	      /*  in newer version  */
-	      kernel_read
-	      kernel_write  /*  kernel_read and kernel_write dont updates loff_t object  */
+  VFS hooking is use customized hook function to replaces the method in i_op object.
+  be careful,must save the original method and hook function must use it to operates target file.
 
-	      some symbols is exported with GPL.
-	      !!  vfs_read and vfs_write will test buffer address if it is from user space,that is they are
-	      	  refuse kernel space address.
-		  set_fs() and get_fs() to change behavior of address examining.
-		  e.g.
-		    mm_segment_t old_fs = get_fs();
-		    set_fs(KERNEL_DS);
-		    ...
-		    set_fs(old_fs);
+  e.g.
+    hooks lookup method >
+      struct file *fp = filp_open(...);
+      struct inode_operations *orig_inode_op = (struct inode_operations *)fp->f_path.dentry->d_inode->i_op;
 
-		  #  set_fs() will be abandoned in future.
-		  #  possible value is KERNEL_DS and USER_DS
+      ...  /*  disable WP  */
+      orig_inode_op->lookup = lookup_hook;
+      ...  /*  enable WP  */
 
-        4>  sys_close -- the brute force method
-	    the sys_close() syscall is exported in older kernels,so there is a method to get sys_call_table,
-	    that is traverse address from sys_close(),if encountered an address that is a void ** pointer and
-	    at the unit index is __NR_close where saved sys_close()'s address,then this void ** pointer is the 
-	    sys_call_table's address.
-	    e.g.
-	      unsigned long addr_sys_close = (unsigned long)sys_close;
-	      unsigned long offset_addr = addr_sys_close;
-	      while (offset_addr < ULLONG_MAX) {
-	              if (((void **)offset_addr)[__NR_close] == addr_sys_close)
-		              return offset_addr;
-		      offset_addr += sizeof(void *);
-	      }
+      because this way would operates inode information,so all the operations calls to the look_up method to look
+      up file under the directoy which inode associated will call the lookup_hook function.
+      
+  The ftrace helper method >
+    ftrace helper library uses kallsyms_lookup_name via kprobe to resolve symbol addresses.
+    e.g.
+      /*  resolving kallsyms_lookup_name address via kprobe  */
+      #include <linux/kprobes.h>
+      static struct kprobe kp = {
+              .symbol_name = "kallsyms_lookup_name"
+      };
 
-	    dont recommend use this way to find sys_call_table.
+      kallsyms_lookup_name_t kallsyms_lookup_name;
+      register_kprobe(&kp);
+      kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
+      unregister_kprobe(&kp);
 
-    VFS hooking >
-      the newer method to hooking file operation is the VFS hooking.
-      VFS is virtual file-system,it is an abstract layer of file-system.
-      process can accesses files with regardless of underlying file-system via VFS.
-      the primary abstract objects in VFS is :
-        super block object
-	i_node object
-	dentry object
-	file object
-
-	file.f_path(object).dentry(pointer).d_inode(pointer).i_sb(pointer)
-
-	in inode structure,pointer i_op points to a structure which contains some methods to operates file-system.
-	the inode object represents all the information needed by the kernel to manipulate a file or a directory.
-
-	VFS hooking is use customized hook function to replaces the method in i_op object.
-	be careful,must save the original method and hook function must use it to operates target file.
-
-	e.g.
-	  hooks lookup method >
-	    struct file *fp = filp_open(...);
-	    struct inode_operations *orig_inode_op = (struct inode_operations *)fp->f_path.dentry->d_inode->i_op;
-
-	    ...  /*  disable WP  */
-	    orig_inode_op->lookup = lookup_hook;
-	    ...  /*  enable WP  */
-
-        because this way would operates inode information,so all the operations calls to the look_up method to look
-	up file under the directoy which inode associated will call the lookup_hook function.
-	    
-    The ftrace helper method >
-      ftrace helper library uses kallsyms_lookup_name via kprobe to resolve symbol addresses.
-      e.g.
-	/*  resolving kallsyms_lookup_name address via kprobe  */
-        #include <linux/kprobes.h>
-	static struct kprobe kp = {
-	       .symbol_name = "kallsyms_lookup_name"
-	};
-
-	kallsyms_lookup_name_t kallsyms_lookup_name;
-	register_kprobe(&kp);
-	kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
-	unregister_kprobe(&kp);
-
-	/*  kprobe is kernel probe as debug mechanism  */
+      /*  kprobe is kernel probe as debug mechanism  */
 
       struct ftrace_hook {
-      	     const char *name;  /*  name  */
-	     void *function;    /*  hook  */
-	     void *original;	/*  original  */
+              const char *name;  /*  name  */
+              void *function;    /*  hook  */
+              void *original;    /*  original  */
 
-	     unsigned long address;  /*  address of original  */
-	     struct ftrace_ops ops;
+              unsigned long address;  /*  address of original  */
+              struct ftrace_ops ops;
       };  /*  ftrace helper in ftrace library  */
 
       ftrace_ops.func is the callback function and will be called whenever the target syscall gets called.
@@ -136,89 +136,307 @@ Linux Kernel note >
 
       callback function has prototype :
         void notrace (*callback) (unsigned long ip, unsigned long parent_ip, struct ftrace_ops *ops,
-	     	     		  struct pt_regs *regs);
+                                  struct pt_regs *regs);
 
-	@ip : instruction pointer of the function that is being traced.
-	@parent_ip : instruction pointer of the function that called the function being traced.
-	@ops : a pointer to ftrace_ops that was used to register the callback.
-	       this can be used to pass data to the callback via the private pointer.
-	@regs : if the FTRACE_OPS_FL_SAVE_REGS or FTRACE_OPS_FL_SAVE_REGS_IF_SUPPORTED flags are set in the
-	        ftrace_ops structure,then this will be pointing to the pt_regs structure like it would be if
-		an breakpoint was placed at the start of the function where ftrace was tracing.
-		otherwise it either contains garbage,or NULL.
+          @ip : instruction pointer of the function that is being traced.
+          @parent_ip : instruction pointer of the function that called the function being traced.
+          @ops : a pointer to ftrace_ops that was used to register the callback.
+                 this can be used to pass data to the callback via the private pointer.
+          @regs : if the FTRACE_OPS_FL_SAVE_REGS or FTRACE_OPS_FL_SAVE_REGS_IF_SUPPORTED flags are set in the
+                  ftrace_ops structure,then this will be pointing to the pt_regs structure like it would be if
+              an breakpoint was placed at the start of the function where ftrace was tracing.
+              otherwise it either contains garbage,or NULL.
 
-      ftrace_ops.flags is set with FTRACE_OPS_FL_SAVE_REGS | FTRACE_OPS_FL_RECURSION_SAFE | FTRACE_OPS_FL_IPMODIFY,
-      then the original regs values would be saved(*regs) and passed inside callback,turn off ftrace's built-in
-      recursion protection and to notify ftrace for rip modification respectively.
+    ftrace_ops.flags is set with FTRACE_OPS_FL_SAVE_REGS | FTRACE_OPS_FL_RECURSION_SAFE | FTRACE_OPS_FL_IPMODIFY,
+    then the original regs values would be saved(*regs) and passed inside callback,turn off ftrace's built-in
+    recursion protection and to notify ftrace for rip modification respectively.
 
-      register ftrace :
-        int register_ftrace_function(struct ftrace_ops *);
-	/*  enable tracing  */
+    register ftrace :
+      int register_ftrace_function(struct ftrace_ops *);
+      /*  enable tracing  */
 
-      callback invocated when target syscall is called ->
-      callback set rip to hook function ->
-      hook function start execute
+    callback invocated when target syscall is called ->
+    callback set rip to hook function ->
+    hook function start execute
 
-  ACPI NETLINKE message :
-    Im looking for a way to monitor the contents changing of the file in sysfs.
-    the target is battery object of class power_supply,i want to wait on event that
-    battery start charging or stop charging.
-    I have tried file descriptor multiplex and inotify,but unfortunately,both of them are
-    designed for network file descriptor or the file descriptor which corresponding to
-    a inode.
-    So,I had dived into kernel ACPI driver.It is very complex,however,I found out there
-    are come notifiers have attached to the driver,they would be called in function
-    acpi_battery_notify().This driver function is called by driver to notify power
-    event.
-    If I want to listen on such power event,then I must have a kernel module who attach
-    a new notifier to the power driver,and tell the process of User Mode that it is time
-    to checks the content of sysfs file.
-    If I determine to apply this method,then I must insert a new kernel module,it might cause
-    kernel panic.Thus,I want to find out another way to help me solve this problem.
-    Netlink message,acpi_battery_function() would create bus netlink message,it is type of
-    netlink generic message,and payload is nlattr structure added acpi_genl_event structure.
-    the NLA type is ACPI_GENL_ATTR_EVENT,and the type of event is reported by driver.
-     
-    [ nlmsghdr | pading | payload | pading | ... ]
-                          |
-                          +--> [ genlmsghdr |  [ nlahdr | pading | acpi_genl_event | pading ] | ... ]
-                                                 |
-                                                 +--> struct nlattr
+ACPI NETLINKE message :
+  Im looking for a way to monitor the contents changing of the file in sysfs.
+  the target is battery object of class power_supply,i want to wait on event that
+  battery start charging or stop charging.
+  I have tried file descriptor multiplex and inotify,but unfortunately,both of them are
+  designed for network file descriptor or the file descriptor which corresponding to
+  a inode.
+  So,I had dived into kernel ACPI driver.It is very complex,however,I found out there
+  are come notifiers have attached to the driver,they would be called in function
+  acpi_battery_notify().This driver function is called by driver to notify power
+  event.
+  If I want to listen on such power event,then I must have a kernel module who attach
+  a new notifier to the power driver,and tell the process of User Mode that it is time
+  to checks the content of sysfs file.
+  If I determine to apply this method,then I must insert a new kernel module,it might cause
+  kernel panic.Thus,I want to find out another way to help me solve this problem.
+  Netlink message,acpi_battery_function() would create bus netlink message,it is type of
+  netlink generic message,and payload is nlattr structure added acpi_genl_event structure.
+  the NLA type is ACPI_GENL_ATTR_EVENT,and the type of event is reported by driver.
+   
+  [ nlmsghdr | pading | payload | pading | ... ]
+                        |
+                        +--> [ genlmsghdr |  [ nlahdr | pading | acpi_genl_event | pading ] | ... ]
+                                               |
+                                               +--> struct nlattr
+  /**
+   * unfortunately,the multicast group of ACPI event is registered dynamically,thus there is not way
+   * to get the group id of ACPI event.even I tried to listen on some multicast groups,but no
+   * netlink message has came.
+   * may be I should try kobject uevent.
+   */
+
+  I have found out that the mcast group id and mcast group name both are inclued in a nested nlattr
+  message,and for each of them,a nlattr header is prefixed.
+  It seems like this -
+                7 => CTRL_ATTR_MCAST_GROUPS
+    [ nla_len | nla_type | pading | payload | pading ]
+                                    |                1 => CTRL_ATTR_MCAST_GRP_NAME
+                                    +--> [ nla_len | nla_type | pading | payload | pading ]
+                                                                         |
+    +--------------------------------------------------------------------+
+    |                                                                    
+    V           2 => CTRL_ATTR_MCAST_GRP_ID                  1 => CTRL_ATTR_MCAST_GRP_NAME
+    [ nla_len | nla_type | pading | ID | pading ][ nla_len | nla_type | pading | NAME | pading]
+                                  __u16
+
+  The information is got from the kernel documentation "generic-netlink" in "docs.kernel.org".
+  # attribute message of CTRL_ATTR_MCAST_GROUPS included CTRL_ATTR_MCAST_GRP_ID attribute and
+    CTRL_ATTR_MCAST_GRP_NAME attribute.
+
+  And then,I tried to gdb the demo program,find out this relationship by use of "x/FMT" command.
+  But it is strange that flag NLA_F_NESTED is not set in the @nla_type of first nlattr message.
+
+  ACK message from kernel that corresponding to the previous GENL_ID_CTRL request is send to
+  user-space in a short time,it will appears in the result of next recvmsg().
+
+  Now I have succeed to subscribe the ACPI multicast group,so I can let program to read the
+  specified sysfs files when ACPI event has came.
+
+  ! Thanks to the github user "tedfelix",whose project "acpid2" told me the way how to get multicast
+    group id of ACPI.
+
+Kprobes and Kretprobes :
+  kprobes is used to trap kernel function at the entry,but the kretprobes is ued to trap kernel function
+  when it is going to return.
+
+  <linux/kprobes.h>
     /**
-     * unfortunately,the multicast group of ACPI event is registered dynamically,thus there is not way
-     * to get the group id of ACPI event.even I tried to listen on some multicast groups,but no
-     * netlink message has came.
-     * may be I should try kobject uevent.
+     * kprobe - kernel probe
+     * @hlist:  hash list node used to link this kprobe into global kprobe table,
+     *          which is defined in <kernel/kprobes.c>,named @kprobe_table,size is
+     *          KPROBE_TABLE_SIZE,usually is 2^6.
+     * @list:   list of kprobes for multi-handler support.
+     * @nmissed:
+     *          count the number of times this probe was temporarily disarmed,that is
+     *          hitted but without handler to handle.
+     * @addr:   # typedef int kprobe_opcode_t;
+     *          location of the probe point,usually is the entry address of that function.
+     * @symbol_name:       
+     *          the symbol name of function want to be probed,the name of the probe point.
+     * @offset: offset into symbol.
+     * @pre_handler:
+     *          # typedef int (*kprobe_pre_handler_t)(struct kprobe *, struct pt_regs *);
+     *          called before @addr is executed.
+     * @post_handler:
+     *          # typedef void (*kprobe_post_handler_t)(struct kprobe *, struct pt_regs *,
+     *                                                  unsigned long flags);
+     *          called after @addr is executed.
+     * @opcode: saved opcode,the original opcode has been replaced by breakpoint instruction
+     *          or might been optimized to jump instruction(if no post handler is exist).
+     * @ainsn:  copy of the original instruction.
+     * @flags:  kprobe status flags,protected by @kprobe_mutex after this kprobe is registered.
+     *          # @kprobe_mutex is defined in <kernel/kprobes.c>.
+     * ! do not specify @addr and @symbol_name at the same time when register the kprobe.
      */
+    struct kprobe {
+            struct hlist_node hlist;
+            struct list_head list;
+            unsigned long nmissed;
+            kprobe_opcode_t *addr;
+            const char *symbol_name;
+            unsigned int offset;
+            kprobe_pre_handler_t pre_handler;
+            kprobe_post_handler_t post_handler;
+            kprobe_opcode_t opcode;
+            struct arch_specific_insn ainsn;
+            u32 flags;
+    };
 
-    I have found out that the mcast group id and mcast group name both are inclued in a nested nlattr
-    message,and for each of them,a nlattr header is prefixed.
-    It seems like this -
-                  7 => CTRL_ATTR_MCAST_GROUPS
-      [ nla_len | nla_type | pading | payload | pading ]
-                                      |                1 => CTRL_ATTR_MCAST_GRP_NAME
-                                      +--> [ nla_len | nla_type | pading | payload | pading ]
-                                                                           |
-      +--------------------------------------------------------------------+
-      |                                                                    
-      V           2 => CTRL_ATTR_MCAST_GRP_ID                  1 => CTRL_ATTR_MCAST_GRP_NAME
-      [ nla_len | nla_type | pading | ID | pading ][ nla_len | nla_type | pading | NAME | pading]
-                                    __u16
+    #define KPROBE_FLAG_GONE 1 /* breakpoint has already gone */
+    #define KPROBE_FLAG_DISABLED 2 /* probe is temporarily disabled */
+    #define KPROBE_FLAG_OPTIMIZED 4 /* probe is really optimized */
+    #define KPROBE_FLAG_FTRACE 8 /* probe is using ftrace */
+    #define KPROBE_FLAG_ON_FUNC_ENTRY 16 /* probe is on the function entry */
 
-    The information is got from the kernel documentation "generic-netlink" in "docs.kernel.org".
-    # attribute message of CTRL_ATTR_MCAST_GROUPS included CTRL_ATTR_MCAST_GRP_ID attribute and
-      CTRL_ATTR_MCAST_GRP_NAME attribute.
+    ! the flag can be set by user only is KPROBE_FLAG_DISABLED.
 
-    And then,I tried to gdb the demo program,find out this relationship by use of "x/FMT" command.
-    But it is strange that flag NLA_F_NESTED is not set in the @nla_type of first nlattr message.
+    /* kretprobe_holder used to holding the kretprobe's metadata. */
+    struct kretprobe_holder {
+            struct kretprobe __rcu *rp; /* points to the kretprobe object */
+            struct objpool_head pool;   /* object pooling metadata */
+    };
 
-    ACK message from kernel that corresponding to the previous GENL_ID_CTRL request is send to
-    user-space in a short time,it will appears in the result of next recvmsg().
+    /**
+     * kretprobe - kernel return probe
+     * @kp:        kprobe used to trap the function at entry to implement the
+     *             "trampoline" replacement.
+     * @handler:   # typedef int (*kretprobe_handler_t)(struct kretprobe_instance *,
+     *                                                  struct pt_regs*);
+     *             return handler
+     * @entry_handler:
+     *             hander called when at function entry,if this handler returned non-zero
+     *             value,"trampoline" replace will not happen,that is the return probe
+     *             has no effect.
+     * @maxactive: maximum active kretprobe for the probed function.this member controls
+     *             the number of kretprobe_instace objects can be create.if current number of 
+     *             active instances have reached this limitation,the newly coming kretprobe
+     *             will be ignored,and @nmissed will increase.
+     * @nmissed:   when kretprobe is temporarily disarmed,this member would increase.
+     * @data_size: size of data provided to kretprobe_instance object,for the member @data
+     *             in that structure.several kretprobe_instance can share private data.
+     * @rh:        kernel ret hook feature.
+     * @rph:       metadata holder.
+     */
+    struct kretprobe {
+            struct kprobe kp;
+            kretprobe_handler_t handler;
+            kretprobe_handler_t entry_handler;
+            int maxactive;
+            int nmissed;
+            size_t data_size;
 
-    Now I have succeed to subscribe the ACPI multicast group,so I can let program to read the
-    specified sysfs files when ACPI event has came.
+    #ifdef CONFIG_KRETPROBE_ON_RETHOOK
+            struct rethook *rh;
+    #else
+            struct kretprobe_holder *rph;
+    #endif
+    };
 
-    ! Thanks to the github user "tedfelix",whose project "acpid2" told me the way how to get multicast
-      group id of ACPI.
-      
+    #define KRETPROBE_MAX_DATA_SIZE 4096
 
+    /**
+     * kretprobe_instance - kernel return probe instance,when a kretprobe is hit,
+     *                      a new kretprobe_instance object would be created and
+     *                      pass to return handler.
+     * @node:               kernel rethook feature.
+     * @rcu:                RCU
+     * @llist:              lock-less NULL terminated single linked list,used to
+     *                      link current instance to @current->kretprobe_instances
+     *                      member.
+     * @rph:                kretprobe's metadata.
+     * @ret_addr:           return address of the kretprobed function.
+     * @fp:                 frame pointer.
+     * @data:               private data.
+     */
+    struct kretprobe_instance {
+    #ifdef CONFIG_KRETPROBE_ON_RETHOOK
+            struct rethook_node node;
+    #else
+            struct rcu_head rcu;
+            struct llist_node llist;
+            struct kretprobe_holder *rph;
+            kprobe_opcode_t *ret_addr;
+            void *fp;
+    #endif
+            char data[];
+    };
+
+    /* register/unregister kprobe(s) */
+    int register_kprobe(struct kprobe *p);
+    void unregister_kprobe(struct kprobe *p);
+    int register_kprobes(struct kprobe **kps, int num);
+    void unregister_kprobes(struct kprobe **kps, int num);
+
+    /* register/unregister kretprobe(s) */
+    int register_kretprobe(struct kretprobe *rp);
+    void unregister_kretprobe(struct kretprobe *rp);
+    int register_kretprobes(struct kretprobe **rps, int num);
+    void unregister_kretprobes(struct kretprobe **rps, int num);
+
+    /* used to find out a kprobe object which probing @name + @offset */
+    kprobe_opcode_t *kprobe_lookup_name(const char *name, unsigned int offset);
+
+    /* architecture-dependent function to adjust the address @addr + @offset that is going to
+     * be kprobed.
+     * @on_func_entry is used to indicate whether the address is the function's entry.
+     */
+    kprobe_opcode_t *arch_adjust_kprobe_addr(unsigned long addr, unsigned long offset, bool *on_func_entry);
+
+    /** similar to the breakpoint control what we do in GDB **/
+    /* disable a kprobe */
+    int disable_kprobe(struct kprobe *kp);
+
+    /* enable a kprobe */
+    int enable_kprobe(struct kprobe *kp);
+
+  simple work flow :                     
+
+    register_kprobe() -------+ kallsyms_lookup_name()
+                             |
+    +------------------------+-----------------------------+ copied original opcode and replace ---+
+    |                        |                             |                                       |
+    |R                       |                   +-------------------------------------------+     |
+    |e                       |              +--> | ins0(entry) | ins1 | ins2 | ... | ret ins |     |
+    |p                       |              |    +-------------------------------------------+     |
+    |l                       |              |                                  ^                   |
+    |a                       V              |                                  |                   |
+    |c  +--------------------------------------------------+                   +---+               |
+    |e  |     |          |          |     |          |     |                       |              C|
+    |   | ... | symbol X | symbol Y | ... | vfs_open | ... | => kallsyms           |              o|
+    |b  |     |          |          |     |          |     |                       |              p|
+    |r  +--------------------------------------------------+                       |              y|
+    |e                                                                             |               |
+    |a                                                                             |              o|
+    |k                            +-----------------+                              |              r|
+    |p      kprobe_pre_handler -> | ins0(entry) ... | <-+                          |              i|
+    |o                            +-----------------+   |                          |              g|
+    |i                             +-----------------+  |                          |              i|
+    |n      kprobe_post_handler -> | ins0(entry) ... | <+-+                        |              n|
+    |t                             +-----------------+  | |                        |              a|
+    |                                                   | |                        |              l|
+    |                                                   | |                        |               |
+    +-----> kprobe -> {                                 | |                        |               |
+    |               execute pre handler ----------------+ |                        |               |
+    |               single-step copied opcode ------------+---> [ copied opcode ] <+---------------+
+    |               execute post handler -----------------+                        |
+    |               return to original path ---------------------------------------+
+    |       } <-----------------+
+    |                           |
+    |                           | notifier_call_chain
+    |                           |
+    +--> CPU trap breakpoint ---+
+
+  ! kretprobe is similar,but it will replace the return address to "trampoline",and then jump to
+    the return handler.
+    after return handler finished,it restore the return address,back to the original return path.
+
+  ! optimization is depends on architecture,and some additional conditions.
+    no optimization if :
+      the probe has a post handler,
+      or other instruction in the optimized region are probed,
+      or the probe is disabled.
+    except these,kprobe must analyzes and verifies the optimization :
+      the region that will be replaced by the jump instruction lies entirely within one function.
+      there is no jump into the optimized region :
+        - the function contains no indirect jump.
+        - the function contains no instruction that causes an exception.
+        - there is no near jump to the optimized region.
+        - for each instructions in the optimized region,the instruction
+          can be executed out of line.
+
+  ! macro NOKPROBE_SYMBOL() is defined in <linux/kprobes.h> used to describe that the symbol to
+    a function can be kprobed.
+    # all kprobe code can not be kprobed.
+  ! for kretprobe,the number of times that function is called must match to the number of
+    times the function returned.    
+    the function such do_exit() can not be kretprobed.
+  ! if the handler entered a kprobed function,in that context,no second kprobe handler will be
+    triggered,but,because the second kprobe is hit without execute handler,thus @nmissed will
+    increase.
+    but for SMP,the (same)handler(s) may run concurrently on different CPUs.
