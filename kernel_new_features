@@ -310,3 +310,168 @@ struct folio :
                   };
                   ! union's magic
           hence,we finally we get the right address of tail page.
+
+io_uring subsystem :
+        io_uring is a high-performance asynchrnous I/O support introduced in kernel 5.1,
+        used as alternation of AIO.
+        
+        initialization :
+          this subsystem is initialized during system booting phase,by the init function
+                  static int __init io_uring_init(void); /* defined in <io_uring/io_uring.c> */
+          this function first go to creates an object named @kmem_args is type of
+          struct kmem_cache_args.
+          next,invoke io_uring_optable_init() to initialize io_uring operation table.
+          proceed to create kmem cache through kmem_cache_create(),the cache's name is
+          "io_kiocb",object size is sizeof(struct io_kiocb).
+          enabled slab flags are :
+                  SLAB_HWCACHE_ALIGN
+                  SLAB_PANIC
+                  SLAB_ACCOUNT
+                  SLAB_TYPESAFE_BY_RCU
+          global pointer named @req_cachep is defined in the same file,which saves the address
+          of the newly created kmem cache object.
+          finally,invoke alloc_workqueue() to create a new workqueue "iou_exit",workqueue flag
+          is WQ_UNBOUND(have not bound to any CPU),and the maximum number of in-flight work items
+          is 64.
+          the new workqueue object's address is saved in static pointer named @iou_wq,which is
+          defined in the same file,and it is readonly after initialization.
+          /* this init function will does a lot of BUG checkings.
+           * if CONFIG_SYSCTL is enabled,it will invoke register_sysctl_init() to
+           * register sysctl interface.
+           */
+
+          ! structure kmem_cache_args :
+            <linux/slab.h>
+              /**
+               * kmem_cache_args - structure collects less common arguments for 
+               *                   kmem_cache_create().
+               * @align:           required alignment for the objects.
+               * @useroffset:      usercopy region offset.
+               * @usersize:        usercopy region size.
+               *                   @useroffset = 0 is valid if @usersize is not _zero_.
+               *                   @usersize = 0 means no usercopy region is specified.
+               * @freeptr_offset:  custom offset for the free pointer in the
+               *                   SLAB_TYPESAFE_BY_RCU caches.
+               *                   by default,SLAB_TYPESAFE_BY_RCU caches place the free
+               *                   pointer outside of the object,this might cause the object
+               *                   to grow in size,through this member,cache creator has a
+               *                   reason to avoid this,use this member to specify a custom
+               *                   free pointer offset in their struct where the free pointer
+               *                   will be placed.
+               *                   this requries the caller to ensure the fields are required
+               *                   to guard against object recycling must be valid.
+               *                   # @freeptr_offset = 0 is valid.
+               *                   # if @freeptr_offset is specified,@use_freeptr_offset must be
+               *                     set to true.
+               *                   # @ctor currently is not supported with custom free pointers
+               *                     as a @ctor requires an external free pointer.
+               * @use_freeptr_offset:
+               *                   use custom free pointer offset indicator.
+               * @ctor:            constructor for the objects,this @ctor is called for each object
+               *                   in a newly allocated slab page.
+               *                   # NULL => no constructor
+               *                   ! it is the cache user's responsibility to free object in the same
+               *                     state as after calling the constructor,or deal appropriately with
+               *                     any differences between a freshly constructed and a reallocated
+               *                     object.
+               * @sheaf_capacity:  enable sheaves of given capacity for the cache.with a non-zero value,
+               *                   allocations from the cache go through caching arrays called sheaves.
+               *                   each CPU has a main sheaf that is always present,and a spare sheaf that
+               *                   may be not present.when both are empty,there is an attempt to replace
+               *                   _an_ empty sheaf with a full sheaf from the per-node barn.
+               *                   if no full sheaf is available,and GFP flags allow blocking,a sheaf is
+               *                   allocated and filled from slab(s) using bulk allocation.
+               *                   otherwise,the allocation falls back to the normal operation allocating
+               *                   a single object from a slab.
+               *                   when freeing and both per-CPU sheaves are full,the barn may replace it with
+               *                   an empty sheaf,unless it is over capacity.in that case,a sheaf is bulk freed
+               *                   to slab pages.
+               *                   # 0 => no sheaf
+               *                   # allocations via kmem_cache_alloc_node() with a node specified other than
+               *                     NUMA_NO_NODE will bypass sheaves.
+               *                   # bulk allocation and free operations also try to use the per-CPU sheaves and
+               *                     barn,but fallback to using slab pages directly.
+               *                   # this member will be ignored if slub_debug is enabled for the cache.
+               * # any uninitialized fields of the structure are interpreted as unused,but @freeptr_offset = 0 is
+               *   valid,thus @use_freeptr_offset is the indicator.
+               *   pass NULL kmem_cache_args object to kmem_cache_create() means all members are unused.
+               */
+              struct kmem_cache_args {
+                      unsigned int align;
+                      unsigned int useroffset;
+                      unsigned int usersize;
+                      unsigned int freeptr_offset;
+                      bool use_freeptr_offset;
+                      void (*ctor)(void *);
+                      unsigned int sheaf_capacity;
+              };
+
+          ! io_uring used kmem_cache_args {
+                    .useroffset = offsetof(struct io_kiocb, cmd.data),
+                    .usersize = sizeof_field(struct io_kiocb, cmd.data),
+                    .freeptr_offset = offsetof(struct io_kiocb, work),
+                    .use_freeptr_offset = true,
+            }
+
+          function io_uring_optable_init() is defined in <io_uring/opdef.c>.
+                  void __init io_uring_optable_init(void);
+          for each element in the array named @io_issue_defs,it checks
+          the @prep member of the element is type of struct io_issue_def.
+          if it is not equal to io_eopnotsupp_prep(),proceed checks whether
+          current element's @issue member is NULL,if it is the case,that means
+          there is a BUG.   /* operation is supported,but can not issue,BUG */
+
+          ! @io_issue_defs is defined in <io_uring/opdef.c>,which is an array of
+            const struct io_issue_def.it collects a lot of io_uring supporting
+            informations to kernel I/O infrastructures.such readv,writev,fsync,etc.
+
+          ! structure io_issue_def :
+              <io_uring/opdef.h>
+                /**
+                 * io_issue_def - structure used to describes how kernel supports with
+                 *                the specified kind of io_uring issue,and some requirements.
+                 * @needs_file:   needs req->file assigned
+                 * @plug:         should block plug
+                 * @ioprio:       supports prioritied I/O
+                 * @iopoll:       supports I/O poll
+                 * @buffer_select:
+                 *                operation supports buffer selection
+                 * @hash_reg_file:
+                 *                hash workqueue insertion if file is a regular file
+                 * @unbound_nonreg_file:
+                 *                unbound workqueue insertion if file is a non-regular file
+                 * @pollin:       set if opcode supports polled "wait" - input
+                 * @pollout:      set if opcode supports polled "wait" - output
+                 * @poll_exclusive:
+                 *                set if opcode supports polled "wait" - exclusive poll
+                 * @audit_skip:   skip auditing
+                 * @iopoll_queue: have to be put into the iopoll list
+                 * @vectored:     vectored opcode,set if vectored and handler needs to know
+                 * @is_128:       set to 1 if this opcode uses 128-bit sqes in a mixed sq
+                 * @async_size:   size of async data needed,if any
+                 * @issue:        method used to issue submission
+                 * @prep:         method used to prepare submission
+                 */
+                struct io_issue_def {
+                        unsigned needs_file:1;
+                        unsigned plug:1;
+                        unsigned ioprio:1;
+                        unsigned iopoll:1;
+                        unsigned buffer_select:1;
+                        unsigned hash_reg_file:1;
+                        unsigned unbound_nonreg_file:1;
+                        unsigned pollin:1;
+                        unsigned pollout:1;
+                        unsigned poll_exclusive:1;
+                        unsigned audit_skip:1;
+                        unsigned iopoll_queue:1;
+                        unsigned vectored:1;
+                        unsigned is_128:1;
+
+                        unsigned short async_size;        
+
+                        int (*issue)(struct io_kiocb *, unsigned int);
+                        int (*prep)(struct io_kiocb *, const struct io_uring_sqe *);                
+                };
+        
+
