@@ -867,6 +867,9 @@ io_uring subsystem :
 
 
                                                                             /* mmap() Array of Submission-queue entries */
+                                                                            /* the addition is because the ring is not 
+                                                                             * located right at the beginning.
+                                                                             */
                                                                          +--mmap(0, params.sq_off.array + params.sq_entries *
                                                                          |          sizeof(__u32),
                                                                          |       PROT_READ | PROT_WRITE | MAP_SHARED | MAP_POPULATE,
@@ -900,13 +903,13 @@ io_uring subsystem :
 
               SQ: Submission ring
               CQ: Completion ring
-              SQ Array: Submission-queue entrier array
+              SQ Array: array contains index to Submission-queue entries
               @ring_fd: the file descriptor returned from sys_io_uring_setup()
               @params: the io_uring parameter passed to sys_io_uring_setup(),and filled by it
               @.sq_off.array: @array member of .sq_off is set to the member named @sq_array_offset 
                               in io_rings_layout.
                               the SQ Array,provides a way to access SQ entries indirectly,through
-                              the array index.
+                              the index in this array.
                               @sq_array_offset is set to 
                                 "sizeof(struct io_rings) + array_size(struct io_rings.cqes, cq_entries)"
                                  #^rings header                       #^flexible array
@@ -919,7 +922,10 @@ io_uring subsystem :
               IORING_OFF_CQ_RING: defined to 0x8000000ULL
               IORING_OFF_SQES:    defined to 0x10000000ULL
 
-              +------------------------------+-----------------------------------+-----+------------+-----+------------+
-              | 0 | 1 | 2 | 3 | ... | CQ_END | SQ_START | SQ_START + 1 | ... | N | ... | ... CQ ... | ... | ... SQ ... | => filemap
-              +------------------------------+-----------------------------------+-----+------------+-----+------------+
-              |<------------------------ index array --------------------------->|     
+              +-------------------------+-----+------------+-----+------------+
+              | 0 | 1 | 2 | 3 | ... | N | ... | ... CQ ... | ... | ... SQ ... | => filemap
+              +-------------------------+-----+------------+-----+------------+
+              |<----- index array ----->|                        ^
+              |                                                  |
+              +--------------------------------------------------+
+              
