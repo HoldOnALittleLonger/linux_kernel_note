@@ -451,6 +451,9 @@ io_uring subsystem :
                  * @async_size:   size of async data needed,if any
                  * @issue:        method used to issue submission
                  * @prep:         method used to prepare submission
+                 * ! ->issue will be called by __io_issue_sqe(),and which is usually called by
+                 *   io_issue_sqe().
+                 *   ->prep will be called by io_init_req(),and which is called by io_submit_sqe().
                  */
                 struct io_issue_def {
                         unsigned needs_file:1;
@@ -473,5 +476,368 @@ io_uring subsystem :
                         int (*issue)(struct io_kiocb *, unsigned int);
                         int (*prep)(struct io_kiocb *, const struct io_uring_sqe *);                
                 };
-        
 
+        system calls :
+          same as AIO,we need to issue request to kernel for use io_uring,if the request has
+          been satisfied,then kernel will exports the completion state.
+          in 6.19.6,there is only three system calls about io_uring: io_uring_setup,io_uring_enter,
+          io_uring_register.
+
+          <io_uring/io_uring.c>
+            /**
+             * sys_io_uring_setup - prepare io_uring.
+             * @entries:            the number of submissions can be contained in the
+             *                      submission queue.
+             * @params:             io_uring parameter from userspace
+             * return:              file descriptor OR error code
+             * # this routine first needs to check io_uring_allowed(),if io_uring is disabled,or
+             *   we have no capability to make use of io_uring,-EPERM will be returned.if we are
+             *   permitted to use io_uring,then io_uring_allowed() will does the last 
+             *   security checking via LSM.
+             *   ! io_uring_allowed() returns -EPERM
+             *             if @sysctl_io_uring_disabled == 2.
+             *                                             (2 => fully disabled, 1 => half disabled and restricted)
+             *             if make_kgid() from @sysctl_io_uring_group in @init_user_ns returned a
+             *             invalid kgid.
+             *             if make_kgid() returned kgid is not in @io_uring_group.
+             *     if io_uring is not disabled OR we have capability CAP_SYS_ADMIN,then we can use it.
+             */
+            SYSCALL_DEFINE2(io_uring_setup, u32, entries, struct io_uring_params __user *, params)
+            => asmlinkage long sys_io_uring_setup(u32 entries, struct io_uring_params __user *params);
+
+            /**
+             * io_uring_setup - kernel routine used to setup io_uring.
+             * @entries:        maximum number of submissions can be contained in submission queue.
+             * @params:         userspace io_uring parameters.
+             * return:          file descriptor to the io_uring OR error code
+             */
+            static long io_uring_setup(u32 entries, struct io_uring_params __user *params);
+
+            description for io_uring_setup() :
+              this function setup an aio uring context,and returns the fd.
+                                    #^asynchronous I/O,the old AIo still functions,and which need kioctx.
+              structure io_ctx_config is used to describes(configures) io_uring context.
+              /**
+               * <io_uring/io_uring.h>
+               * # io_uring aio context config
+               * struct io_ctx_config {
+               *         struct io_uring_params p; // used to store io_uring parameter from userspace
+               *         struct io_rings_layout layout; // ring layout
+               *         struct io_uring_params __user *uptr; // stores the userspace pointer of io_uring parameters
+               * };
+               */
+              this routine setup the context @config {
+                      copy @params to .p
+                      set .p.sq_entries to @entries
+                      set .uptr to @params
+                      .layout is memset to _zero_
+              }
+              if we failed to copy from user,or @config.p.resv is not _zero_ fully filled,return -EFAULT.
+              .resv is an array of __u32,size is 3.
+              finally,invoke io_uring_create(),pass it address of @config,return the return value to caller.
+
+            /**
+             * io_uring_create - create io_uring from given config.
+             * @config:          the config.
+             * return:           file descriptor to the io_uring OR error code
+             */
+            static __cold int io_uring_create(struct io_ctx_config *config);
+            
+            description for io_uring_create() :
+              the main works this routine has to done :
+                prepare config via io_prepare_config(),the primary processing is to
+                setup @config->p.
+
+                allocate io_ring_ctx via io_ring_ctx_alloc(),this function will create
+                a new io_uring context.(@ctx)
+
+                setup the context,that is set @clockid to CLOCK_MONOTONIC,and set
+                @clock_offset to _zero_.                 #^we will pick timepoint from this clock.
+
+                set @ctx->user to current_user(),if current user has no superior,this is determined
+                by ns_capable_noaudit(&@init_user_ns, CAP_IPC_LOCK).
+
+                adjust some members in the context based on context(@ctx) flags {
+                        !IORING_SETUP_NO_SQARRAY -> static_branch_deferred_inc()
+
+                        IORING_SETUP_DEFER_TASKRUN AND !IORING_SETUP_IOPOLL AND
+                        !IORING_SETUP_SQPOLL -> @ctx->task_complete = true
+
+                        IORING_SETUP_IOPOLL AND !IORING_SETUP_SQPOLL -> @ctx->syscall_iopoll = 1
+
+                        IORING_SETUP_SQPOLL OR IORING_SETUP_COOP_TASKRUN -> @ctx->notify_method = TWA_SIGNAL_NO_IPI
+                        else: @ctx->notify_method = TWA_SIGNAL                        
+                }
+
+                adjust some members in the context based on other members {
+                        !@ctx->task_complete -> @ctx->poll_activated = true
+                }
+
+                memory grab @current->mm,pin current task's mm_struct,and set @ctx->mm_account to @current->mm.
+
+                invoke io_allocate_scq_urings(),this function allocate submission ring and completion ring for
+                this io_uring context @ctx.it relies on io_create_region(),and which will allocate pages for
+                the ring,or pin the exist pages rather than allocte new pages if IORING_MEM_REGION_TYPE_USER is
+                set.at the end,io_create_region() invoke io_region_init_ptr() on the given io_mapped_region
+                descriptor,to vmap() the pages from an page array to virtually contiguous memory region.
+                for submission ring,the io_mapped_region descriptor is @ctx->ring_region,for completion ring,
+                the descriptor is @ctx->sq_region.
+                @ctx->rings is the pointer points to .ring_region->ptr,it is the startup address of cq ring.
+                @ctx->sq_sqes is the pointer points to .sq_region->ptr,it is the startup address of sq ring.
+                /* sq and cq has different mmap offset.
+                 * sq mmap offset: IORING_OFF_SQES
+                 * cq mmap offset: IORING_OFF_CQ_RING
+                 */
+
+                invoke io_sq_offload_create() to get io_sq_data,create a new io thread
+                through create_io_thread(),this new task is copied from current process.
+                                           /* the new task will executes io_sq_thread() function.
+                                            * the thread period invoke io_submit_sqes().
+                                            * if nothing to does or current sqes have been submitted,
+                                            * it will enter TASK_INTERRUPTIBLE,and wait on ->sq_data->wait.
+                                            * ! the sq_data object's address is passed to create_io_thread()
+                                            *   by io_sq_offload_create().
+                                            * ! the newly created thread is inactive,io_sq_offload_create()
+                                            *   activate it before return.
+                                            */
+                the new task is not kernel thread,it is io_uring worker,and it is user worker.
+                next,invoke io_uring_alloc_task_context() on current io_uring context and this
+                new task,to create a new io_uring_task for this io_uring.
+                /* this new task's @io_uring member is set to this io_uring_task */
+
+                invoke io_uring_get_file() on the io_uring context to attach
+                a file object.
+
+                invoke __io_uring_add_tctx_node(),this function will first check whether
+                @current has not associated with an io_uring_task context,if it is the case,
+                invoke io_uring_alloc_task_context() to create a new one for @current,and init it.
+                after @current has associated with an io_uring_task,we check xa_load() on the
+                @tctx->xa and (unsigned long)this_io_uring,result is false,then we need to
+                create an io_tctx_node,and add it into the io_ring_ctx's @tctx_list member.
+
+                finally,invoke trace_io_uring_create() to keep track it,and return the file descriptor
+                to caller.
+
+
+            /**
+             * sys_io_uring_enter - system call enter io_uring for sync submissions and completions.
+             * @fd:                 the file descriptor associated with the io_uring
+             * @to_submit:          number of entries we need to wait for submit
+             * @min_complete:       minimal number of completions we need to wait for
+             * @flags:              IORING_ENTER flags
+             * @argp:               arguments pointer
+             * @argsz:              size of arguments array
+             * return:              depends on @flags,should equal to @to_submit or @min_complete
+             *                      error code if failed
+             */
+            SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit, u32, min_complete,
+                            u32, flags, const void __user *, argp, size_t, argsz)
+            => asmlinkage long sys_io_uring_enter(unsigned int fd, u32 to_submit, u32 min_complete,
+                                                  u32 flags, const void __user *argp, size_t argsz);
+
+            description for sys_io_uring_enter() :
+              this routine requires user need to pass valid IORING_ENTER flags in @flags,it @flags contains
+              any flag is not of IORING_ENTER,return -EINVAL.
+
+              IORING_ENTER_REGISTERED_RING is set {
+                      the ring @fd has been registered via IORING_REGISTER_RING_FDS opcode,in this case
+                      we need only dereference our task private array to find it.
+                      so,use @current->io_uring,it is type of io_uring_task *.
+                      invoke array_index_nospec(),pass it @fd,IO_RINGFD_REG_MAX,this macro function will
+                      returns an array index is sanitized after a bounds check.
+                      the result is stored in @fd,then we can use it to get the file object in
+                      @tctx->registered_rings[]. /* @tctx = @current->io_uring */
+              }
+              IORING_ENTER_REGISTERED_RING is not set {
+                      IORING_REGISTER_RING_FDS opcode has not issued,thus @fd has not registered.
+                      so we get the file object just through fget() on @fd.
+                      ! this file object must has a io_uring file operations object associated with,
+                        otherwise return -EOPNOTSUPP.
+              }
+
+              the io_ring_ctx is stored in file object's @private_data,we can retrieve it from the file.
+              if IORING_SETUP_R_DISABLED is set in smp_load_acquire(@ctx->flags),we need to give up this
+              enter,in this case,error code is -EBADFD.
+
+              for SQ polling,the thread will do all submissions and completions,just return the requested
+              submit count,and wake the thread if we were asked to.
+
+              so,if IORING_SETUP_SQPOLL is enabled in @ctx->flags {
+                      /* SQPOLL */                        
+
+                      we wake_up() @ctx->sq_data->wait if IORING_ENTER_SQ_WAKEUP is set.
+                      if IORING_ENTER_SQ_WAIT is set,we also need to invoke io_sqpoll_wait_sq() on @ctx to
+                      wait for submission. /* suspend current task and wait */
+                      in this case,the return value will set to @to_submit.
+                      ! for SQPOLL,@ctx->sq_data->thread can not be NULL,if no thread is associated with,
+                        who can handle SQPOLL?thus -EOWNERDEAD will be returned.
+              } else if @to_submit is not _zero_ {      /* submitting logic */
+                      we trigger submissions manually.
+                      first,we check whether we need to add a new ctx node:
+                              if @current->io_uring is not NULL and ->io_uring->last is equal to @ctx,
+                              we do not need a new node.
+                              otherwise,invoke __io_uring_add_tctx_node() to create new node.(task node)
+                      invoke io_submit_sqes(),pass it @ctx and @to_submit.
+                              /* need to holds @ctx->uring_lock */
+
+                              function io_submit_sqes() invoke io_submit_sq() in a loop.
+                              the count it the minimal value between @to_submit and the current number of entries
+                              in sq of @ctx.
+                              invoke io_get_task_refs(),pass it the entries count.
+                                    this function will let @current->io_uring->cached_refs -= count.
+                                    if ->cached_refs less than _zero_,invoke io_task_refs_refill() on the tctx.
+                                            number of refs refill is computed through
+                                                    -@tctx->cached_refs + IO_TCTX_REFS_CACHE_NR
+                                            next,it use the result to
+                                                    increase per-CPU counter @tctx->inflight
+                                                    increase @current->usage
+                                                    increase @tctx->cached_refs
+                              for each entry in the sq
+                                      allocate an object is type of struct io_kiocb through io_alloc_req().(@req)
+                                      get the next sq entry through io_get_sqe() on @ctx.(@sqe)
+                                      invoke io_submit_sqe() to submit the been registered but have not
+                                      submitted submission,pass it @ctx,@req,@sqe,and the counter's address.
+                                      if no IORING_SETUP_SUBMIT_ALL is set in @ctx->flags,we just break the loop
+                                      after we have submitted at least one sqe.
+                                
+                                      ! if we failed to get next sqe,we just invoke io_req_add_to_cache() cache
+                                        this request without submit it,and break loop.
+                                        /* no sqe can associates with it */
+                              finally,return the number of submissions we have been submitted.      
+                      after io_submit_sqes() returned with no error happened.we @flags again,if
+                      IORING_ENTER_GETEVENTS is enabled,we need to prepare retrieve completion from cq.
+                              if @ctx->syscall_iopoll is TRUE,goto label "iopoll_locked".
+
+                              if IORING_SETUP_DEFER_TASKRUN is enabled in @ctx->flags,we invoke 
+                              io_run_local_work_locked(),pass it @ctx and @min_complete.
+                                      io_run_local_work_locked() will invoke __io_run_local_work(),if there
+                                      is some work are pending.
+                                      /* restart handling */
+                                      and that function will first handle the retry list of @ctx(->retry_list.first),
+                                      if we handled all retry items,then .first should be NULL,otherwise,the handling
+                                      loop is broken early.in this case,we need io_submit_flush_completions() on @ctx,
+                                      check should we continue run local work,if we need,we must restart the handling.
+                                      .first is NULL,we proceed to handling @ctx->work_llist.
+                                      the main handler is __io_run_local_work_loop(),for each item on the list,invoke
+                                      either the request's @io_task_work.func or the common io_poll_task_func().
+                                      ! a handle loop is composed by handle retry list and handle work list.
+                                      ! when handle @work_llist,the list will be delete,and @ctx->work_llist will points
+                                        to NULL.
+              }
+
+              /* completion logic */
+              if IORING_ENTER_GETEVENTS is enabled in @flags,we need to retrieve completion for userspace application.
+              @ctx->syscall_iopoll is TRUE {
+                      first invoke validate_ext_arg() to validate @argp and @argsz.
+                      if they are valid,proceed invoke io_iopoll_check(),pass it @ctx and @min_complete.
+                      function io_iopoll_check() will check at least @min_complete polled requests.
+                                                            # may early stopped the checking loop,if signal
+                                                              is pending or need_resched().
+                      /* function io_iopoll_check() will test the list @ctx->iopoll_list.
+                       * for the next req on the list,if it is completed,then break the traversing;otherwise,
+                       * do io_uring_hybrid_poll() or do io_uring_classic_poll() on it,determined by whether
+                       * IORING_SETUP_HYBRID_POLL is set.
+                       * next,use another loop to traverse items from current position to the list's end(include current pos),
+                       * if any one request is completed,increase counter.if the completed request is CMD,we need invoke
+                       * io_req_rw_cleanup() on it.
+                       * if we have encountered the first incompleted request in the rest,we break the loop.
+                       * after the second loop stopped,we cut the rest and splice it into the ->iopoll_list.
+                       *                           |<------>| => completed
+                       *         [================@----------#========]
+                       *         |<-- incomp ---->|          |<------>| => maybe incomp
+                       *                          ^----------^
+                       *                            cut and splice
+                       * finally,__io_submit_flush_completion() on @ctx,and return the number of requests are completed.
+                       */
+                       
+              } else {
+                      /* for the case @syscall_iopoll is FALSE */
+                      because no iopoll,thus,we need to get the external arguments from @argp,and place it in a local
+                      object named @ext_arg is type of struct ext_arg.
+                      /**
+                       * struct ext_arg {
+                       *         size_t argsz; # size of argument,argument type and size depends on IORING_ENTER flags.
+                       *         struct timespec64 ts; # used to set @timeout member of io_wait_queue object.
+                       *         const sigset_t __user *sig; # used to setup user signal mask when we waiting for completion.
+                       *         ktime_t min_time;  # the minimal timeout of io_wait_queue object.
+                       *         bool ts_set;   # is the @ts have given.
+                       *         bool iowait;   # should we need to mark @current->in_iowait to 1 if we have pending requests.
+                       * };
+                       */
+                      ! we convert @argp to const struct io_uring_getevents_arg *,and get the information from userspace
+                        into @ext_arg.
+                      next,invoke io_cqring_wait(),pass it @ctx,@min_complete,@flags,and &@ext_arg.
+                      /* this function is defined in the same file,it will wait until events become available,
+                       * if we do not already have some.the application must reap them by itself,as they reside
+                       * on the shared cq ring.
+                       * # suspend via schedule().
+                       */
+              }
+              finally,do some resource recycle and return the result to userspace.
+              ! we need to clear bit IO_CHECK_CQ_DROPPED_BIT in @ctx->check_cq,if io_cqring_wait() returned -EBADR.
+                the error number indicates that one or more CQE were dropped.
+                once the user has been informed we can clear the bit as they are obviously OK with those drops.
+
+            /**
+             * sys_io_uring_register - system call used to register an io_uring submission,and also can be used to
+             *                         for dynamically configuration.
+             * @fd:                    file descriptor to the io_uring
+             * @opcode:                request
+             * @arg:                   argument(s) for the asynchronous I/O
+             *                         what kind of the argument is depends on @opcode
+             * @nr_args:               number of @arg
+             * return:                 0 OR error code
+             * # @opcode can not greater than or equal to IORING_REGISTER_LAST,otherwise -EINVAL will be returned.
+             * # if @fd is -1,io_uring_register_blind() would be called,depends @opcode,either io_uring_register_send_msg_ring()
+             *   is called or io_query() is called. (IORING_REGISTER_SEND_MSG_RING / IORING_REGISTER_QUERY)
+             *   for IORING_REGISTER_SEND_MSG_RING,@arg should points to struct io_uring_sqe object,kernel use the sqe
+             *   to prepare struct io_msg object,and post the msg to ring,in this case,the fd to the ring is stored
+             *   in @sqe->fd.
+             * # generally,the file object is got through io_uring_register_get_file(),and the io_ring_ctx is the @private_data
+             *   of this file object.
+             *   after get the io_uring_ctx,acquire ->uring_lock,and invoke __io_uring_register(),pass it the @ctx,@opcode,
+             *   @arg,@nr_args.
+             *   before return from this system call,release lock,and fput() the file,and return result.
+             * # function __io_uring_register() will invoke the different helper depends on @opcode.
+             */
+            SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode, void __user *, arg,
+                            unsigned int, nr_args)
+            => asmlinkage long sys_io_uring_register(unsigned int fd, unsigned int opcode, void __user *arg,
+                                                     unsigned int nr_args);
+              
+                                    task put request       task get completion
+                                    /                              X
+                                   /                                \
+                                  /                                  \
+                                 /                                    \
+                    ->          X                       ->             \
+              +-----------------------------------------------------------------------------+
+              | ... | sq0 | sq1 | sq2 | ... | sqN | ... | cq0 | cq1 | cq2 | ... | cqN | ... | => process address space
+              +-----------------------------------------------------------------------------+    IORING_SETUP_NO_MMAP
+                    ^             /               |     ^             X               |          (pin user pages)
+                    |            /                |     |              \              |          IORING_MEM_REGION_TYPE_USER
+                    +-----------------------------+     +-----------------------------+
+                               /                                         \
+                              /   we can chose to use one of these two    \
+                             /    during setup phase.                      \
+                    ->      X                           ->                  \
+              +-----------------------------------------------------------------------------+
+              | ... | sq0 | sq1 | sq2 | ... | sqN | ... | cq0 | cq1 | cq2 | ... | cqN | ... | => virtually contiguous
+              +-----------------------------------------------------------------------------+    memory mapping
+                    ^                             |     ^                             |          (kernel space)
+                    |                             |     |                             |         
+                    +-----------------------------+     +-----------------------------+
+                                    /                               \
+                                   /                                 \
+                                  /                                   \
+                                 /                                     \
+                                /                                       \
+                    page57 page108 page322 page1029 ...          page3881 page4200 page5300 page6771 ... => physical memory
+                    ===================================          =======================================
+                                \                                           X
+                                 \                                         /
+                                  \                                       /
+                                   \                                     /
+                                    \                                   / 
+                                     X                                 /
+                             kernel get request -> ... handler ... -> kernel send completion
