@@ -605,8 +605,29 @@ io_uring subsystem :
                 new task,to create a new io_uring_task for this io_uring.
                 /* this new task's @io_uring member is set to this io_uring_task */
 
+                copy_to_user() the @config->p to @config->uptr.
+                /* prepare config has setup ->p,thus we need tell user the detail. */
+
                 invoke io_uring_get_file() on the io_uring context to attach
-                a file object.
+                a file object.the file_operations is @io_uring_fops {
+                                      .release = io_uring_release,
+
+                                      /**
+                                       * mmap() method is very important,because of it,we can let userspace
+                                       * application mmap the rings and submission array.
+                                       */
+                                      .mmap = io_uring_mmap,
+
+                                      .get_unmapped_area = io_uring_get_unmapped_area,
+
+                                      /* if no CONFIG_MMU */
+                                      .mmap_capabilities = io_uring_nommu_mmap_capabilities,
+
+                                      .poll = io_uring_poll,
+                                      
+                                      /* if CONFIG_PROC_FS */
+                                      .show_fdinfo = io_uring_show_fdinfo,
+                              } <io_uring/io_uring.c>
 
                 invoke __io_uring_add_tctx_node(),this function will first check whether
                 @current has not associated with an io_uring_task context,if it is the case,
@@ -621,6 +642,8 @@ io_uring subsystem :
 
             /**
              * sys_io_uring_enter - system call enter io_uring for sync submissions and completions.
+             *                      in other word,submit the requests have been placed in sq,or
+             *                      wait for the completions have been placed in cq.
              * @fd:                 the file descriptor associated with the io_uring
              * @to_submit:          number of entries we need to wait for submit
              * @min_complete:       minimal number of completions we need to wait for
@@ -841,3 +864,62 @@ io_uring subsystem :
                                     \                                   / 
                                      X                                 /
                              kernel get request -> ... handler ... -> kernel send completion
+
+
+                                                                            /* mmap() Array of Submission-queue entries */
+                                                                         +--mmap(0, params.sq_off.array + params.sq_entries *
+                                                                         |          sizeof(__u32),
+                                                                         |       PROT_READ | PROT_WRITE | MAP_SHARED | MAP_POPULATE,
+                                                                         |       ring_fd, IORING_OFF_SQ_RING);
+                                                                         |
+            /* mmap() Submittion ring buffer */                          |  /* mmap() Completion ring buffer */
+            mmap(0, params.sq_entries * sizeof(struct io_uring_sqe),     |  mmap(0, params.cq_off.cqes + params.cq_entries *
+            |    PROT_READ | PROT_WRITE | MAP_SHARED | MAP_POPULATE,     |  |       sizeof(struct io_uring_cqe),
+            |    ring_fd, IORING_OFF_SQES);                              |  |    PROT_READ | PROT_WRITE | MAP_SHARED | MAP_POPULATE,
+            +-----+                                 +--------------------+--+    ring_fd, IORING_OFF_CQ_RING);
+                  |                                 |                    |
+                  |                                 |                    +------------------+
+                  |                                 |                                       |
+                  V                                 V                                       V
+            +-----+---------------------------+-----+---------------------------------+-----+-------------------------+-----+
+            | ... | <---------- SQ ---------> | ... | <------------- CQ ------------> | ... | <------ SQ Array -----> | ... | => userspace
+            +-----+---------------------------+-----+---------------------------------+-----+-------------------------+-----+
+                    |                                 |                                          
+                    | sys_mmap()                      +---------------------------------------------------------------+
+              +-----+              +-----+---------------------------+-----+---------------------------------+-----+  |
+              |   kernel space <=  | ... | <---------- SQ ---------> | ... | <------------- CQ ------------> | ... |  |
+              |                    +-----+---------------------------+-----+---------------------------------+-----+  |
+              +-------+                    / VMALLOC                          \ VMALLOC                               |
+                      |                   /                                    \                 +--------------------+
+                      |                  /                                      \                |  sys_mmap()
+                      V                 /                                        \               V
+              +-------------------------------------------------------------------------------------------+
+              | ... | <--------- SQ pages ----------> | ... | <-------------- CQ pages -----------> | ... | => physical pages
+              +-------------------------------------------------------------------------------------------+
+                      /* maybe not contiguous */              /* maybe not contiguous */
+
+              SQ: Submission ring
+              CQ: Completion ring
+              SQ Array: Submission-queue entrier array
+              @ring_fd: the file descriptor returned from sys_io_uring_setup()
+              @params: the io_uring parameter passed to sys_io_uring_setup(),and filled by it
+              @.sq_off.array: @array member of .sq_off is set to the member named @sq_array_offset 
+                              in io_rings_layout.
+                              the SQ Array,provides a way to access SQ entries indirectly,through
+                              the array index.
+                              @sq_array_offset is set to 
+                                "sizeof(struct io_rings) + array_size(struct io_rings.cqes, cq_entries)"
+                                 #^rings header                       #^flexible array
+                              io_rings_layout.sq_size is the total size of all SQ entries,number is sq_entries.
+                              io_rings_layout.rings_size is 
+                                .sq_array_offset + .sq_size
+                                #^contains the header and CQs
+              MAP_SHARED: because the worker thread is in process context as a user task
+              IORING_OFF_SQ_RING: defined to 0ULL
+              IORING_OFF_CQ_RING: defined to 0x8000000ULL
+              IORING_OFF_SQES:    defined to 0x10000000ULL
+
+              +------------------------------+-----------------------------------+-----+------------+-----+------------+
+              | 0 | 1 | 2 | 3 | ... | CQ_END | SQ_START | SQ_START + 1 | ... | N | ... | ... CQ ... | ... | ... SQ ... | => filemap
+              +------------------------------+-----------------------------------+-----+------------+-----+------------+
+              |<------------------------ index array --------------------------->|     
