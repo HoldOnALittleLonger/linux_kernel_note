@@ -928,4 +928,319 @@ io_uring subsystem :
               |<----- index array ----->|                        ^
               |                                                  |
               +--------------------------------------------------+
+
+ftrace :
+        ftrace relies the profile feature mcount(),which is a function included
+        in the profiling library.when compile program with "-pg" gcc option,
+        an assembly instruction "call mcount" is inserted to the head of the
+        function.
+        mcount() routine recording in an in-memory call graph table both its
+        parent routine(child, function called mcount()),and its parent's parent
+        (the routine called mcount()'s parent).
+        this is typically done by examining the stack frame to find both the
+        address of the child,and the return address in the original parent.
+        because this is machine-dependent,thus mcount() will call to the
+        function __mcount_internal()(a normal C function),which is architecture
+        dependent,pass the function @frompc and @selfpc.
+        @frompc is the program counter where this child function is called(next ins),
+        and @selfpc the address of this child routine(with mcount() size adjustment,
+        remove size of the mcount() call that is embedded in the function).
+        __mcount_internal() maintaining the in-memory call graph,which records the
+        @frompc,@selfpc,and the number of times each of these call arcs was
+        transversed.
+        
+        assembly code :
+                .file   "<stdin>"
+                .text
+                .globl  main
+                .type   main, @function
+        main:
+        .LFB0:
+                .cfi_startproc
+                pushq   %rbp
+                .cfi_def_cfa_offset 16
+                .cfi_offset 6, -16
+                movq    %rsp, %rbp
+                .cfi_def_cfa_register 6
+        1:      call    mcount                # call to mcount(),common routine.
+                movl    $0, %eax
+                popq    %rbp
+                .cfi_def_cfa 7, 8
+                ret
+                .cfi_endproc
+        .LFE0:
+                .size   main, .-main
+                .ident  "GCC: (GNU) 15.2.0"
+                .section        .note.GNU-stack,"",@progbits
+
+        main() stack :
+                [  Red Zone ]
+                [    ...    ]
+                [    ...    ]
+                [    ip     ]  # rip to next instruction where main() is called
+
+        @frompc => ip
+        @selfpc => rip of "call mcount" - sizeof("call mcount")
+
+        if we can hacking mcount(),then we can customize the behavior of profiling.
+        for userspace program,the compiled executable file is linked with libc,
+        in which mcount() is defined.but for kernel,no libc is available,thus we
+        can define mcount() specified to the kernel.
+                void mcount(void);  /* prototype */
+        usually,we need to export "mcount" symbol for modules.
+                extern void mcount(void);
+                EXPORT_SYMBOL(mcount);
+
+        because mcount() will be called a lot of times,we need optimize it when
+        ftrace is not enabled,to improve performance of OS in normal case.
+                /* this type-definition is defined in <linux/ftrace.h> */
+                typedef void (*ftrace_func_t)(unsigned long ip, unsigned long parent_ip,
+                                              struct ftrace_ops *op,
+                                              struct ftrace_regs *fregs);
+                extern ftrace_func_t ftrace_trace_function;
+                
+                /* this function is defined in <arch/x86/kernel/ftrace_64.S>
+                 * in assembly language,it just executes "CALL_DEPTH_ACCOUNT"
+                 * and execute "RET" instruction.
+                 * # CALL_DEPATH_ACCOUNT is an assembly macro defined in
+                 *   <arch/x86/include/asm/nospec-branch.h>,to executes
+                 *   X86_FEATURE_CALL_DEPTH.
+                 * # this is default behavior that no ftrace is enabled.
+                 */
+                void ftrace_stub(unsigned long a1, unsigned long a2,
+                                 struct ftrace_ops *op, struct ftrace_regs *fregs)
+                {
+                    return;
+                }
+
+                void mcount(void)
+                {
+                        /* save any bare state needed in order to do initial checking */
+                        if (ftrace_trace_function != ftrace_stub)
+                                goto do_trace;
+                        /* restore any bare state */
+                        return;
+                do_trace:
+                        /* save all state needed by the ABI */
+                        /* construct @frompc and @selfpc */
+                        /* @selfpc = return address - MCOUNT_INSN_SIZE; */
+                        ftrace_trace_function(@selfpc, @frompc, @ftrace_ops, @ftrace_regs);
+                        /* restore all state needed by the ABI */
+                }   
+                
+                NO CONFIG_FRAME_POINTER, x86-64
+                # stack view arranged by ftrace_caller(),before invoke
+                # ftrace_stub().
+
+                H
+                [   prip    ] => parent function return address    # SAME
+                [   crip    ] <= rsp,child function return address # same
+                [    ...    ]    (also return address of ftrace_caller())
+                [   prip    ] => RSP(rsp) == rsp + 152             # SAME
+                [    ...    ]
+                [     0     ] => CS(rsp) == rsp + 136
+                [   crip    ] => RIP(rsp) == rsp + 128             # same
+                [     0     ] => ORIG_RAX(rsp) == rsp + 120
+                [    rdi    ] => RDI(rsp) == rsp + 112
+                [    rsi    ] => RSI(rsp == rsp + 104
+                [    rdx    ] => RDX(rsp) == rsp + 96
+                [    rcx    ] => RCX(rsp) == rsp + 88
+                [    rax    ] => RAX(rsp) == rsp + 80
+                [    r8     ] => R8(rsp) == rsp + 72
+                [    r9     ] => R9(rsp) == rsp + 64
+                [    ...    ]
+                [    rbp    ] => RBP(rsp) == rsp + 32
+                [    ...    ]
+                [    ...    ] <= rsp = rsp - (FRAME_SIZE == 168)
+                L
+
+                MCOUNT_FRAME_SIZE = 0
+                MCOUNT_REG_SIZE = FRAME_SIZE + MCOUNT_FRAME_SIZE => 168
+
+                movq MCOUNT_REG_SIZE+8(rsp), rsi <= RIP,return address of
+                                                    parent function
+                movq MCOUNT_REG_SIZE(rsp), rdi <= RIP, return address of
+                                                  mcount(),to child function
+                subq $MCOUNT_INSN_SIZE, %rdi <= return address to child function
+                                                before "call mcount" instruction
+                                                (the head)
+
+                # if no CONFIG_FRAME_POINTER,before save registers,RBP is not
+                  pushed into stack.
+
+                ! the stack is arranged by assembly function ftrace_caller().
+
+                because ftrace_stub() requires four parameters,ftrace_caller()
+                must prepares them.
+                    first parameter: unsigned long a0   <= rdi
+                    second parameter: unsigned long a1  <= rsi
+                    third parameter: struct ftrace_ops *op <= rdx
+                    fourth parameter: struct ftrace_regs *fregs <= rcx
+                rdi and rsi been setup by @save_mcount_regs assembly macro.
+                rdx is set to function_trace_op(rip),the global object pointer.
+                rcx is set to current rsp,points to the on-stack saved registers.
+                after ftrace_stub() returned,ftrace_caller() use RIP(rsp) to restore
+                the return address of ftrace_caller() itself.
+                hence,the handler is able to modify rip as a trampoline to change
+                execute flow.
+                before ftrace_caller() returns,assembly macro @restore_mcount_regs
+                is called to restore registers state from the struct ftrace_regs
+                object which is stored on-stack,then,trampoline will take effect.
+
+                the stack space devote to storing registers is :
+                                    offset based on final RSP
+                        [R15]       0
+                        [R14]       8
+                        [R13]       16
+                        [R12]       24
+                        [RBP]       32
+                        [RBX]       40
+                        [R11]       48
+                        [R10]       56
+                        [R9]        64
+                        [R8]        72
+                        [RAX]       80
+                        [RCX]       88
+                        [RDX]       96
+                        [RSI]       104
+                        [RDI]       112
+                        [ORIG_RAX]  120
+                        [RIP]       128
+                        [CS]        136
+                        [EFLAGS]    144
+                        [RSP]       152
+                        [SS]        160
+
+        the routine as entrypoint to enable ftrace is ftrace_startup_enable().
+        each time this function is called,it will store @ftrace_trace_function
+        into global pointer @saved_ftrace_func if they are not same,and enable
+        FTRACE_UPDATE_TRACE_FUNC in ftrace command.
+        ! the default value of @ftrace_trace_function is the ftrace_stub().
+        next,routine ftrace_run_update_code(@command) is called.
+
+        <kernel/trace/ftrace.c>
+          /**
+           * ftrace_run_update_code - command routine to start update code that
+           *                          related ftrace trampoline position
+           * @command:                behavior control
+           * # this routine will calls
+           *     ftrace_arch_code_modify_prepare() to process prepare works.
+           *     arch_ftrace_update_code(@command) to does update code.
+           *     ftrace_arch_code_modify_post_process() to process post works.
+           */
+          static void ftrace_run_update_code(int command);
+
+          /**
+           * arch_ftrace_update_code - architecture-dependent routine to modify
+           *                           the code to trace or not trace
+           * @command:                 behavior control
+           * # architecture can override this routine.
+           *   the default implementation is invoke ftrace_run_stop_machine(@command),
+           *   and which function will stop machine and invoke __ftrace_modify_code().
+           *   __ftrace_modify_code() is a wrapper call to ftrace_modify_all_code().
+           */
+          void __weak arch_ftrace_update_code(int command);
+
+          /**
+           * ftrace_modify_all_code - crossroads to how process update code.
+           * @command:                ftrace command
+           */
+          void ftrace_modify_all_code(int command);
+
+          description for ftrace_modify_all_code() :
+            first,it extrace FTRACE_UPDATE_TRACE_FUNC from @command into local
+            object @update.
+            local object modify flags @mod_flags is default to 0,if FTRACE_MAY_SLEEP
+            is enabled,set it to FTRACE_MODIFY_MAY_SLEEP_FL.
+            next,check @update.
+            if we updated ftrace function,we need update the code to
+            ftrace_ops_list_func() at first.
+            so,invoke update_ftrace_func(@ftrace_ops_list_func),if any error happened,
+            give up modify code.
+            proceed test @command.
+            if FTRACE_UPDATE_CALLS is enabled,call to ftrace_replace_code(),pass it
+            (@mod_flags | FTRACE_MODIFY_ENABLE_FL) as argument.
+            otherwise,call to the same routine but only pass it @mod_flags.
+            continue executing.
+            if @update is true AND @ftrace_trace_function is not ftrace_ops_list_func(),
+            we need to use the function @ftrace_trace_function to modify the code.
+            this also will be accomplished by update_ftrace_func(),but before call to
+            it,we need to use @fuction_trace_op to records current function trace op,
+            that is @set_function_trace_op.those two pointer are defined in the same
+            file,but @set_function_trace_op is static linkage.@set_function_trace_op
+            is set by update_ftrace_function(),if we come from sysctl enable ftrace
+            kernel control path,it maybe called before ftrace_startup_sysctl() is
+            called by ftrace_enable_sysctl().
+            the last checking is FTRACE_START_FUNC_RET,if this flag is enabeld in
+            @command,ftrace_enable_ftrace_graph_caller() will be called to enable
+            ftrace graph,otherwise,ftrace_disable_ftrace_grap_caller() is called.
+
+            ! different from update_ftrace_func(),function update_ftrace_function()
+              only setup @set_function_trace_op,and maybe set @ftrace_trace_function.
+              but does not execute code modification.
+
+          /**
+           * update_ftrace_func - this routine will invoke architecture-dependent
+           *                      routine ftrace_update_ftrace_func().
+           * @func:               the ftrace_trace_function
+           * return:              return what ftrace_update_ftrace_func() returned
+           * # this routine use local object @save_func to temporarily save
+           *   @func before call to ftrace_update_ftrace_func().before storing,
+           *   it must check whether @save_func been setup(it is static linkage),
+           *   in this case,another CPU is doing modify code,thus we give up to
+           *   it this time and return 0(no error).
+           */
+          static int update_ftrace_func(ftrace_func_t func);
+
+        <arch/x86/kernel/ftrace.c>
+          /**
+           * ftrace_update_ftrace_func - architecture-dependent function to
+           *                             modify content in .text section.
+           * @func:                      ftrace_trace_function
+           * return:                     0
+           */
+          int ftrace_update_ftrace_func(ftrace_func_t func);
+
+          description for ftrace_update_ftrace_func() :
+            this function calls twice the function ftrace_call_replace().
+            the first once,it need to modify code at position @ftrace_call,
+            the label in assembly function @ftrace_caller().
+            the second once,is the code at position @ftrace_regs_call,
+            which is the label in assembly function @ftrace_regs_caller.
+            both functions are defined in <ftrace_64.S>.
+            function ftrace_call_replace() is defined in the same file,which
+            receives two parameters,@ip and @addr,returns a const char pointer.
+            the const char pointer,actually will points to a union member named
+            @text,the union object is static linkage,declared in text_gen_insn(),
+            whose type is "union text_poke_insn".
+            @ip is the rip position where code need to be modified,@addr is
+            the jump to address or call to address.
+            if ftrace_is_jmp() on @addr is true,ftrace_jmp_get() will be called
+            on @addr to get address that suit for "jmp" instruction,then
+            invoke text_gen_insn(),pass it JMP32_INSN_OPCODE flag,@ip,and the
+            new address suit for "jmp",to create machine code corresponding to
+            "jmp" instruction.
+            if @addr is not a "jmp" address,then CALL_INSN_OPCODE flag is passed
+            to text_gen_insn(),@ip and @addr remain unchanged,to create machine
+            code corresponding to "call" instruction.
+            after ftrace_call_replace() returned,ftrace_update_ftrace_func()
+            invoke smp_text_poke_single() to install single instruction to
+            the expected position(@ip points to),of course,the MCOUNT_INSN_SIZE
+            need to be considered.(once ftrace_call_replace() returned,call once
+            smp_text_poke_single())
+
+            ! both text_gen_insn() and smp_text_poke_single() are defined in
+              header <arch/x86/include/asm/text-patching.h>.
+
+
+
+
+
+
+                        
+
+
+
+        
+                
               
