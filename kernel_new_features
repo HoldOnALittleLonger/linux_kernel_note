@@ -1232,6 +1232,372 @@ ftrace :
             ! both text_gen_insn() and smp_text_poke_single() are defined in
               header <arch/x86/include/asm/text-patching.h>.
 
+        at the high-level of ftrace,structure ftrace_regs is used to represents
+        the registers saved by the macro @save_mcount_regs.but,actually,this
+        structure is empty,just used as a mark type.
+          <linux/ftrace.h>
+            struct ftrace_regs {
+                    /* nothing,use the accessor functions */
+            };
+        the position of register contents on stack depends on architecture
+        implementation,and the positions maybe changed,thus we need accessors
+        to access those registers.
+        the accessor functions are defined in <linux/ftrace_regs.h>.
+          /* if no HAVE_ARCH_FTRACE_REGS */
+
+          /* pt_regs wrapper to ftrace regs for platform has no ftrace regs */
+          struct __arch_ftrace_regs {
+                  struct pt_regs regs;
+          };
+
+          /* force type conversion */
+          #define arch_ftrace_regs(fregs) ((struct __arch_ftrace_regs *)(fregs))
+
+          /* retrieve on-stack rip content,instruction_pointer() is 
+           * architecture-dependent and defined in <arch/x86/include/asm/ptrace.h>
+           * as a static __always_inline function.
+           */
+          #define ftrace_regs_get_instruction_pointer(fregs) \
+                  instruction_pointer(&arch_ftrace_regs(fregs)->regs)
+
+          /* get the n-th argument */
+          #define ftrace_regs_get_argument(fregs, n) \
+                  regs_get_kernel_argument(&arch_ftrace_regs(fregs)->regs, n)
+
+          ...
+
+        structure ftrace_ops is used to describe one operation that is registered
+        on ftrace ops list.
+          <linux/ftrace.h>
+            /**
+             * ftrace_ops - structure used to represents a ftrace operation
+             * @func;       ftrace trace function
+             * @next:       to next ftrace ops
+             * @flags:      ftrace operation flags
+             * @private:    private data
+             * @saved_func: used as a backup of the function that this ops
+             *              is registered at the first time,@func will be
+             *              reset to @saved_func when unregister this ops
+             * @local_hash: ops hash used to speed up find ftrace ops,and
+             *              for ip filter
+             * @func_hash:  pointer points to ops hash,used to set filter
+             *              for this ops
+             * @old_hash:   the old hash
+             * @trampoline: trampoline code position of this ops
+             * @trampoline_size:
+             *              size of trampoline code of this ops
+             * @list:       linker used to link this ops into global trampoline
+             *              list
+             * @subop_list: linker used to links sub-ftrace-ops to the 
+             *              parent ftrace-ops
+             * @ops_func:   ops function,used for BPF
+             * @managed:    used by subops points to parent ops
+             * @direct_call:
+             *              a trampoline address to be called directly,this
+             *              usually is the location "nop" in the registered
+             *              functions of this ops.on x86 platform,this
+             *              address wil be saved in ORIG_AX.
+             *              if it is set in the ftrace trampoline,then it makes
+             *              the return from the trampoline jump to the direct caller
+             *              instead of going back to the function it just traced.
+             *              such changing happens in assembly function
+             *              ftrace_regs_caller
+             */
+            struct ftrace_ops {
+                    ftrace_func_t func;
+                    struct ftrace_ops __rcu *next;
+                    unsigned long flags;
+                    void *private;
+                    ftrace_func_t saved_func;
+
+            #ifdef CONFIG_DYNAMIC_FTRACE
+                    struct ftrace_ops_hash local_hash;
+                    struct ftrace_ops_hash *func_hash;
+                    struct ftrace_ops_hash old_hash;
+                    unsigned long trampoline;
+                    unsigned long trampoline_size;
+                    struct list_head list;
+                    struct list_head subop_list;
+                    ftrace_ops_func_t ops_func;
+                    struct ftrace_ops *managed;
+            
+            #ifdef CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS
+                    unsigned long direct_call;
+            #endif
+
+            #endif
+            };
+
+            /**
+             * ftrace ops flags,describes state of ftrace_ops.
+             * BIT(nr) => (UL(1) << (nr))
+             */
+            enum {
+                    /* indicates whehter ftrace_ops is registered */
+                    FTRACE_OPS_FL_ENABLED                   = BIT(0),
+        
+                    /* ftrace_ops is dynamically allocated */
+                    FTRACE_OPS_FL_DYNAMIC                   = BIT(1),
+
+                    /* ftrace_ops wants regs saved at each function called and
+                     * passed to the callback.
+                     * if platform does not support this,register will
+                     * failed.
+                     */
+                    FTRACE_OPS_FL_SAVE_REGS                 = BIT(2),
+
+                    /* same as SAVE_REGS,if arch does not support
+                     * save regs,register would not failed,but
+                     * the regs field will be NULL.
+                     */
+                    FTRACE_OPS_FL_SAVE_REGS_IF_SUPPORTED    = BIT(3),
+
+                    /* call back needs recursion protection.
+                     * if not this flag,ftrace inftrastructure will
+                     * assume that the callback can handle recursion
+                     * on its own.
+                     */
+                    FTRACE_OPS_FL_RECURSION                 = BIT(4),
+
+                    /* this ftrace_ops just a placeholder */
+                    FTRACE_OPS_FL_STUB                      = BIT(5),
+
+                    /* ftrace_ops has already been initialized */
+                    FTRACE_OPS_FL_INITIALIZED               = BIT(6),
+
+                    /* ftrace_ops being deleted,do not register them
+                     * again.
+                     */
+                    FTRACE_OPS_FL_DELETED                   = BIT(7),
+
+                    /* ftrace_ops is in the process of being added. */
+                    FTRACE_OPS_FL_ADDING                    = BIT(8),
+
+                    /* ftrace_ops is in the process of being removed. */
+                    FTRACE_OPS_FL_REMOVING                  = BIT(9),
+
+                    /* ftrace_ops is in the process of changing its
+                     * filter functions.
+                     */
+                    FTRACE_OPS_FL_MODIFYING                 = BIT(10),
+
+                    /* a dynamic trampoline was allocated by the core code.
+                     * arch specific code sets this flag when it allocted
+                     * a trampoline.
+                     * ! only arch ftrace core code should set this flag.
+                     */
+                    FTRACE_OPS_FL_ALLOC_TRAMP               = BIT(11),
+
+                    /* ftrace_ops can modify the rip register.
+                     * can only set when SAVE_REGS is set.
+                     * if another ops with this flag set is already registered
+                     * for any of the functions that this ops will be registered
+                     * for,then this ops will fail to register or set_filter_ip.
+                     */
+                    FTRACE_OPS_FL_IPMODIFY                  = BIT(12),
+
+                    /* is affected by set_ftrace_pid.
+                     * (allows filtering on those pids)
+                     */
+                    FTRACE_OPS_FL_PID                       = BIT(13),
+
+                    /* set when the ops can only be called when RCU is
+                     * watching.
+                     */
+                    FTRACE_OPS_FL_RCU                       = BIT(14),
+
+                    /* ftrace_ops->private points to a trace_array descriptor */
+                    FTRACE_OPS_FL_TRACE_ARRAY               = BIT(15),
+
+                    /* ftrace_ops is permanent and should not be affected
+                     * by ftrace_enabled.
+                     */
+                    FTRACE_OPS_FL_PERMANENT                 = BIT(16),
+
+                    /* used by the direct ftrace_ops helper for direct
+                     * functions.
+                     * (internal ftrace only,should not be used by others)
+                     */
+                    FTRACE_OPS_FL_DIRECT                    = BIT(17),
+
+                    /* ftrace_ops is controlled by another op in @managed */
+                    FTRACE_OPS_FL_SUBOP                     = BIT(18),
+
+                    /* ftrace_ops is a component of the fgraph_ops structure */
+                    FTRACE_OPS_FL_GRAPH                     = BIT(19),
+            };
+
+        in file <kernel/trace/ftrace.c>,some global objects are defined and used
+        to maintains global ftrace settings.
+          <kernel/trace/ftrace.c>
+            /**
+             * ftrace_ops_list - list to collects the registered ftrace opses.
+             *                   it default points to @ftrace_list_end.
+             */
+            struct ftrace_ops __rcu *ftrace_ops_list __read_mostly;
+
+            /**
+             * ftrace_list_end - the initial ftrace ops,its @func points
+             *                   to ftrace_stub(),@flags is FTRACE_OPS_FL_STUB.
+             */
+            struct ftrace_ops ftrace_list_end __read_mostly;
+
+            /**
+             * ftrace_trace_function - the global trampoline for ftrace callers,
+             *                         default points to ftrace_stub().
+             */
+            ftrace_func_t ftrace_trace_function __read_mostly;
+
+            /**
+             * global_ops - the global tracer,can be used as a global ftrace ops
+             *              filter for other newly registered ftrace opses.
+             */
+            struct ftrace_ops global_ops;
+            
+            /**
+             * ftrace_lock - system-wide mutex used to protect ftrace operations
+             */
+            DEFINE-MUTEX(ftrace_lock);
+
+            /**
+             * ftrace_disabled - an indicator
+             *                   1 => ftrace disbaled,0 => ftrace enabled
+             */
+            static int ftrace_disabled __read_mostly;
+
+            /**
+             * saved_ftrace_func - the function saved in the last ftrace enable
+             *                     phase.
+             *                     default to NULL.
+             */
+            static ftrace_func_t saved_ftrace_func;
+
+            /**
+             * ftrace_start_up - counter of times that ftrace_startup() is called.
+             *                   increase when @ftrace_disabled is false in
+             *                   ftrace_startup()
+             */
+            static int ftrace_start_up;
+
+        the initial ftrace_trace_func is the ftrace_ops_list_func when ftrace
+        is enabled.(in ftrace_modify_all_code() on the enable kernel control path)
+          <kernel/trace/ftrace.c>
+            /**
+             * ftrace_ops_list_func - the initial ftrace trace function,defined in
+             *                        header <vmlinux.lds.h>,and in which,
+             *                        ftrace_ops_list_func() is defined to
+             *                        arch_ftrace_ops_list_func().
+             * # some arch does not support pass @op and @fregs,only pass
+             *   @ip and @parent_ip.
+             *   for the arch has no ARCH_SUPPORTS_FTRACE_OPS,arch_ftrace_ops_list_func()
+             *   is defined to only receieves @ip and @parent_ip.
+             *   arch_ftrace_ops_list_func() will calls to __ftrace_ops_list_func(),
+             *   for no ARCH_SUPPORTS_FTRACE_OPS,@op and @fregs are set to NULL.
+             * # arch_ftrace_ops_list_func() is NOKPROBE_SYMBOL.
+             */
+            void ftrace_ops_list_func(unsigned long ip, unsigned long parent_ip,
+                                      struct ftrace_ops *op,
+                                      struct ftrace_regs *fegs);
+
+            /**
+             * __ftrace_ops_list_func - the primary procedure of the initial
+             *                          ftrace_ops_list_func(),for each registered
+             *                          ftrace ops on @ftrace_ops_list,invoke
+             *                          the callback with receieved arguments.
+             * @ip:                     child function rip
+             * @parent_ip:              parent function rip
+             * @ignored:                ftrace_ops descriptor
+             * @fregs:                  saved ftrace registers
+             */
+            static nokprobe_inline void
+            __ftrace_ops_list_func(unsigned long ip, unsigned long parent_ip,
+                                   struct ftrace_ops *ignored,
+                                   struct ftrace_regs *fregs);
+
+            description for __ftrace_ops_list_func() :
+              this function first uses ftrace_get_regs() on @fregs to get a
+              pt_regs pointer in local object @regs.
+              next,invoke trace_test_and_set_recursion(),pass it @ip,@parent_ip,
+              and TRACE_LIST_START(should be 5).
+              function trace_test_and_set_recursion() will disable preemption
+              temporarily,and enable preemption before return.
+              it will test and set a bit in @trace_recursion field of @current,
+              if recursion is detected,-1 will be returned.
+                      /* # function defined in <linux/trace_recursion.h>.
+                       *
+                       * recursion can happens if an interrupt occurs during
+                       * a trace,and another trace happens in that interrupt but
+                       * before @preempt_count is updated to reflect the new
+                       * interrupt context.
+                       * suppose we are in level-3 interrupt context
+                       *   softirq
+                       *     hardirq
+                       *       non-mask irq
+                       * the mask should be 0x00ff0100
+                       * 
+                       * # bit idx start from 0,the 1-th bit's idx is 0.
+                       *
+                       * if we are in level-1 intr,one of three kinds of intrs,
+                       * we need to check 8-th(idx is 7) bit in @trace_recursion.
+                       * if we are in level-2 intr,two of three kinds of intrs,
+                       * we need to check 7-th(idx is 6) bit in @trace_recursion.    
+                       * if we are in level-3 intr,the NMI,hardirq,softirq,
+                       * we need to check 6-th(idx is 5) bit in @trace_recursion.
+                       * if we are not in any interrupt context,we need to set
+                       * 9-th bit in @trace_recursion to records we are doing
+                       * tracing.
+                       * if we are in an interrupt context,we need to check
+                       * the 9-th bit in @trace_recursion is set.if it is the
+                       * case,that means we are entered tracing recursion,thus
+                       * need to give up tracing this time.
+                       * ! if any trace recursion occurred,we need to mark it
+                       *   in bit 18 of @trace_recursion.
+                       *   # CONFIG_FTRACE_RECORD_RECURSION
+                       */
+              if trace_test_and_set_recursion() returned -1,we immediately return
+              to caller.
+              enter a do-while loop,for each ftrace_ops on @ftrace_ops_list,
+              do {
+                      /* local object @op as iterator */
+                      if @op->flags enabled FTRACE_OPS_FL_STUB,we give up call to
+                      callback,and continue to next iteration.
+                      (if we did that,it is just wasting time)
+                    
+                      if
+                        FTRACE_OPS_FL_RCU is not enabled
+                        AND
+                        current CPU is not in RCU watching state(no CT_RCU_WATCHING
+                        is set in per-CPU variable @context_tracking's @state member)
+                        AND
+                        @op passed ftrace_ops_test(@op, @ip, @regs)
+                                   /* test the hashes for this ops to see if we want
+                                    * to call the ops->func or not.
+                                    * this routine get pointers @filter_hash and
+                                    * @notrace_hash in @op->func_hash via RCU
+                                    * mechanism,then invoke hash_contains_ip()
+                                    * to test whether the @hash contains @ip
+                                    */
+                                if @op->func is NULL,print warning message through
+                                pr_warn(),and goto label "out",this will give up
+                                all the rest ftrace opses.
+                                otherwise,we invoke @op->func().
+              }
+              ! this do-while loop relies on macros
+                  do_for_each_ftrace_op(op, list) =>
+                          op = rcu_dereference_raw_check(list); \
+                          do
+                
+                  while_for_each_trace_op(op) =>
+                          while (likely(op = rcu_dereference_raw_check((op)->next)) && \
+                                 unlikely((op) != &ftrace_list_end))
+
+                  # we have known that @ftrace_list_end is the initial to
+                    @ftrace_ops_list.
+
+              "out":
+                just invoke trace_clear_recursion() to clear trace recursion bit
+                in @current->trace_recursion.
+
 
 
 
