@@ -1519,8 +1519,8 @@ ftrace :
               pt_regs pointer in local object @regs.
               next,invoke trace_test_and_set_recursion(),pass it @ip,@parent_ip,
               and TRACE_LIST_START(should be 5).
-              function trace_test_and_set_recursion() will disable preemption
-              temporarily,and enable preemption before return.
+              function trace_test_and_set_recursion() will returns with preemption
+              disabled if no trace recursion occurs.
               it will test and set a bit in @trace_recursion field of @current,
               if recursion is detected,-1 will be returned.
                       /* # function defined in <linux/trace_recursion.h>.
@@ -1529,30 +1529,88 @@ ftrace :
                        * a trace,and another trace happens in that interrupt but
                        * before @preempt_count is updated to reflect the new
                        * interrupt context.
-                       * suppose we are in level-3 interrupt context
-                       *   softirq
-                       *     hardirq
-                       *       non-mask irq
-                       * the mask should be 0x00ff0100
-                       * 
-                       * # bit idx start from 0,the 1-th bit's idx is 0.
                        *
-                       * if we are in level-1 intr,one of three kinds of intrs,
-                       * we need to check 8-th(idx is 7) bit in @trace_recursion.
-                       * if we are in level-2 intr,two of three kinds of intrs,
-                       * we need to check 7-th(idx is 6) bit in @trace_recursion.    
-                       * if we are in level-3 intr,the NMI,hardirq,softirq,
-                       * we need to check 6-th(idx is 5) bit in @trace_recursion.
-                       * if we are not in any interrupt context,we need to set
-                       * 9-th bit in @trace_recursion to records we are doing
-                       * tracing.
-                       * if we are in an interrupt context,we need to check
-                       * the 9-th bit in @trace_recursion is set.if it is the
-                       * case,that means we are entered tracing recursion,thus
-                       * need to give up tracing this time.
-                       * ! if any trace recursion occurred,we need to mark it
-                       *   in bit 18 of @trace_recursion.
+                       * interrupt context has three level
+                       *   softirq          (lowest priority)
+                       *     hardirq        (middle priority)
+                       *       non-mask irq (highest priority)
+                       *
+                       * NMI mask is 0x00f00000
+                       * hardirq mask is 0x000f0000
+                       * softirq mask is 0x0000ff00
+                       * preempt counter mask is 0x000000ff
+                       * SOFTIRQ_OFFSET => 1UL << 8 => 0x00000100
+                       *
+                       * function interrupt_context_level() returns current
+                       * interrupt context level.
+                       *   0 => normal context
+                       *   1 => softirq context
+                       *   2 => hardirq context
+                       *   3 => NMI context
+                       *
+                       * function trace_test_and_set_recursion() will call to
+                       * interrupt_context_level() indirectly to get current
+                       * interrupt context level,and use it to computes current
+                       * trace context bit order.
+                       *   (TRACE_CTX_NORMAL(value 3) - current interrupt level)
+                       * if the bit has the order(3 - current intr level + 5) in
+                       * @trace_recursion is set,                         #^@start
+                       * that means this tracing occurs in an interrupt.
+                       * so we need to test the bit has order
+                       *   (TRACE_CTX_TRANSITION(value 4) + @start)
+                       * the order 9 is set in @trace_recursion to see if it
+                       * has exceeded maximal recursion depth,if it is the case,
+                       * we need to return -1.
+                       * if we are in normal context,the bit to be test has order
+                       * 3 - 0 + 5 == 8,if the bit is clear,we set the bit,and
+                       * reset @trace_recursion to @trace_recurstion |= (1 << 8).
+                       * ! if any trace recursion occurred,we need to mark the
+                       *   bit has order 17 in @trace_recursion.
                        *   # CONFIG_FTRACE_RECORD_RECURSION
+                       * ! this function returns -1,if trace_warn_on_no_rcu(@ip)
+                       *   returns TRUE,or bit has order
+                       *     (TRACE_CTX_TRANSITION + @start)
+                       *   is set.
+                       * ! if this function returns a value greater than or equal
+                       *   to 0,it will invoke preempt_disable_notrace() before
+                       *   return.
+                       *   except this function returns -1,it always set the
+                       *   corresponding bit in @trace_recursion to mark trace
+                       *   in current context is in progessing.
+                       *
+                       *        TRACE_FTRACE_START => 0
+                       *
+                       *        normal => 0 => 3 - 0 => 3 => 1 << 3 => 01000
+                       *        sirq   => 1 => 3 - 1 => 2 => 1 << 2 => 00100
+                       *        hirq   => 2 => 3 - 2 => 1 => 1 << 1 => 00010
+                       *        nirq   => 3 => 3 - 3 => 0 => 1 << 0 => 00001
+                       *
+                       *        trace ctx transition  => 10000
+                       *      
+                       *        begin: 00000(@trace_recursion)
+                       *        trace in normal: become 01000
+                       *        interrupt to softirq,current 01000
+                       *        trace in softirq: become 01100
+                       *        interrupt to nmi,current 01100
+                       *        trace in nmi: become 01101
+                       *        interrupt to nmi,current 01101
+                       *        trace in nmi: 01101 => same context,
+                       *                               check trace recursion.
+                       *                   bit = TRACE_CTX_TRANSITION + @start
+                       *                 # bit = 4
+                       *                         1 << 4 => 10000
+                       *                                 & 01101
+                       *                                => 00000 recursion,but
+                       *                                         has not exceed
+                       *                                         max depth
+                       *        mark transition: become 11101
+                       *        interrupt to nmi,current 11101
+                       *        trace in nmi: 11101 => same context,check recursion.
+                       *                   bit = 4
+                       *                         1 << 4 => 10000
+                       *                                 & 11101
+                       *                                => 10000 recursion exceeded
+                       *                                         max depth,return -1
                        */
               if trace_test_and_set_recursion() returned -1,we immediately return
               to caller.

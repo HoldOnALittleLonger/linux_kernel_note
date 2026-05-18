@@ -3166,6 +3166,18 @@ Chapter 3 : Processes
                */
               extern asmlinkage void math_state_restore(void);
 
+              ! "asmlinkage" is a macro defined in <linux/linkage.h>.
+                it will be expanded to CPP_ASMLINKAGE,which also is a macro defined
+                in the same file.
+                CPP_ASMLINKAGE is expanded to 'extern "C"'.
+                in kernel,functions that are "asmlinkage" tagged means they must get
+                arguments from stack rather than from registers.
+                for example,userspace program issues system call,pass arguments into
+                registers,but when context switched,the User Mode register contents
+                will be saved on the stack,and the registers would be reused by
+                kernel functions,thus the system call service routine must get its
+                arguments from the stack.
+
               /*  __math_state_restore - restores fpu for @tsk and set TS_USEDFPU.
                *  #  @tsk = thread->task;  =>
                *     @thread = current_thread_info();
