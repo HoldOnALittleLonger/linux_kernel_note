@@ -990,6 +990,15 @@ ftrace :
         usually,we need to export "mcount" symbol for modules.
                 extern void mcount(void);
                 EXPORT_SYMBOL(mcount);
+        ! modern compiler use "fentry" to intead "mcount" for profiling.for the
+          kernel components,they executes instruction "call __fentry__".
+          if has CONFIG_DYNAMIC_FTRACE,__fentry__ assembly function does the same
+          as ftrace_stub() does.
+          if has no CONFIG_DYNAMIC_FTRACE,it compares @ftrace_stub and the
+          @ftrace_trace_function,not equal then save mcount regs,and invoke the
+          @ftrace_trace_function,after restore mcount regs,it jumps to ftrace_stub().
+          the assembly function ftrace_caller() only available when CONFIG_DYNAMIC_FTRACE
+          is defined.
 
         because mcount() will be called a lot of times,we need optimize it when
         ftrace is not enabled,to improve performance of OS in normal case.
@@ -1178,6 +1187,9 @@ ftrace :
             ! different from update_ftrace_func(),function update_ftrace_function()
               only setup @set_function_trace_op,and maybe set @ftrace_trace_function.
               but does not execute code modification.
+              /* set to ftrace_stub(),or ftrace_ops_list_func(),or @func of the
+               * first ftrace_ops in global list,or ftrace_assist_func().
+               */
 
           /**
            * update_ftrace_func - this routine will invoke architecture-dependent
@@ -1427,6 +1439,34 @@ ftrace :
                     FTRACE_OPS_FL_GRAPH                     = BIT(19),
             };
 
+        structure dyn_ftrace is used to represents a ftrace record.
+          <linux/ftrace.h>
+            struct dyn_ftrace {
+                    unsigned long ip;   /* address of mcount call-site */
+                    unsigned long flags; /* record flags */
+                    struct dyn_arch_ftrace arch; /* arch-spec record */
+                                                 /* x86 has no extra data */
+            };
+        
+            ! if we come from sysctl enable ftrace kernel control path,then
+              the function ftrace_replace_code() must be called with 
+              FTRACE_MODIFY_ENABLE_FL.
+              in function ftrace_replace_code(),for each ftrace records in
+              ftrace pages(start from @ftrace_pages_start),if we can not 
+              skip it,then invoke __ftrace_replace_code() on the record
+              with parameter @enable == 1.
+              in the helper function,it get ftrace address via function 
+              ftrace_get_addr_new() on the @rec.
+              the returned address maybe one of the following:
+                ftrace_find_rec_direct(@rec->ip) returned address
+                @trampoline of ftrace_ops object that corresponds to this @rec
+                the common path FTRACE_ADDR => ftrace_caller
+                the common path FTRACE_REGS_ADDR => ftrace_stub_caller
+              we may enter FTRACE_UPDATE_MAKE_CALL branch,then ftrace_make_call()
+              is called,pass it the @rec and the ftrace address.
+              that function will generate "call" instruction at the rip position
+              pointed by @rec->ip.
+
         in file <kernel/trace/ftrace.c>,some global objects are defined and used
         to maintains global ftrace settings.
           <kernel/trace/ftrace.c>
@@ -1479,6 +1519,28 @@ ftrace :
              */
             static int ftrace_start_up;
 
+            /* list of trace_ops that have allocated trampolines */
+            static LIST_HEAD(ftrace_ops_trampoline list);
+
+        sysctl enable ftrace kernel control path(initial state) :
+          ftrace_enable_sysctl() -> ftrace_startup_sysctl() ->
+          ftrace_startup_enable() -> ftrace_run_update_code() ->
+          ftrace_run_stop_machine() -> __ftrace_modify_code() ->
+          ftrace_modify_all_code()
+                  |
+                  V
+                  |=> update_ftrace_func(@ftrace_ops_list_func);
+                  V   # system-wide,"call to ftrace_ops_list_func",default behavior.
+                  |     when a record need to modify mcount call-site,
+                  |     rip will jump to trampoline or common path,and finally,
+                  |     callback of that record would be called when
+                  |     CPU hits the mcount call-site rip.
+                  |     # callback called by list handling function or by the
+                  |       machine code in trampoline.
+                  |=> ftrace_replace_code(FTRACE_MODIFY_ENABLE_FL);
+                  V
+                 ...
+
         the initial ftrace_trace_func is the ftrace_ops_list_func when ftrace
         is enabled.(in ftrace_modify_all_code() on the enable kernel control path)
           <kernel/trace/ftrace.c>
@@ -1520,7 +1582,8 @@ ftrace :
               next,invoke trace_test_and_set_recursion(),pass it @ip,@parent_ip,
               and TRACE_LIST_START(should be 5).
               function trace_test_and_set_recursion() will returns with preemption
-              disabled if no trace recursion occurs.
+              disabled if no trace recursion occurs,function trace_clear_recursion()
+              can clear the trace recursion mark and enable preemption again.
               it will test and set a bit in @trace_recursion field of @current,
               if recursion is detected,-1 will be returned.
                       /* # function defined in <linux/trace_recursion.h>.
@@ -1656,15 +1719,205 @@ ftrace :
                 just invoke trace_clear_recursion() to clear trace recursion bit
                 in @current->trace_recursion.
 
-
-
-
-
-
-                        
-
-
-
+        kernel function __register_ftrace_function() can be used to register a
+        ftrace ops,when we registering a ftrace ops,usually,need to create a
+        new trampoline or update the old one.for dynamic trace is supported
+        platform,the trampoline is @ftrace_caller assembly function,if the
+        platform supports ftrace registers,then the trampoline will be
+        ftrace_regs_caller the assembly function.
+          <kernel/trace/ftrace.c>
+            /**
+             * __register_ftrace_function - register a ftrace operation
+             * @ops:                        ftrace ops
+             * return:                      0 OR error code
+             */
+            int __register_ftrace_function(struct ftrace_ops *ops);
         
-                
-              
+            description for __register_ftrace_function() :
+              at the beginning,this routine need to checks @ops->flags.
+              this @ops cant be
+                      DELETED
+                      ENABLED
+                      @ftrace_enabled is FALSE but @ops is PERMANENT
+            
+                      /* addition */
+                      for case CONFIG_DYNAMIC_FTRACE_WITH_REGS is defined
+                              SAVE_REGS without SAVE_REGS_IF_SUPPORTED
+                              if no SAVE_REGS but has SAVE_REGS_IF_SUPPORTED
+                                enabled SAVE_REGS in @ops->flags
+              if @ops is not kernel core data,DYNAMIC will be enabled in
+              @ops->flags.
+              the @ops will be added into @ftrace_ops_list,and @ops->saved_func
+              records current @ops->func.
+              if @ops is ftrace_pids_enabled(),then set @ops->func to
+              ftrace_pid_func(),in this case,@ops->private should points to a
+              trace_array object. /* if no PID flags,or @private is NULL,or
+                                   * "@private->function_pids is NULL and
+                                   *  @private->function_no_pids is NULL",
+                                   * return false.
+                                   */
+              next,invoke ftrace_update_trampoline() on @ops to create or update
+              trampoline.
+              function update_ftrace_function() maybe called when @ftrace_enabled
+              is 1,that is ftrace is enabled.
+              finally,return 0.
+
+        how to allocate trampoline and update it are depends on architecture,thus
+        function ftrace_update_trampoline() just an entrypoint to the architecture
+        depended function arch_ftrace_update_trampoline().
+        maybe @ops->trampoline is pre-allocated,in this case,if the new trampoline
+        is not the same as the old one,and ALLOC_TRAMP flag is set in @ops->flags,
+        ftrace_update_trampoline() will adds this @ops to the global list
+        @ftrace_ops_trampoline_list,use the @ops->list member,then feeds perf
+        event.
+          <arch/x86/kernel/ftrace.c>
+            /**
+             * arch_ftrace_update_trampoline - the architecture-dependent function
+             *                                 to create or update trampoline for
+             *                                 a ftrace_ops
+             * @ops:                           the ftrace_ops
+             */
+            void arch_ftrace_update_trampoline(struct ftrace_ops *ops);                
+            
+            description for arch_ftrace_update_trampoline() :
+              if this @ops has no trampoline,we invoke create_trampoline() to
+              allocate a new one.succeed to allocate new trampoline,use it and
+              its size to set corresponding members in @ops,failed,just return.
+              /* trampoline allocation may failed,indeed,in this case,no error
+               * report.we must use the old one,or register @ops without a
+               * trampoline,use the common one(defined by @ftrace_ops_list_func(),
+               * and this ftrace ops will be handled by ftrace_ops_list_func())
+               */
+              @ops caller may set up its own trampoline,thus ALLOC_TRAMP flag
+              need to be set in @ops->flags,otherwise,we give up it.
+              next,function calc_trampoline_call_offset() is called,pass it a
+              boolean value to indicates whether or not SAVE_REGS is set.
+              no regs case
+                      start offset is ftrace_caller()
+                      call offset is ftrace_call label
+              has regs case
+                      start offset is ftrace_regs_caller()
+                      call offset is ftrace_regs_call label
+              this function finally,returns a displacement based on start offset to
+              call offset.
+              we compute rip based on the returned offset,new rip is current trampoline
+              adds the offset.
+              invoke ftrace_ops_get_func() helper on @ops to get ftrace function,we need
+              this helper,because if RECURSION and RCU flags are set,the function must
+              be ftrace_ops_assist_func(),otherwise is the @ops->func.
+              now we has the trampoline rip,and the function address,acquire @text_mutex,
+              invoke ftrace_call_replace(),use a "jmp" or a "call" instruction to replace
+              the instruction at rip,let the ftrace function can be called later.
+              release @text_mutext and returns.
+
+            /**
+             * create_trampoline - create a trampoline for a ftrace ops
+             * @ops:               the ops
+             * @trampoline_size:   pointer to an object used to saves the size
+             *                     of new created trampoline
+             * return:             address to the trampoline
+             */
+            static unsigned long
+            create_trampoline(struct ftrace_ops *ops, unsigned int *trampoline _size);
+
+            description for create_trampoline() :
+              1> prepare opcode bytes.
+                 @op_ref => "movq <offset>(%rip), %rdx" <= 0x48 0x8b 0x15
+                 @retq   => "ret" <= 0xc3, "int3" <= 0xcc
+                 the @op_ref is used to move address of @ops to rdx.
+                 the @retq is used to return from trampoline.
+              2> if SAVE_REGS
+                         start-offset => ftrace_regs_caller()
+                         end-offset   => ftrace_regs_caller_end
+                         op-offset    => ftrace_regs_caller_op_ptr
+                         call-offset  => ftrace_regs_call
+                         jmp-offset   => ftrace_regs_caller_jmp
+                 no SAVE_REGS
+                         start-offset => ftrace_caller()
+                         end-offset   => ftrace_caller_end
+                         op-offset    => ftrace_caller_op_ptr
+                         call-offset  => ftrace_call
+                         jmp-offset   => 0
+                 those function and symbols are defined in
+                 <arch/x86/kernel/ftrace_64.S>,for no regs,
+                 ftrace_caller() do not needs jump instruction.
+                 but for regs,if ORIG_RAX is no _zero_,it may needs jump to
+                 other where,and if necessary,invoke do_rebalance().
+              3> the size of machine code need to be copied into trampoline is
+                 "end-offset - start-offset".
+                 this function then invoke alloc_tramp() with the size
+                   machine code size + RET_SIZE + sizeof(void *)
+                                      #^"ret" ins #^pointer to @ops
+                 routine alloc_tramp() is a wrapper to execmem_alloc_rw(),pass it
+                 size and type EXECMEM_FTRACE.
+                 /* may allocated from execmem cache,or through a new
+                  * execmem vmalloc.
+                  */
+                 if returnd address is NULL,just return 0 and give up create
+                 trampoline.
+              4> we got the trampoline space,so set @tramp_size.
+                 invoke copy_from_kernel_nofault() to copy machine code start
+                 from start-offset into trampoline,goto label fail if failed.
+                 now we need to install "ret" instruction,the rip where to
+                 place ret instruction is right after the copied machine code
+                 in trampoline.(@ip = trampoline + machine code size)
+                 if cpu_wants_rethunk_at() the position,generate instructions
+                 that jump from there to __x86_return_thunk symbol.(secure return)
+                 otherwise,just write @retq at the position.
+              5> if SAVE_REGS is enabled,we need to copy machine code pointed by
+                 pointer at @x86_nops[2],size is 2 bytes.
+                 for 32 bit,machine code is
+                         0x89 0xf6 => "movl %esi, %esi"
+                 for 64 bit,machine code is
+                         0x66 0x90 => "osp nop"
+                 place it at jmp-offset.
+                 if machine code before copying at jmp-offset is not 0x75,or the
+                 copying failed,goto label "fail".
+              6> place the pointer @ops at the position after ret instructions.
+                 /* @ptr = trampoline + machine code size + RET-SIZE */
+                 copy machine code at op-offset in trampoline to local object
+                 @op_ptr,it is type of union ftrace_op_code_union.
+                 next,compare @op_ptr.op with @op_ref,if they are not equal,
+                 goto label "fail".
+                 /* if the machine code copied from start-offset has not been
+                  * changed,it must be "movq function_trace_op(%rip), %rdx".
+                  */
+              7> set @op_ptr.offset with the displacement from next instruction
+                 of @op_ptr.op to the position where @ops is stored.(@ptr)
+                 copy the instruction that load address of @ops to rcx register
+                 to the position op-offset in trampoline.
+                 /**
+                  * union ftrace_op_code_union has two members,one is 
+                  * a char array named @code has size OP_REF_SIZE.
+                  * another one is an anonymous structure with "packed" attribute,
+                  * which has two members,@op is a char array with size 3,@offset
+                  * is type of in.
+                  * we modify @offset of this structure,is equal to reconstruct
+                  * instruction "leaq function_trace_op(%rip), %rdx" to let it
+                  * refer to the correct offset where @ops is stored.
+                  */
+               8> now,we need to hack machine code at call-offset,at where the
+                  instruction "call ftrace_stub" is placed,we must reconstruct
+                  it to "call <ftrace_ops's function>".
+                  so we acquire @text_mutex,invoke ftrace_ops_get_func() on
+                  @ops,this function returns @ops->func or ftrace_assist_func(),
+                  the second routine specific to RECURSION and RCU.
+                  we invoke text_gen_insn() to create "call" instruction at
+                  "trampoline + call-offset" that call to the ftrace function,
+                  and copy the constructed machine code to position
+                  "trampoline + call-offset",size is CALL_INSN_SIZE.
+                  release @text_mutex,and enable ALLOC_TRAMP flag in @ops.
+                  invoke set_memory_rox(),pass it trampoline start point and
+                  number of pages that computed from @tramp_size,this function
+                  will set page protection flag _PAGE_RW | _PAGE_DIRTY,and other
+                  page attributes.
+               9> finally,we return the new trampoline address.
+
+               "fail": /* error handling */
+                 just tramp_free() the trampoline and return 0.
+
+               !! FROM DESCRIPTION OF THIS FUNCTION,WE CAN KNOW THAT THE ASSEMBLY
+                  FUNCTION SUCH "ftrace_caller" IS A "TEMPLATE",THE COMPILED MACHINE
+                  CODE CORRESPONDS TO IT WILL BE COPIED INTO OUR TRAMPOLINE,AND
+                  PROCESS SOME ADJUSTION SUCH LOAD THE CORRECT @ops DESCRIPTOR
+                  AND CALL TO THE CALLBACK FUNCTION IN THE @ops.
