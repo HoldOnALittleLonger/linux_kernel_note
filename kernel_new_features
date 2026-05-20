@@ -1725,6 +1725,9 @@ ftrace :
         platform,the trampoline is @ftrace_caller assembly function,if the
         platform supports ftrace registers,then the trampoline will be
         ftrace_regs_caller the assembly function.
+        ! __register_ftrace_function() will be called by ftrace_startup(),
+          and which function is called by register_ftrace_function_nolock(),
+          we should invoke register_ftrace_function() as instead.
           <kernel/trace/ftrace.c>
             /**
              * __register_ftrace_function - register a ftrace operation
@@ -1921,3 +1924,68 @@ ftrace :
                   CODE CORRESPONDS TO IT WILL BE COPIED INTO OUR TRAMPOLINE,AND
                   PROCESS SOME ADJUSTION SUCH LOAD THE CORRECT @ops DESCRIPTOR
                   AND CALL TO THE CALLBACK FUNCTION IN THE @ops.
+
+        call to function ftrace_startup() is important,it will invoke
+        __register_ftrace_function() on @ops to create trampoline,link it into
+        global list.except this,it may call to ftrace_startup_enable() with
+        FTRACE_UPDATE_CALLS enabled in the command,this modify flag will let
+        ftrace_replace_code() to make call for the new ftrace record,that we
+        can get chance to let the traced function jump to our trampoline.
+          <kernel/trace/ftrace.c>
+            /**
+             * ftrace_startup - routine to start up ftrace
+             * @ops:            ftrace ops
+             * @command:        control command
+             * return:          0 OR error code
+             * # register_ftrace_function_nolock() call to this routine
+             *   with @command == 0.
+             */
+            int ftrace_startup(struct ftrace_ops *ops, int command);
+
+            description for ftrace_startup() :
+              return if ftrace is disabled.
+              invoke __register_ftrace_function() on @ops to register it
+              and try to create trampoline.
+              return to caller if registeration failed.
+              increase @ftrace_start_up.
+              enable flags ENABELD | ADDING in @ops->flags.
+              call to ftrace_hash_ipmodify_enable() on @ops,it retrieves
+              @ops->func_hash->filter_hash in local object @hash,if the
+              hash is empty,set @hash to NULL,then call to
+              __ftrace_hash_update_ipmodify(),pass it @ops, EMPTY_HASH,
+              @hash and false.
+              /**
+               * __ftrace_hash_update_ipmodify() try to update IPMODIFY
+               * flag on each ftrace_rec,return 0 if it is OK or no-needed
+               * to update.
+               * return error code when failed.
+               * for each ftrace records in ftrace record pages,if the
+               * record's @ip is in @new_hash,the third parameter of
+               * this function
+               *         it enabled IPMODIFY AND @ops->flags enabled IPMODIFY,
+               *         rollback the records that have enabled IPMODIFY in
+               *         the loop.if @ops->flags has no IPMODIFY,call to
+               *         @ops->ops_func() with FTRACE_OPS_CMD_ENABLE_SHARE_IPMODIFY_SELF,
+               *         if @ops_func is not NULL;for the NULL case,return -EBUSY.
+               *         if the record has no IPMODIFY AND @ops->flags has IPMODIFY,
+               *         set the flag in the record.
+               * for records in the @old_hash,the second parameter of this function,
+               * disable IPMODIFY in the record.
+               * # if the @update_traget,the fourth parameter is false AND the record
+               *   in old and new at same time,or it is not in old and new at same time,
+               *   give up current record.
+               */            
+              if ftrace_hash_ipmodify_enable() returned a negative value,we rollback
+              this @ops -- unregister it,free trampoline if has any,return error code.
+              otherwise,we go to invoke ftrace_startup_enable() with @command,if
+              ftrace_hash_rec_enable() on this @ops,FTRACE_UPDATE_CALLS will be set
+              in @command,then ftrace_startup_enable() will let ftrace_replace_code()
+              to make calls to our trampoline.
+              /* ftrace_hash_rec_enable() invoke ftrace_hash_rec_update_modify(),
+               * pass it the @ops and @inc == true.
+               * this routine will update functions @ops traces when its filter changes.
+               * # call to __ftrace_hash_rec_update().
+               *   update flags of records in ftrace record pages.
+               */
+              before return 0,function disable ADDING flag in @ops->flags.
+
