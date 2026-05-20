@@ -1989,3 +1989,100 @@ ftrace :
                */
               before return 0,function disable ADDING flag in @ops->flags.
 
+        the operations sequence to register a callback,and trace the function
+        that we want to trace is
+                struct ftrace_ops *ops = kmalloc(sizeof(struct ftrace_ops), GFP_KERNEL);
+                ...
+                ftrace_set_filter(); /* or ftrace_set_filter_ip() */
+                register_ftrace_function();
+        as the code shown,function ftrace_set_filter() / ftrace_set_filter_ip()
+        can be used to specify the will be traced function,those two function
+        also invoke ftrace_ops_init() to initialize the ftrace_ops for us at
+        first.
+          <kernel/trace/ftrace.c>
+            /**
+             * ftrace_set_filter_ip - set a filter for a ftrace ops based on
+             *                        function ip
+             * @ops:                  ftrace ops
+             * @ip:                   address to add to or remove from the filter
+             * @remove:               non-zero to remove the ip from filter
+             * @reset:                non-zero to reset all filters before applying
+             *                        this filter
+             * # EXPORT_SYMBOL_GPL
+             * # just invoke ftrace_ops_init() and ftrace_set_addr(),pass it
+             *   @ops, &@ip, 1, @remove, @reset, 1
+             *         #^address of stack object
+             * # static int ftrace_set_addr(*@ops, *@ips, @cnt, @remove,
+             *                              @reset, @enable);
+             *   this function just a wrapper to ftrace_set_hash(),pass it
+             *   @ops, NULL, 0, @ips, @cnt, @remove, @reset, @enable, NULL
+             *   # it interprets &@ip to an array of rip(s)
+             * # the rip to make call usually is the beginning of trace function,
+             *   because at there rip points to "call __fentry__",thus the rip
+             *   usually is the function's address,and we can find it from
+             *   kernel symbol table "kallsyms".
+             */
+            int ftrace_set_filter_ip(struct ftrace_ops *ops, unsigned long ip,
+                                     int remove, int reset);
+
+            /**
+             * ftrace_set_hash - set hash for a filter to specify the expect to
+             *                   tracing functions or rip
+             * @ops:             ftrace ops related to the filter
+             * @buf:             function name
+             * @len:             valid length of @buf
+             * @ips:             rip arrray
+             * @cnt:             valid size of @ips
+             * @remove:          whether to remove the filter
+             * @reset:           whether to reset the filter at first
+             * @enable:          used to select original hash
+             * @mod:             string pointer to raw regex
+             * return:           0 OR error code
+             */
+            static int ftrace_set_hash(struct ftrace_ops *ops, unsigned char *buf,
+                                       int len, unsigned long *ips, unsigned int cnt,
+                                       int remove, int reset, int enable, char *mod);
+
+            description for ftrace_set_hash() :
+              cant call to this function when ftrace is disabled,will return -ENODEV.
+              operation requires @ops->func_hash->regex_lock.
+              if @enable is true,use the @orig_hash = @ops->func_hash->filter_hash,
+              otherwise use @ops->func_hash->notrace_hash.
+              "notrace" means function hash in the hash table would not be traced,
+              "filter" is the list in which the rip(s) or functions we want to trace.
+              @orig_hash is a pointer to struct ftrace_hash pointer.
+              if @reset is true,the new hash table will be a new allocated hash table
+              has the size bits FTRACE_HASH_DEFAULT_BITS,otherwise,allocate a new
+              hash table has size bits FTRACE_HASH_DEFAULT_BITS,and copy @orig_hash
+              into the new one. /* pointer in local object @hash */
+              /* if allocate hash table failed,give up set filter */
+              next,handles @buf case and @ips case separately.
+                when @buf is not NULL,we try to add a new record for the function,or
+                try to match a record relative to this function,if adding failed or
+                matching failed,we give up setup filter and return error code.
+
+                when @ips is not NULL,we call to ftrace_match_addr(),this function
+                will call to helper __ftrace_match_addr(),for each rip in @ips.
+                if @remove is true,__ftrace_match_addr() will try to find and remove
+                tracing address entries from @hash corresponding to the specified
+                rip,and free the struct ftrace_func_entry object;if @remove is false,
+                we try to add ad new entry into @hash corresponds to the rip,except
+                such entry been exist.if ftrace_match_addr() resulted in an error,
+                we give up to set filter,return error code.
+              now adding record / entry been finished,we acquire @ftrace_lock,
+              and invoke ftrace_hash_move_and_update_ops(),it will finally use
+              @hash to set @orig_hash through rcu_assign_pointer().if @ops now
+              is not ENABLED,it also call ftrace_hash_move_and_update_subops() to
+              move subops whose @func_hash is equal to @ops->func_hash.
+              finally,releases locks and return result to caller.
+              /* ftrace_hash_move() is called by ftrace_hash_move_and_update_ops(),
+               * and by ftrace_hash_move_and_update_subops().
+               * it receives four parameters,*@ops, @enable, **@dst, *@src .
+               * because the @hash is copied from @orig_hash(no @reset == true),
+               * and new record / entry been added into @hash,we just use @hash
+               * to replace *@orig_hash as well,so @org_hash is dst,@hash is src.
+               * this is because @orig_hash is protected by RCU,we can not just
+               * do "In-Place Modification" on @orig_hash directly.
+               */
+              ! now we can know where the ftrace records that maybe modified in
+                ftrace_startup() come from.
