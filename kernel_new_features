@@ -1294,7 +1294,7 @@ ftrace :
              *              for ip filter
              * @func_hash:  pointer points to ops hash,used to set filter
              *              for this ops
-             * @old_hash:   the old hash
+             * @old_hash:   points to the old hash
              * @trampoline: trampoline code position of this ops
              * @trampoline_size:
              *              size of trampoline code of this ops
@@ -1489,6 +1489,21 @@ ftrace :
             ftrace_func_t ftrace_trace_function __read_mostly;
 
             /**
+             * function_trace_op - current function tracing op,default to
+             *                     @ftrace_list_end.if the ops has no trampoline,
+             *                     it will be handled by ftrace_ops_list_func(),
+             *                     that function will load effect address of
+             *                     this global ops descriptor into rdx
+             */
+            struct ftrace_ops *function_trace_op __read_mostly;
+
+            /**
+             * set_function_trace_op - this ops will be used to set
+             *                         @function_trace_op
+             */
+            static struct ftrace_ops *set_function_trace_op;
+
+            /**
              * global_ops - the global tracer,can be used as a global ftrace ops
              *              filter for other newly registered ftrace opses.
              */
@@ -1521,6 +1536,31 @@ ftrace :
 
             /* list of trace_ops that have allocated trampolines */
             static LIST_HEAD(ftrace_ops_trampoline list);
+
+            /**
+             * direct_functions - hash table recorded functions that associated
+             *                    with direct call
+             * # function register_ftrace_direct() will adds new entry into this
+             *   hash table,that entry corresponds to the new direct call.
+             *   usually,a direct call will replace a nop in the tracing function,
+             *   but for ftrace_regs_caller(),in which has a location call to
+             *   direct call handler.
+             *   for a direct call ops,its @func will set to call_direct_funcs(),
+             *   and its @direct_call member set to the address that we want call
+             *   to directly.routine arch_ftrace_set_direct_caller() will places
+             *   the @direct_call into ORIG_RAX,and in ftrace_regs_caller(),this
+             *   address will be used to replace return address.
+             *     call ftrace_stub => call @ops->func == call_direct_funcs()
+             *     movq @ops->direct_call, ORIG_RAX(rsp)
+             *     ...
+             *     movq ORIG_RAX(rs), <return address on stack>
+             *     ...
+             *     RET => continue from @ops->direct_call
+             */
+            static struct ftrace_hash __rcu *direct_functions = EMPTY_HASH;
+            
+            /* direct_mutex - protect @direct_functions */
+            static DEFINE_MUTEX(direct_mutex);
 
         sysctl enable ftrace kernel control path(initial state) :
           ftrace_enable_sysctl() -> ftrace_startup_sysctl() ->
@@ -1728,6 +1768,14 @@ ftrace :
         ! __register_ftrace_function() will be called by ftrace_startup(),
           and which function is called by register_ftrace_function_nolock(),
           we should invoke register_ftrace_function() as instead.
+          the register_ftrace_function() also acquires @direct_mutex and calls
+          to prepare_direct_functions_for_ipmodify(),which function ensures
+          there is no confliction between current being registered @ops and
+          any direct ftrace_ops,if current @ops is IPMODIFY.in this case,
+          it will calls to @ops->ops_func() with
+            FTRACE_OPS_CMD_ENABLE_SHARE_IPMODIFY_PERR
+          to enable sharing.
+
           <kernel/trace/ftrace.c>
             /**
              * __register_ftrace_function - register a ftrace operation
@@ -1939,6 +1987,8 @@ ftrace :
              * return:          0 OR error code
              * # register_ftrace_function_nolock() call to this routine
              *   with @command == 0.
+             * # must be called with @ftrace_lock is held and @direct_mutex
+             *   is held.
              */
             int ftrace_startup(struct ftrace_ops *ops, int command);
 
@@ -2036,7 +2086,7 @@ ftrace :
              * @remove:          whether to remove the filter
              * @reset:           whether to reset the filter at first
              * @enable:          used to select original hash
-             * @mod:             string pointer to raw regex
+             * @mod:             module name
              * return:           0 OR error code
              */
             static int ftrace_set_hash(struct ftrace_ops *ops, unsigned char *buf,
@@ -2086,3 +2136,65 @@ ftrace :
                */
               ! now we can know where the ftrace records that maybe modified in
                 ftrace_startup() come from.
+
+            /**
+             * ftrace_set_filter - set a function to filter on in ftrace
+             * @ops:               the ops to set the filter with
+             * @buf:               string holds the function filter text
+             * @len:               valid length of @buf
+             * @reset:             non-zero to resetl all filters before applying
+             *                     this filter
+             * return:             0 OR error code
+             * # EXPORT_SYMBOL_GPL
+             * # just ftrace_ops_init() and call to ftrace_set_regex(),the fourth
+             *   argument is 1.
+             */
+            int ftrace_set_filter(struct ftrace_ops *ops, unsigned char *buf,
+                                  int len, int reset);
+
+            /**
+             * ftrace_set_regex - set ops filter via regex
+             * @ops:               the ops to set the filter with
+             * @buf:               string holds the function filter text
+             * @len:               valid length of @buf
+             * @reset:             non-zero to resetl all filters before applying
+             *                     this filter
+             * @enable:            used to select original hash
+             * return:             0 OR error code
+             */
+            static int ftrace_set_regex(struct ftrace_ops *ops, unsigned char *buf,
+                                        int len, int reset, int enable);
+
+            description for ftrace_set_regex() :
+              the pattern in @buf is
+                @function-name-pattern:mod:@module-name
+                # @function-name-pattern and @module-name both can be regex
+                  expressions.
+              function declares a local pointer @tr points to @ops->private,it is
+              type of struct trace_array pointer.
+              ftrace_set_regex() separates function name pattern and module name
+              into @func and @mod,respectively.
+              if there is only function name pattern is given,we just invoke
+              ftrace_set_hash() on it as well.
+              if @module-name is given at the same time,@tr can not be NULL,and
+              the second string must be "mod",kstrdump() with GFP_KERNEL
+              will be called to duplicate @func in @tmp(local pointer),this
+              is because ftrace_set_hash() can modify the name pattern.
+              no error happens,call to ftrace_set_hash(),the rip related parameters
+              are sets to NULL or _zero_. /* common path for the two cases */
+              if @tr is not NULL AND @mod(local pointer should points to module name)
+              is not NULL AND result of the calling less than 0,that means set
+              hash failed.if @tmp is not NULL(allocated memory),then cache the
+              @module-name through cache_mod(),pass it @tr, @tmp, @mod, and @enable.
+              finally,return 0 or error code.
+
+        ! if we registered a ftrace ops that has no filter,both
+          @ops->func_hash->filter_hash and @ops->func_hash->notrace_hash are NULL,
+          this ftrace ops will be applied on all ftrace records,hence in the callback
+          ftrace_ops_list_func(),this ftrace ops will be called every ftrace period.
+          # suppose this ftrace ops has no custom trampoline.
+        ! function "void ftrace_free_filter(*@ops);" can be used to remove all filters
+          for an ftrace_ops.
+
+          
+              
