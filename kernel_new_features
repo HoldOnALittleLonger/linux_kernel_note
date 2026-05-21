@@ -1839,8 +1839,10 @@ ftrace :
                * trampoline,use the common one(defined by @ftrace_ops_list_func(),
                * and this ftrace ops will be handled by ftrace_ops_list_func())
                */
-              @ops caller may set up its own trampoline,thus ALLOC_TRAMP flag
-              need to be set in @ops->flags,otherwise,we give up it.
+              @ops caller may set up its own trampoline,in this case,we give up to
+              update trampoline. /* ALLOC_TRAMP tells whether create_trampoline()
+                                  * allocated trampoline for this ftrace ops.
+                                  */
               next,function calc_trampoline_call_offset() is called,pass it a
               boolean value to indicates whether or not SAVE_REGS is set.
               no regs case
@@ -1856,9 +1858,10 @@ ftrace :
               invoke ftrace_ops_get_func() helper on @ops to get ftrace function,we need
               this helper,because if RECURSION and RCU flags are set,the function must
               be ftrace_ops_assist_func(),otherwise is the @ops->func.
-              now we has the trampoline rip,and the function address,acquire @text_mutex,
-              invoke ftrace_call_replace(),use a "jmp" or a "call" instruction to replace
-              the instruction at rip,let the ftrace function can be called later.
+              now we has the call rip in new trampoline,and the function address,
+              acquire @text_mutex,invoke ftrace_call_replace(),use a "jmp" or a "call"
+              instruction to replace the instruction at rip,let the ftrace function can
+              be called later.
               release @text_mutext and returns.
 
             /**
@@ -2036,6 +2039,30 @@ ftrace :
                * this routine will update functions @ops traces when its filter changes.
                * # call to __ftrace_hash_rec_update().
                *   update flags of records in ftrace record pages.
+               *   if @ops has empty filter hash and notrace hash,then this @ops should
+               *   be applied on to all tracing functions,@ops will be called by
+               *   ftrace_ops_list_func(). # because the trampoline copied from
+               *                             ftrace caller.
+               *   the function iterates all records in ftrace pages,for such no filter
+               *   @ops,it will affects to all records.
+               *   because when registering new @ops,the second parameter will receives
+               *   true,then current records @flags increase by 1.
+               *   if after increment,if this record's ref counter become FTRACE_REF_MAX,
+               *   __ftrace_hash_rec_update() returns "false" immediately.
+               *   if DIRECT is set in @ops,enable DIRECT in the record.
+               *   if @ops has a trampoline(may allocated by create_trampoline()),AND
+               *   this record's ref count is 1,enable TRAMP in it,we will use this
+               *   @ops's trampoline,because only this @ops trace the target function.
+               *   otherwise,we clear TRAMP in the record because there is more than one
+               *   entities want to trace the target function,we rollback to use the
+               *   default trampoline,that is the default ftrace caller will jump to
+               *   ftrace_ops_list_func().
+               *   proceeds remain test and return result(return true if any one record
+               *   update correctly).
+               * ! we said use the default trampoline,the updating is not happened immediatly,
+               *   that will happens in __ftrace_replace_code(),for the record disabled
+               *   TRAMP flag,ftrace_get_addr_new() called in the function will returns
+               *   FTRACE_ADDR or FTRACE_REGS_ADDR.
                */
               before return 0,function disable ADDING flag in @ops->flags.
 
@@ -2192,9 +2219,8 @@ ftrace :
           @ops->func_hash->filter_hash and @ops->func_hash->notrace_hash are NULL,
           this ftrace ops will be applied on all ftrace records,hence in the callback
           ftrace_ops_list_func(),this ftrace ops will be called every ftrace period.
-          # suppose this ftrace ops has no custom trampoline.
+          # suppose this ftrace ops has no custom trampoline,create_trampoline() will
+            create a new trampoline,and copy machine code from ftrace caller.construct
+            correct instructions in the trampoline.
         ! function "void ftrace_free_filter(*@ops);" can be used to remove all filters
           for an ftrace_ops.
-
-          
-              
