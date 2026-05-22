@@ -1355,19 +1355,26 @@ ftrace :
                      * passed to the callback.
                      * if platform does not support this,register will
                      * failed.
+                     * # callback wants to modify registers,so we requires
+                     *   arch pass it,if arch does not support,registeration
+                     *   will fails.
                      */
                     FTRACE_OPS_FL_SAVE_REGS                 = BIT(2),
 
                     /* same as SAVE_REGS,if arch does not support
                      * save regs,register would not failed,but
-                     * the regs field will be NULL.
+                     * the regs field will be NULL,so callback needs
+                     * to check it manually.
                      */
                     FTRACE_OPS_FL_SAVE_REGS_IF_SUPPORTED    = BIT(3),
 
                     /* call back needs recursion protection.
-                     * if not this flag,ftrace inftrastructure will
+                     * if no this flag,ftrace inftrastructure will
                      * assume that the callback can handle recursion
                      * on its own.
+                     * helper ftrace_assist_func() take recursion
+                     * protection for us,and callback will be called
+                     * only when there is no recursion.
                      */
                     FTRACE_OPS_FL_RECURSION                 = BIT(4),
 
@@ -1405,6 +1412,14 @@ ftrace :
                      * if another ops with this flag set is already registered
                      * for any of the functions that this ops will be registered
                      * for,then this ops will fail to register or set_filter_ip.
+                     * used for callback is to "hijack" the traced function,
+                     * it modifies return rip in traced function let it call to
+                     * another function in its original executing path.
+                     * so the traced function would not return to its parent,
+                     * rather jump somewhere.
+                     * without this flag set,rip can not be modified.
+                     * ! only one ftrace_ops with this flag set may be
+                     *   registered to any given function at a time.
                      */
                     FTRACE_OPS_FL_IPMODIFY                  = BIT(12),
 
@@ -1423,6 +1438,10 @@ ftrace :
 
                     /* ftrace_ops is permanent and should not be affected
                      * by ftrace_enabled.
+                     * if a ftrace_ops registered with this flag is set,
+                     * write 0 into @ftrace_enabled can not disable the tracing.
+                     * we can only register such @ops when @ftrace_enabled is
+                     * not _zero_.
                      */
                     FTRACE_OPS_FL_PERMANENT                 = BIT(16),
 
@@ -2081,10 +2100,19 @@ ftrace :
              * ftrace_set_filter_ip - set a filter for a ftrace ops based on
              *                        function ip
              * @ops:                  ftrace ops
-             * @ip:                   address to add to or remove from the filter
+             * @ip:                   address to add to or remove from the filter,
+             *                        the rip must be the address where the call
+             *                        to fentry or mcount that is located in
+             *                        the function,usually is the function's
+             *                        base address if we are using fentry.
              * @remove:               non-zero to remove the ip from filter
+             *                        # remove function entries that associated with
+             *                          this filter of @ops
              * @reset:                non-zero to reset all filters before applying
              *                        this filter
+             *                        # non-zero will clear "notrace" list at first
+             *                          before associatd callback with the right
+             *                          record
              * # EXPORT_SYMBOL_GPL
              * # just invoke ftrace_ops_init() and ftrace_set_addr(),pass it
              *   @ops, &@ip, 1, @remove, @reset, 1
@@ -2127,6 +2155,15 @@ ftrace :
               otherwise use @ops->func_hash->notrace_hash.
               "notrace" means function hash in the hash table would not be traced,
               "filter" is the list in which the rip(s) or functions we want to trace.
+              /*
+               * !! "notrace" LIST TAKES PRECEDENCE OVER THE "filter" LIST.
+               *    TWO LISTS ARE NOT "empty" AND CONTAINS THE SAME FUNCTION,PREVENT
+               *    CALLBACK IS CALLED FROM THE TRACED FUNCTION.
+               *    "empty" "notrace" LIST MEANS TO ALLOW ALL FUNCTIONS DEFINED BY THE
+               *    "filter" LIST TO BE TRACED.
+               *    BOTH "notrace" AND "filter" LISTS ARE EMPTY,THE OPS WOULD APPLIED
+               *    ONTO ALL IN-TRACING FUNCTIONS.
+               */
               @orig_hash is a pointer to struct ftrace_hash pointer.
               if @reset is true,the new hash table will be a new allocated hash table
               has the size bits FTRACE_HASH_DEFAULT_BITS,otherwise,allocate a new
@@ -2224,3 +2261,132 @@ ftrace :
             correct instructions in the trampoline.
         ! function "void ftrace_free_filter(*@ops);" can be used to remove all filters
           for an ftrace_ops.
+        ! if we registered a callback,and the callback may recursion,we then need to
+          use ftrace_test_recursion_trylock() and ftrace_test_recursion_unlock() to
+          protect it,to prevent infinite recursion.
+                  int bit = 0;
+                  bit = ftrace_test_recursion_trylock(@ip, @parent_ip);
+                  if (bit < 0)
+                          return;
+                  /* safe area start */
+                  ...
+                  /* safe area end */
+                  ftrace_test_recursion_unlock(bit);
+                  ...
+          # ftrace_test_recursion_trylock() is a wrapper call to
+                    ftrace_test_and_set_recursion(@ip, @parent_ip, TRACE_FTRACE_START)
+            ftrace_test_recursion_unlock() is a wrapper call to
+                    ftrace_clear_recursion(@bit)
+          # we can set RECURSION in @ops to use a helper trampoline to test recursion
+            for callback.(ftrace_assist_func()).
+            if no this flag,we must handle recursion by ourselves.
+        ! if callback needs to access critical section that requiring RCU protection,
+          the best method to that is call to rcu_is_watching() at first.
+          the function is defined in <kernel/rcu/tree.c>,and it is EXPORT_SYMBOL.
+          it test whether RCU read-side critical sections permitted on current CPU.
+          return "false" if RCU current is not in quiescent state.
+          function call to rcu_is_watching_curr_cpu() in its body,and disable preemption
+          before calling,and enable again after finished.
+          # rcu_is_watching() will returns false if this CPU is deep within its idle loop,
+            in kernel entry/exit code,or offline.
+          # rcu_is_watching() is marked "notrace",thus we can use it in ftrace do not need
+            to take care about recursion.(preempt_disable_notrace() to disable preemption,
+            that also is notrace)
+          # if RCU flag is set in @ops,a helper trampoline will be used to test for
+            rcu_is_watching() for the callback,we do not call to the function by ourselves.
+            (helper trampoline is ftrace_assist_func())
+
+        The figure of traced function in assembly language :
+                .type func_name, @function
+                func_name:      # springboard
+                        call    __fentry__     # <= nop,replaced by kernel during booting
+                        ...                    +------------------+------+
+                        pushq   %rbp           |                  .      |
+                        movq    %rsp, %rbp     |                  .      |
+                        subq    $0x20, %rsp    |                  .      |
+                        ...                    |                  .      |
+                                               |                  .      |
+                ftrace_caller: <---------------+ (trampoline) <---+------+ <= two trampoline
+                        ...    # traced by ftrace_ops             .      |    rollback to
+                               # who handled by                   .      |    common path
+                               # common path                      .      |     |
+                               (1)                                .      |     |
+                user_defined_trampoline: <........................+      |     |
+                        ...              # user defined trampoline       |     |
+                                         # no ALLOC_TRAMP                |     |
+                                         # call / jmp to there           |     |
+                                         (2) (suppose no (1))            |     |
+                user_defined_trampoline2: <------------------------------+     |
+                                          # another trampoline                 |
+                                          # tracing the same function          |
+                                          (3) (suppose (2) and (3)) -----------+
+
+        The function ftrace_make_nop() is used to replace the machine code at specified
+        location to "nop" instruction.
+        macro MCOUNT_ADDR is defined in <arch/x86/include/asm/ftrace.h>,will be expanded
+        to "((unsigned long)(__fentry__))".
+        symbol "__fentry__" associated with a function which is defined in the
+        <arch/x86/kernel/ftrace_64.S>,it does nothing.
+        when system booting,the functions' "call __fentry__" will be replaced to "nop"
+        instruction through ftrace_modify_code_direct(),ftrace_make_nop() call to this
+        function when the passed @address is equal to MCOUNT_ADDR,the direct modification
+        will replace the instruction to "nop".
+        this also affects module loading,when a module is loaded,its "call __fentry__"
+        also be replaced to "nop".
+        This behavior happens either running before SMP or before the code will ever
+        be executed(module load).
+        This replacement only happens once.after ftrace is enabled,the "nop" is switch
+        to ftrace caller;when we unregister a @ops,its flag would be set to DELETED,and
+        unlink from global ops list,its trampoline will be freed through execmem_free().
+        if the function is no other ftrace_ops is associated with now,the call to
+        ftrace caller will be replaced to "nop" instruction,it never become
+        "call __fentry__" again. /* if we disbale ftrace through sysctl,the records
+                                  * in ftrace pages,their @ip -- mcount call-site
+                                  * all will be replaced to "nop"
+                                  */
+        ! x86 overrides ftrace_replace_code(),thus the function ftrace_make_nop() only
+          be called during initialization,and the valid control path is modify
+          MCOUNT_ADDR to "nop".
+          after system started,any make nop work are hands over to smp_text_poke_batch_add(),
+          which is called by x86 ftrace_replace_code() to batch pokings,before return
+          from ftrace_replace_code(),smp_text_poke_batch_finish() is called to appiles
+          these changes.
+          the initial records in ftrace pages are created by ftrace_process_locs(),
+          for the addresses in "__start_mcount_loc" to "__stop_mcount_loc",a record
+          is created that associated with the address.
+          # x86 has no ftrace_dyn_arch_init(),the default just return 0 without do nothing.
+            this function and ftrace_process_locs() are called in ftrace_init(),and
+            ftrace_init() is called in start_kernel().
+            at the end of ftrace_process_locs(),function ftrace_update_code() is called,
+            if architecture requires mcount call-site init nop,then ftrace_make_nop()
+            is called with MCOUNT_ADDR for each ftrace records,so the function's
+            "call __fentry__" is replaced to "nop" instruction.
+
+        The tracer "function_grah",it is similar to the tracer "function" we discussed
+        above.it is not only trace entry of function,also trace exit of function,then
+        provides the ability to draw a graph of functions calls.
+        ! if we want to trace function return,we just modify rip to the callback,when
+          the callback is called,we can know the function we are tracing is returned.
+        
+        Available tracers :
+                function            # function tracer
+                function_graph      # function tracer draw calling graph
+                blk                 # block tracer
+                hwlat               # hardware latency tracer
+                irqsoff             # interrupt request temporarily disabled tracer
+                preemptoff          # preemption temporarily disabled tracer
+                preemptirqsoff      # combine "irqsoff" and "preemptoff",also records
+                                    # the largest time for which irqs and/or preemption
+                                    # is disabled
+                wakeup              # wakeup event tracer
+                wakeup_rt           # RT task wakeup tracer
+                wakeup_dl           # SCHED_DEADLINE task wakeup tracer
+                mmiotrace           # I/O of hardware made up binary modules tracer
+                branch              # likely/unlikely hitting tracer
+                nop                 # trace nothing tracer,used to remove all current
+                                    # in-active tracers
+
+BPF system call :
+                
+               
+                
