@@ -1611,7 +1611,7 @@ ftrace :
              * # some arch does not support pass @op and @fregs,only pass
              *   @ip and @parent_ip.
              *   for the arch has no ARCH_SUPPORTS_FTRACE_OPS,arch_ftrace_ops_list_func()
-             *   is defined to only receieves @ip and @parent_ip.
+             *   is defined to only receives @ip and @parent_ip.
              *   arch_ftrace_ops_list_func() will calls to __ftrace_ops_list_func(),
              *   for no ARCH_SUPPORTS_FTRACE_OPS,@op and @fregs are set to NULL.
              * # arch_ftrace_ops_list_func() is NOKPROBE_SYMBOL.
@@ -1624,7 +1624,7 @@ ftrace :
              * __ftrace_ops_list_func - the primary procedure of the initial
              *                          ftrace_ops_list_func(),for each registered
              *                          ftrace ops on @ftrace_ops_list,invoke
-             *                          the callback with receieved arguments.
+             *                          the callback with received arguments.
              * @ip:                     child function rip
              * @parent_ip:              parent function rip
              * @ignored:                ftrace_ops descriptor
@@ -2387,6 +2387,277 @@ ftrace :
                                     # in-active tracers
 
 BPF system call :
-                
+        the system call BPF is newly added into kernel,it performs a range of
+        operations related to "extended Berkeley Packet(eBPF) Filters".
+        the "classic BPF is used to filter network packets",eBPF is some kind
+        of that,but it extends cBPF in multiple ways.
+                ability to call a fixed set of in-kernel helper functions
+                access shared data structures such as eBPF maps
+
+        User Mode header is
+                <linux/bpf.h>
+        Prototype of User Mode interface is
+                int bpf(int cmd, union bpf_attr *attr, unsigned int size);
+
+        both cBPF and eBPF programs,are statically analyzed by kernel before
+        loading them.
+        
+        BPF maps,are a generic data structure for storage of different data types.
+        data type is treated at an binary blob,when creating map,user must
+        specifies the size of the key and the size of the value.
+                [key, value]
+                # requires size,the exact structure type is opaque.
+        BPF maps can be accessed through a file descriptor,when the process who
+        created the map is exit,the file descriptor will be closed,thus the BPF
+        map will be destroyed.(but there is a way to leave them alive)
+        different eBPF programs can access the same maps in parallel.
+
+        eBPF special map type,the program array,in which,file descriptors are
+        stored,and the file descriptor associated with other eBPF programs.
+        if an eBPF program performs a lookup on the array,the program's
+        execution flow is redirected in-place to the beginning of that eBPF
+        program current file descriptor associated with,and the execution flow
+        would not return back to the old eBPF program.in the new eBPF program,
+        it can also execute the old program again from its beginning,but there
+        is a recursion limiter that fixed to 32 times.
+        file descriptor in program array can be modified at runtime,thus we
+        can get flexibility to change behaviors based on specific requirements.
+           +--> User Mode process issued system call
+           |
+           |    eBPF_program1:
+           |            ...
+           |            performs a lookup
+           |                            |        
+           |                            |--> eBPF_program_idx0 --> jmp to beginning
+           |                            |                          |
+           |                            |--> ...                   |
+           |                            .                          |
+           |                            .                          V # execution
+           |                            .                          .
+           |            ... # rest                                 .
+           |                                                       .
+           |                                                       |
+           +-------------------------------------------------------+ # return path
+    
+        eBPF program that associated with the file descriptor in program array
+        must be loaded into kernel previously,if lookup failed,the old eBPF
+        program will continue its execution.
+        /* eBPF program usually is loaded by userspace process,and unloaded
+         * when the process exit,but leave them alive through tc-bpf.
+         * when the process exit,tc-bpf will holds references to the eBPF
+         * program to prevent from kernel destroy them.
+         */
+
+        each eBPF program is a set of instructions that is safe to run until
+        its completion,in-kernel verifier statically determines that the
+        eBPF program terminates and is safe to execute.
+        /* kernel gets ref to the eBPF program during verification */
+        
+        each eBPF program can be attached to different events
+                arrival of network packets
+                tracing events
+                classification events by network queueing disciplines
+                ...
+        when a new event comes,it triggers execution to the eBPF program
+        attached to it.the same eBPF program can be attached to multiple
+        events and different eBPF programs can access the same map.
+        /* thus we can sharing data between different eBPF programs */
+        
+        <linux/bpf.h>
+          /**
+           * bpf - system call to eBPF
+           * @cmd: command
+           * @attr:
+           *       accompanying argument for operation
+           * @size:
+           *       size of data pointed by @attr
+           * return:
+           *       succeed => depends on operation
+           *        failed => -1 and set errno
+           */
+          int bpf(int cmd, union bpf_attr *attr, unsigned int size);
+
+        eBPF commands :
+                /* create a map and return a file descriptor that refers to
+                 * the map
+                 * # auto close-on-exec
+                 */
+                BPF_MAP_CREATE
+
+                /* lookup an element by key in a specified map and
+                 * return its value
+                 */
+                BPF_MAP_LOOKUP_ELEM
+
+                /* create or update an element in a specified map */
+                BPF_MAP_UPDATE_ELEM
+
+                /* lookup and delete an element in a specified map */
+                BPF_MAP_DELETE_ELEM
+
+                /* lookup an element by key in a specified map and 
+                 * return the key of the next element
+                 */
+                BPF_MAP_GET_NEXT_KEY
+
+                /* verify and load an eBPF program,returning a new
+                 * file descriptor associated with the program
+                 * # auto close-on-exec
+                 */
+                BPF_PROG_LOAD
+
+                ! details in <usr/include/linux/bpf.h>
+
+        union bpf_attr :
+          this union used to pass accompanying data to eBPF,it can has different
+          variants depends on eBPF command.
+
+          union bpf_attr {
+                  /* BPF_MAP_CREATE */
+                  struct {
+                          __u32 map_type;    /* map type */
+                          __u32 key_size;    /* size of key */
+                          __u32 value_size;  /* size of value */
+                          __u32 max_entries  /* maximum entries in map */
+                  };
+
+                  /* BPF_MAP_*_ELEM,BPF_MAP_GET_NEXT_KEY */
+                  struct {
+                          __u32 map_fd;
+                          /* pointers to buffer saved key */
+                          __aligned_u64 key;
+                          union {
+                                  /* pointer to buffer saves value */
+                                  __aligned_u64 value;
+                                  /* pointer to buffer saves next key */
+                                  __aligned_u64 next_key;
+                          };
+                          __u64 flags; /* BPF_ANY - create new or update existing
+                                        * BPF_NOEXIST - create new if did not exist
+                                        * BPF_EXIST - update existing
+                                        */
+                  };                        
+
+                  /* BPF_PROG_LOAD */                    
+                  struct {
+                          __u32 prog_type;        /* program type */
+                          __u32 insn_cnt;         /* number of insns */
+                          __aligned_u64 insns;    /* const struct bpf_insn * */
+                          __aligned_u64 license;  /* const char * */
+                          __u32 log_level;        /* verbosity level of verifier */
+                          __u32 log_size;         /* size of user buffer */
+                          __aligned_u64 log_buf;  /* user supplied char * buffer */
+                          __u32 kern_version;     /* checked when type is kprobe */
+                  };
+          } __attribute__((aligned(8)));
+
+        eBPF map types :
+                enum bpf_map_type {
+                        BPF_MAP_TYPE_UNSPEC,
+                        BPF_MAP_TYPE_HASH,
+                        BPF_MAP_TYPE_ARRAY,
+                        BPF_MAP_TYPE_PROG_ARRAY,
+                        BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+                        BPF_MAP_TYPE_PERCPU_HASH,
+                        BPF_MAP_TYPE_PERCPU_ARRAY,
+                        BPF_MAP_TYPE_STACK_TRACE,
+                        BPF_MAP_TYPE_CGROUP_ARRAY,
+                        BPF_MAP_TYPE_LRU_HASH,
+                        BPF_MAP_TYPE_LRU_PERCPU_HASH,
+                        BPF_MAP_TYPE_LPM_TRIE,
+                        BPF_MAP_TYPE_ARRAY_OF_MAPS,
+                        BPF_MAP_TYPE_HASH_OF_MAPS,
+                        BPF_MAP_TYPE_DEVMAP,
+                        BPF_MAP_TYPE_SOCKMAP,
+                        BPF_MAP_TYPE_CPUMAP,
+                        BPF_MAP_TYPE_XSKMAP,
+                        BPF_MAP_TYPE_SOCKHASH,
+                        BPF_MAP_TYPE_CGROUP_STORAGE,
+                        BPF_MAP_TYPE_REUSEPORT_SOCKARRAY,
+                        BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE,
+                        BPF_MAP_TYPE_QUEUE,
+                        BPF_MAP_TYPE_STACK,
+                        BPF_MAP_TYPE_SK_STORAGE,
+                        BPF_MAP_TYPE_DEVMAP_HASH,
+                };
+
+        eBPF program types :
+                enum bpf_prog_type {
+                    	BPF_PROG_TYPE_UNSPEC,
+                    	BPF_PROG_TYPE_SOCKET_FILTER,
+                    	BPF_PROG_TYPE_KPROBE,
+                    	BPF_PROG_TYPE_SCHED_CLS,
+                    	BPF_PROG_TYPE_SCHED_ACT,
+                    	BPF_PROG_TYPE_TRACEPOINT,
+                    	BPF_PROG_TYPE_XDP,
+                    	BPF_PROG_TYPE_PERF_EVENT,
+                    	BPF_PROG_TYPE_CGROUP_SKB,
+                    	BPF_PROG_TYPE_CGROUP_SOCK,
+                    	BPF_PROG_TYPE_LWT_IN,
+                    	BPF_PROG_TYPE_LWT_OUT,
+                    	BPF_PROG_TYPE_LWT_XMIT,
+                    	BPF_PROG_TYPE_SOCK_OPS,
+                    	BPF_PROG_TYPE_SK_SKB,
+                    	BPF_PROG_TYPE_CGROUP_DEVICE,
+                    	BPF_PROG_TYPE_SK_MSG,
+                    	BPF_PROG_TYPE_RAW_TRACEPOINT,
+                    	BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+                    	BPF_PROG_TYPE_LWT_SEG6LOCAL,
+                    	BPF_PROG_TYPE_LIRC_MODE2,
+                    	BPF_PROG_TYPE_SK_REUSEPORT,
+                    	BPF_PROG_TYPE_FLOW_DISSECTOR,
+                    	BPF_PROG_TYPE_CGROUP_SYSCTL,
+                    	BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
+                    	BPF_PROG_TYPE_CGROUP_SOCKOPT,
+                };
+
+        eBPF instruction structure :
+          <linux/bpf.h>
+            /**
+             * bpf_insn - structure to describes one instruction of the
+             *            eBPF program defined by user
+             * @code:     operation code
+             * @dst_reg:  destination operand register
+             * @src_reg:  source operand register
+             * @off:      signed offset for specific instruction
+             * @imm:      signed immediate constant - such $0x20
+             * # we can construct eBPF program by setup several bpf_insn
+             *   structures,and use the corresponding command to load them.
+             */
+            struct bpf_insn {
+                    __u8 code;
+                    __u8 dst_reg:4;
+                    __u8 src_reg:4;
+                    __s16 off;
+                    __s32 imm;
+            };
+
+            ! we can only call to the pre-defined functions provided by eBPF,
+              is not allowed call to kernel function directly.
+
+        eBPF available registers :
+                /* we do not know what the register exactly is,
+                 * we do not know if it is rax? rbx? ...
+                 * but we can use at most ten registers in a
+                 * eBPF program,operates them like the assembly language.
+                 */
+                enum {
+                        BPF_REG_0 = 0,
+                        BPF_REG_1,
+                        BPF_REG_2,
+                        BPF_REG_3,
+                        BPF_REG_4,
+                        BPF_REG_5,
+                        BPF_REG_6,
+                        BPF_REG_7,
+                        BPF_REG_8,
+                        BPF_REG_9,
+                        BPF_REG_10,
+                        __MAX_BPF_REG,
+                };
+
+        ! some useful eBPF helpers are available,their descriptions in man-page
+          bpf-helpers(7).
+                                  
                
                 
