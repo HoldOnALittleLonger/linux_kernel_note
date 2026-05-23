@@ -1,3 +1,4 @@
+<Kernel 6.19.6>
 
 struct folio :
         clarifying memory management with page folios.
@@ -2512,6 +2513,13 @@ BPF system call :
           this union used to pass accompanying data to eBPF,it can has different
           variants depends on eBPF command.
 
+          /**
+           * bpf_attr - the accompanying data structure for bpf system call.
+           *            there is not full definitions of this union,just copied
+           *            from Man page.
+           *            the detail is included in <linux/bpf.h>,and in which
+           *            more members are existing.
+           */
           union bpf_attr {
                   /* BPF_MAP_CREATE */
                   struct {
@@ -2535,6 +2543,8 @@ BPF system call :
                           __u64 flags; /* BPF_ANY - create new or update existing
                                         * BPF_NOEXIST - create new if did not exist
                                         * BPF_EXIST - update existing
+                                        * # for lookup,we can left this
+                                        *   field be _zero_.
                                         */
                   };                        
 
@@ -2552,65 +2562,98 @@ BPF system call :
           } __attribute__((aligned(8)));
 
         eBPF map types :
-                enum bpf_map_type {
-                        BPF_MAP_TYPE_UNSPEC,
-                        BPF_MAP_TYPE_HASH,
-                        BPF_MAP_TYPE_ARRAY,
-                        BPF_MAP_TYPE_PROG_ARRAY,
-                        BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-                        BPF_MAP_TYPE_PERCPU_HASH,
-                        BPF_MAP_TYPE_PERCPU_ARRAY,
-                        BPF_MAP_TYPE_STACK_TRACE,
-                        BPF_MAP_TYPE_CGROUP_ARRAY,
-                        BPF_MAP_TYPE_LRU_HASH,
-                        BPF_MAP_TYPE_LRU_PERCPU_HASH,
-                        BPF_MAP_TYPE_LPM_TRIE,
-                        BPF_MAP_TYPE_ARRAY_OF_MAPS,
-                        BPF_MAP_TYPE_HASH_OF_MAPS,
-                        BPF_MAP_TYPE_DEVMAP,
-                        BPF_MAP_TYPE_SOCKMAP,
-                        BPF_MAP_TYPE_CPUMAP,
-                        BPF_MAP_TYPE_XSKMAP,
-                        BPF_MAP_TYPE_SOCKHASH,
-                        BPF_MAP_TYPE_CGROUP_STORAGE,
-                        BPF_MAP_TYPE_REUSEPORT_SOCKARRAY,
-                        BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE,
-                        BPF_MAP_TYPE_QUEUE,
-                        BPF_MAP_TYPE_STACK,
-                        BPF_MAP_TYPE_SK_STORAGE,
-                        BPF_MAP_TYPE_DEVMAP_HASH,
-                };
+          enum bpf_map_type {
+                  BPF_MAP_TYPE_UNSPEC,
+                  BPF_MAP_TYPE_HASH,
+                  BPF_MAP_TYPE_ARRAY,
+                  BPF_MAP_TYPE_PROG_ARRAY,
+                  BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+                  BPF_MAP_TYPE_PERCPU_HASH,
+                  BPF_MAP_TYPE_PERCPU_ARRAY,
+                  BPF_MAP_TYPE_STACK_TRACE,
+                  BPF_MAP_TYPE_CGROUP_ARRAY,
+                  BPF_MAP_TYPE_LRU_HASH,
+                  BPF_MAP_TYPE_LRU_PERCPU_HASH,
+                  BPF_MAP_TYPE_LPM_TRIE,
+                  BPF_MAP_TYPE_ARRAY_OF_MAPS,
+                  BPF_MAP_TYPE_HASH_OF_MAPS,
+                  BPF_MAP_TYPE_DEVMAP,
+                  BPF_MAP_TYPE_SOCKMAP,
+                  BPF_MAP_TYPE_CPUMAP,
+                  BPF_MAP_TYPE_XSKMAP,
+                  BPF_MAP_TYPE_SOCKHASH,
+                  BPF_MAP_TYPE_CGROUP_STORAGE,
+                  BPF_MAP_TYPE_REUSEPORT_SOCKARRAY,
+                  BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE,
+                  BPF_MAP_TYPE_QUEUE,
+                  BPF_MAP_TYPE_STACK,
+                  BPF_MAP_TYPE_SK_STORAGE,
+                  BPF_MAP_TYPE_DEVMAP_HASH,
+          };
 
         eBPF program types :
-                enum bpf_prog_type {
-                    	BPF_PROG_TYPE_UNSPEC,
-                    	BPF_PROG_TYPE_SOCKET_FILTER,
-                    	BPF_PROG_TYPE_KPROBE,
-                    	BPF_PROG_TYPE_SCHED_CLS,
-                    	BPF_PROG_TYPE_SCHED_ACT,
-                    	BPF_PROG_TYPE_TRACEPOINT,
-                    	BPF_PROG_TYPE_XDP,
-                    	BPF_PROG_TYPE_PERF_EVENT,
-                    	BPF_PROG_TYPE_CGROUP_SKB,
-                    	BPF_PROG_TYPE_CGROUP_SOCK,
-                    	BPF_PROG_TYPE_LWT_IN,
-                    	BPF_PROG_TYPE_LWT_OUT,
-                    	BPF_PROG_TYPE_LWT_XMIT,
-                    	BPF_PROG_TYPE_SOCK_OPS,
-                    	BPF_PROG_TYPE_SK_SKB,
-                    	BPF_PROG_TYPE_CGROUP_DEVICE,
-                    	BPF_PROG_TYPE_SK_MSG,
-                    	BPF_PROG_TYPE_RAW_TRACEPOINT,
-                    	BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
-                    	BPF_PROG_TYPE_LWT_SEG6LOCAL,
-                    	BPF_PROG_TYPE_LIRC_MODE2,
-                    	BPF_PROG_TYPE_SK_REUSEPORT,
-                    	BPF_PROG_TYPE_FLOW_DISSECTOR,
-                    	BPF_PROG_TYPE_CGROUP_SYSCTL,
-                    	BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
-                    	BPF_PROG_TYPE_CGROUP_SOCKOPT,
-                };
+          enum bpf_prog_type {
+                  BPF_PROG_TYPE_UNSPEC,
+                  BPF_PROG_TYPE_SOCKET_FILTER,
+                  BPF_PROG_TYPE_KPROBE,
+                  BPF_PROG_TYPE_SCHED_CLS,
+                  BPF_PROG_TYPE_SCHED_ACT,
+                  BPF_PROG_TYPE_TRACEPOINT,
+                  BPF_PROG_TYPE_XDP,
+                  BPF_PROG_TYPE_PERF_EVENT,
+                  BPF_PROG_TYPE_CGROUP_SKB,
+                  BPF_PROG_TYPE_CGROUP_SOCK,
+                  BPF_PROG_TYPE_LWT_IN,
+                  BPF_PROG_TYPE_LWT_OUT,
+                  BPF_PROG_TYPE_LWT_XMIT,
+                  BPF_PROG_TYPE_SOCK_OPS,
+                  BPF_PROG_TYPE_SK_SKB,
+                  BPF_PROG_TYPE_CGROUP_DEVICE,
+                  BPF_PROG_TYPE_SK_MSG,
+                  BPF_PROG_TYPE_RAW_TRACEPOINT,
+                  BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+                  BPF_PROG_TYPE_LWT_SEG6LOCAL,
+                  BPF_PROG_TYPE_LIRC_MODE2,
+                  BPF_PROG_TYPE_SK_REUSEPORT,
+                  BPF_PROG_TYPE_FLOW_DISSECTOR,
+                  BPF_PROG_TYPE_CGROUP_SYSCTL,
+                  BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
+                  BPF_PROG_TYPE_CGROUP_SOCKOPT,
+          };
 
+        eBPF expected attach types :
+          /* some prog types expected attach type must be
+           * known at load time to verify attach type specific
+           * parts of prog.
+           * # used for member @expected_attach_type of bpf_attr.
+           */
+          enum bpf_attach_type {
+                  BPF_CGROUP_INET_INGRESS,
+                  BPF_CGROUP_INET_EGRESS,
+                  BPF_CGROUP_INET_SOCK_CREATE,
+                  BPF_CGROUP_SOCK_OPS,
+                  BPF_SK_SKB_STREAM_PARSER,
+                  BPF_SK_SKB_STREAM_VERDICT,
+                  BPF_CGROUP_DEVICE,
+                  BPF_SK_MSG_VERDICT,
+                  BPF_CGROUP_INET4_BIND,
+                  BPF_CGROUP_INET6_BIND,
+                  BPF_CGROUP_INET4_CONNECT,
+                  BPF_CGROUP_INET6_CONNECT,
+                  BPF_CGROUP_INET4_POST_BIND,
+                  BPF_CGROUP_INET6_POST_BIND,
+                  BPF_CGROUP_UDP4_SENDMSG,
+                  BPF_CGROUP_UDP6_SENDMSG,
+                  BPF_LIRC_MODE2,
+                  BPF_FLOW_DISSECTOR,
+                  BPF_CGROUP_SYSCTL,
+                  BPF_CGROUP_UDP4_RECVMSG,
+                  BPF_CGROUP_UDP6_RECVMSG,
+                  BPF_CGROUP_GETSOCKOPT,
+                  BPF_CGROUP_SETSOCKOPT,
+                  __MAX_BPF_ATTACH_TYPE
+          };
+   
         eBPF instruction structure :
           <linux/bpf.h>
             /**
@@ -2631,30 +2674,38 @@ BPF system call :
                     __s16 off;
                     __s32 imm;
             };
+            ! bytecodes for eBPF opcodes are defined in <linux/bpf.h> and
+              <linux/bpf_common.h>.
+              an eBPF opcode usually is combined by a part of
+                      instruction classes /* instruction class */
+                      operand length      /* operand length */
+                      mode                /* op mode,r2r, r2m, ... */
+                      operation code      /* opcode */
+                      src operand r/m     /* in reg or in mem */
 
             ! we can only call to the pre-defined functions provided by eBPF,
               is not allowed call to kernel function directly.
 
         eBPF available registers :
-                /* we do not know what the register exactly is,
-                 * we do not know if it is rax? rbx? ...
-                 * but we can use at most ten registers in a
-                 * eBPF program,operates them like the assembly language.
-                 */
-                enum {
-                        BPF_REG_0 = 0,
-                        BPF_REG_1,
-                        BPF_REG_2,
-                        BPF_REG_3,
-                        BPF_REG_4,
-                        BPF_REG_5,
-                        BPF_REG_6,
-                        BPF_REG_7,
-                        BPF_REG_8,
-                        BPF_REG_9,
-                        BPF_REG_10,
-                        __MAX_BPF_REG,
-                };
+          /* we do not know what the register exactly is,
+           * we do not know if it is rax? rbx? ...
+           * but we can use at most ten registers in a
+           * eBPF program,operates them like the assembly language.
+           */
+          enum {
+                  BPF_REG_0 = 0,
+                  BPF_REG_1,
+                  BPF_REG_2,
+                  BPF_REG_3,
+                  BPF_REG_4,
+                  BPF_REG_5,
+                  BPF_REG_6,
+                  BPF_REG_7,
+                  BPF_REG_8,
+                  BPF_REG_9,
+                  BPF_REG_10,
+                  __MAX_BPF_REG,
+          };
 
         ! some useful eBPF helpers are available,their descriptions in man-page
           bpf-helpers(7).
