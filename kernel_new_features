@@ -2845,34 +2845,37 @@ BPF system call :
                 /* 16-byte instruction end */
 
               ! when we want to pass a string pointer to print helper like
-                bpf_trace_printk().
-                we should use BPF_MOV instruction instead use BPF_LD.
-                suppose,we use 16-byte instruction to load pointer into
+                bpf_trace_printk(),we can not just pass the pointer of
+                string to BPF_REG_1.
+                we use 16-byte instruction / BPF_MOV to load pointer into
                 r1,verifier will throws "expected=fp" exception,because
                 it wants us to store into r1 a stack frame pointer rather
                 then pointer to the string.
+                # when we move a value into register,BPF_MOV flags the
+                  state of reg as SCALE_VALUE.
+                  when load immediate value through BPF_LD,verifier assumes
+                  the value is an unspecifiable Scalar or Pointer.
+                  when we BPF_MOV BPF_REG_10(stack pointer) to another register,
+                  the target register should be flaged Stack Frame Pointer.
+                  bpf_trace_printk() wants first parameter is stack frame
+                  pointer,that is why eBPF throws "type=inv, expected=fp".
                 suppose we fix the previous problem by store the pointer
                 at stack position "r10 - 8"(high addr to low addr),and
                 store into r1 the result of "r10 - 8" -- stack frame pointer,
                 this will cause nested pointer -- pointer to pointer,we can
                 address the string through "*(*r1)",this is a not allowed
-                in a lot of helpers.(for BPF_LD,verifier assumes the value is
-                an unspecifiable 'scalar' or 'pointer')
+                in a lot of helpers.
                 # error "invalid stack type"
                     1> uninitialized bytes
                     2> misaligned pointers
                     3> reading outside boundaries
-                to fix these problems,we need to use BPF_MOV move the
-                pointer to string into r1 directly(verifier flags the r1 state
-                as a safe SCALE_VALUE),or use BPF_MOV and BPF_STX to store the
-                pointer(as SCALE_VALUE) from register onto stack position,
-                then we store into r1 the stack pointer,this is OK.
-                because BPF_MOV automatically does alignment for us,and the
-                pointer moved by BPF_MOV it is considered as a scalar by
-                verifier.
-                # we can store the string directly on stack to prevent
-                  nested pointer,but that is not necessary,and consumes
-                  stack space.
+                to fix this problem,we use BPF_MOV and BPF_STX to store the
+                string directly on stack,and then we store into r1 the stack
+                pointer,this is OK.
+                or,we update map at first,and invoke bfp_map_lookup_elem() in
+                the bpf program,if that function succeed to find the string,
+                in BPF_REG_0,the stack frame pointer to that string is stored.
+                next,we BPF_MOV BPF_REG_0 into BPF_REG1,that is OK.
 
               ! eBPF only supports 64 bits pointer arithmetic,the 32-bit pointer
                 arithmetic is prohibited.
