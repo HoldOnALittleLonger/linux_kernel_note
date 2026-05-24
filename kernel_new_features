@@ -2709,6 +2709,227 @@ BPF system call :
 
         ! some useful eBPF helpers are available,their descriptions in man-page
           bpf-helpers(7).
-                                  
+
+        eBPF instruction set :
+          general registers in eBPF >
+                  r0 => return value or exit code
+            r1 -- r5 => arguments for function calls
+            r6 -- r9 => callee saved registers that function calls will preserve
+                 r10 => read-only frame pointer to access stack
+
+          instruction encoding >
+            eBPF uses 64-bit instructions
+                    32           16        4          4          8
+                    immediate    offset    src-reg    dst-reg    opcode
+
+                    MSB                                          LSB
+        
+                    not all fields are used by instructions,for the unused fields,
+                    need to be zero out.
+
+          instruction classes >
+            BPF_LD        0x00        non-standard load operations
+            BPF_LDX       0x01        load into reg operations
+            BPF_ST        0x02        store from imm operations
+            BPF_STX       0x03        store from reg operations
+            BPF_ALU       0x04        32-bit arithmetic operations
+            BPF_JMP       0x05        64-btt jump
+            BPF_JMP32     0x06        32-bit jump
+            BPF_ALU64     0x07        64-bit arithmetic operations
+
+          arithmetic and jump >
+            the encoding is
+                    4         1      3
+                    opcode    src    ins-class
+
+                    MSB              LSB
+
+            source operand mode
+              BPF_K    0x00        use 32-bit imm as src operand
+              BPF_X    0x08        use .src_reg reg as src operand
+
+            arithmetic instructions
+              BPF_ADD        0x00        dst += src
+              BPF_SUB        0x10        dst -= src
+              BPF_MUL        0x20        dst *= src
+              BPF_DIV        0x30        dst /= src
+              BPF_OR         0x40        dst |= src
+              BPF_AND        0x50        dst &= src
+              BPF_LSH        0x60        dst <<= src
+              BPF_RSH        0x70        dst >>= src
+              BPF_NEG        0x80        dst = ~src
+              BPF_MOD        0x90        dst %= src
+              BPF_XOR        0xa0        dst ^= src
+              BPF_MOV        0xb0        dst = src
+              BPF_ARSH       0xc0        signed extending shift right
+              BPF_END        0xd0        endianness converstion
+
+            jump instructions
+              BPF_JA         0x00        pc += off
+              BPF_JEQ        0x10        pc += off if dst == src
+              BPF_JGT        0x20        pc += off if dst > src
+              BPF_JGE        0x30        pc += off if dst >= src
+              BPF_JSET       0x40        pc += off if dst & src
+              BPF_JNE        0x50        pc += off if dst != src
+              BPF_JSGT       0x60        pc += off if dst > src
+              BPF_JSGE       0x70        pc += off if dst >= src
+              BPF_CALL       0x80        function call
+              BPF_EXIT       0x90        function / program return
+              BPF_JLT        0xa0        pc += off if dst < src
+              BPF_JLE        0xb0        pc += off if dst <= src
+              BPF_JSLT       0xc0        pc += off if dst < src
+              BPF_JSLE       0xd0        pf += off if dst <= src
+
+              ! for conditional jump, 'S' means signed, no 'S' means unsigned .
+              ! BPF_JA and BPF_JMP requires instruction class BPF_JMP.
+              ! @pc points to next instruction.
+
+          load and store >
+            instruction encoding
+                    3       2       3
+                    mode    size    insn-class
+
+            size modifier
+              BPF_W        0x00        word(4 bytes)
+              BPF_H        0x08        half word
+              BPF_B        0x10        byte
+              BPF_DW       0x18        double word
+
+            mode modifier
+              BPF_IMM        0x00        for 64-bit mov
+              BPF_ABS        0x20        legacy BPF packet access
+              BPF_IND        0x40        legacy BPF packet access
+              BPF_MEM        0x60        all normal load and store ops
+              BPF_ATOMIC     0xc0        atomic
+
+              ! BPF_MEM means treat the target as a pointer points to the data has
+                length @size,and derefer the pointer.
+
+            the .imm field can be used for extra encoding that support
+            atomic operations :
+              .imm = arithmetic opcode
+              .code = BPF_ATOMIC | BPF_W | BPF_STX
+
+              => lock xadd *(u32 *)(.dst_reg + off16) @arithmetic-op .src_reg
+            
+            ! supported atomic operations
+                BPF_ADD
+                BPF_AND
+                BPF_OR
+                BPF_XOR
+                
+              special atomic operations
+                BPF_XCHG        exchange .src_reg with *(.dst_reg + off)
+
+                BPF_CMPXCHG     if *(.dst_reg + off) == R0
+                                        exchange *(.dst_reg + off) with .src_reg
+                                oldv = zero-extend(old *(.dst_reg + off))
+                                load @oldv into R0
+                
+              ! 1 and 2 byte atomic operations are not supported.
+
+            16-byte instruction
+              the load operation that instruction is
+                      BPF_LD | BPF_DW | BPF_IMM
+              consists of two consecutive struct bpf_insn 8-byte blocks.
+              it loads 64-bit immediate value into .dst_reg
+
+              when we using the operation,we must fill the first block,and
+              the first block's .imm stores the lower 32bits of data;the
+              second block should zero-outted,execpt its .imm stores the
+              upper 32bits of data.
+                /* 16-byte instruction start */
+                prog_insns[0] = bpf_insn object contains 16 byte instruction
+                prog_insns[1] = {0}
+                prog_insns[1].imm = upper 32 bits of data
+                /* 16-byte instruction end */
+
+              ! when we want to pass a string pointer to print helper like
+                bpf_trace_printk().
+                we should use BPF_MOV instruction instead use BPF_LD.
+                suppose,we use 16-byte instruction to load pointer into
+                r1,verifier will throws "expected=fp" exception,because
+                it wants us to store into r1 a stack frame pointer rather
+                then pointer to the string.
+                suppose we fix the previous problem by store the pointer
+                at stack position "r10 - 8"(high addr to low addr),and
+                store into r1 the result of "r10 - 8" -- stack frame pointer,
+                this will cause nested pointer -- pointer to pointer,we can
+                address the string through "*(*r1)",this is a not allowed
+                in a lot of helpers.(for BPF_LD,verifier assumes the value is
+                an unspecifiable 'scalar' or 'pointer')
+                # error "invalid stack type"
+                    1> uninitialized bytes
+                    2> misaligned pointers
+                    3> reading outside boundaries
+                to fix these problems,we need to use BPF_MOV move the
+                pointer to string into r1 directly(verifier flags the r1 state
+                as a safe SCALE_VALUE),or use BPF_MOV and BPF_STX to store the
+                pointer(as SCALE_VALUE) from register onto stack position,
+                then we store into r1 the stack pointer,this is OK.
+                because BPF_MOV automatically does alignment for us,and the
+                pointer moved by BPF_MOV it is considered as a scalar by
+                verifier.
+                # we can store the string directly on stack to prevent
+                  nested pointer,but that is not necessary,and consumes
+                  stack space.
+
+              ! eBPF only supports 64 bits pointer arithmetic,the 32-bit pointer
+                arithmetic is prohibited.
+
+              ! special usage of 16-byte operation
+                  BPF_PSEUDO_MAP_FD == 1
+
+                  {
+                          .code = BPF_IMM | BPF_DW | BPF_LD,
+                          .src_reg = BPF_PSEUDO_MAP_FD,
+                          .dst_reg = BPF_REG_1,
+                          .off = 0
+                          .imm = @map_fd,
+                  },
+                  {
+                          .code = 0,
+                  },
+
+                this bpf bytecode sequence can help us convert the bpf map fd to
+                the map pointer that is required by bpf_map_lookup_elem().
+                in userspace,we usually only has a map fd returned by bpf(),
+                through the 16-byte load operation,we can get the corresponding
+                map pointer that points to the map entity in Kernel Mode,because
+                the bytecode only be executed in Kernel Mode BPF virtual machine,
+                thus userspace can not know the exact address of that map entity.
+
+                we can combine bpf_map_lookup_elem() and printing helpers that
+                printing usually requires the first parameter is a stack pointer
+                to the fmt,if we succeed to find out the element in map,we can
+                move content of BPF_REG_0 into BPF_REG_1 to get the stack pointer
+                indirectly,without need to puts fmt on stack.
+                but for do this,we must update the map at first.
+
+            packet access instructions
+              eBPF has two non-generic instructions
+                      BPF_ABS | @size | BPF_LD
+                      BPF_IND | @size | BPF_LD
+              these two instructions are used to access packet data.
+              they can only be used when interpreter context is a pointer
+              to struct sk_buff object,and have seven implicit operands.
+              R6 is an implicit input hat must contain pointer to sk_buff.
+              R0 is an implicit output which contains the data fetched
+              from the packet.
+              R1 -- R5 are scratch registers and must not be used to store
+              the data across BPF_ABS | BPF_LD and BPF_IND | BPF_LD.
+              .src_reg and .imm are explicit inputs to these instructions.
+
+              ! when an eBPF program try to access packet data beyond the
+                boundary,the interpreter will abort the execution of the program.
+
+              e.g.
+                BPF_IND | BPF_W | BPF_LD
+                => R0 = ntohl(*(u32 *)(((struct sk_buff *)R6)->data + .src_reg + .imm))
+                
+                R1 -- R5 are clobbered
+
+
+
                
                 
