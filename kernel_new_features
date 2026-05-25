@@ -2439,6 +2439,26 @@ BPF system call :
            |                                                       .
            |                                                       |
            +-------------------------------------------------------+ # return path
+           /**
+            * This jumping usually happens call to bpf_tail_call().
+            * The helper needs a context pointer,a bpf_map descriptor,and an index
+            * to the program array.
+            * If the tail calling can be executed,the execution flow of current
+            * eBPF program would be modified in-place to the new eBPF program's
+            * beginning,and the old eBPF program would not return(not function call),
+            * we will return from the new eBPF program.
+            * if we can not execute the new eBPF program,then the old program
+            * continue to executes instructions after bpf_tail_call(),like
+            * the default control path.
+            * when we construct such program through bytecodes,there is mandatory
+            * to modify the value in bpf_reg0 before call to bpf exit;otherwise,
+            * R0 !read_ok will throw.
+            * ! when construct eBPF program,the last opcode must be jump instruction
+            *   or exit calling instruction.
+            *   call to the helper that will return back is not legal at the
+            *   last opcode.
+            * ! bpf_tail_call() has recursion limit,the maximum value is 32.
+            */
     
         eBPF program that associated with the file descriptor in program array
         must be loaded into kernel previously,if lookup failed,the old eBPF
@@ -2504,6 +2524,11 @@ BPF system call :
                 /* verify and load an eBPF program,returning a new
                  * file descriptor associated with the program
                  * # auto close-on-exec
+                 * # requires CAP_SYS_ADMIN
+                 * # has limit on maximum number of loaded programs,
+                 *   according the test,that value is 15.
+                 *   (might can be modified,or same program insns -- do nothing
+                 *    except call to exit,has maximum number limit)
                  */
                 BPF_PROG_LOAD
 
@@ -2566,6 +2591,12 @@ BPF system call :
                   BPF_MAP_TYPE_UNSPEC,
                   BPF_MAP_TYPE_HASH,
                   BPF_MAP_TYPE_ARRAY,
+                  /**
+                   * The table can be updated with file descriptors to the
+                   * loaded eBPF programs.
+                   * For this type,@key_size and @value_size in bpf_attr
+                   * must be 4 -- 4 bytes.
+                   */
                   BPF_MAP_TYPE_PROG_ARRAY,
                   BPF_MAP_TYPE_PERF_EVENT_ARRAY,
                   BPF_MAP_TYPE_PERCPU_HASH,
@@ -2716,6 +2747,13 @@ BPF system call :
             r1 -- r5 => arguments for function calls
             r6 -- r9 => callee saved registers that function calls will preserve
                  r10 => read-only frame pointer to access stack
+
+            ! when a eBPF program start running,the bpf_reg0 contains a pointer to
+              context(void *),this context can be used for other eBPF helpers
+              such bpf_tail_call().
+            ! The rN register naming,is not means to the general purpose registers
+              that coming with CPU architecture,such R8, R9, etc.
+              They only meaningful in eBPF.
 
           instruction encoding >
             eBPF uses 64-bit instructions
