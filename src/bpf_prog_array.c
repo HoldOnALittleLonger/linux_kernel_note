@@ -38,7 +38,7 @@ int main(void)
         __u32 key_idx = 0;
         int bpf_prog_fd = -1;
         int bpf_prog_fds[MAP_ENTRIES] = {
-                [0 ... 3] = -1,
+                [0 ... (MAP_ENTRIES - 1)] = -1,
         };
 
         /**
@@ -102,14 +102,14 @@ int main(void)
         };
         static const char *prog_license = "GPL";
         const size_t log_buf_size = 512;
-        char *log_bufs[MAP_ENTRIES] = {0};
-        /* we place log buffer on heap rather on stack */
-        for (unsigned int i = 0; i < MAP_ENTRIES; ++i) {
-                log_bufs[i] = malloc(sizeof(char) * log_buf_size);
-                if (!log_bufs[i]) {
-                        (void)close(bpf_pa_fd);
-                        return -ENOMEM;
-                }
+        /* allocate memory once brk() is better than allocate memory through
+         * a loop with several times brk() calling.
+         */
+        char (*log_bufs)[log_buf_size] = malloc(sizeof(char) * log_buf_size * MAP_ENTRIES);
+        if (!log_bufs) {
+                fprintf(stderr, "error: failed to allocate log buffer.\n");
+                close(bpf_pa_fd);
+                return -ENOMEM;
         }
         
         union bpf_attr bpf_prog_attr = {
@@ -169,7 +169,7 @@ int main(void)
 
         /* try bpf_tail_call() */
         bpf_prog_fd = -1;
-        char tc_prog_log_buf[512] = {0};
+        char tc_prog_log_buf[1024] = {0};
 
         struct bpf_insn tc_insns[] = {
                 /* movq    bpf_reg1, bpf_reg6 # store ctx pointer */
@@ -205,10 +205,10 @@ int main(void)
                         .code = BPF_JMP | BPF_CALL | BPF_K,
                         .imm = BPF_FUNC_tail_call,
                 },
-                /* movq    $0xffff, bpf_reg0 # we wont back to there */
+                /* movq    $-1, bpf_reg0 # we wont back to there */
                 {
                         .code = BPF_ALU64 | BPF_MOV | BPF_K,
-                        .imm = 1,
+                        .imm = -1,
                         .dst_reg = BPF_REG_0,
                 },
                 /* call    bpf_exit # default path */
@@ -224,8 +224,8 @@ int main(void)
                 .insn_cnt = sizeof(tc_insns) / sizeof(tc_insns[0]),
                 .insns = ptr_to_u64(tc_insns),
                 .license = ptr_to_u64(prog_license),
-                .log_level = 1,
-                .log_size = 512,
+                .log_level = 3,
+                .log_size = 1024,
                 .log_buf = ptr_to_u64(tc_prog_log_buf),
         };
         const char tc_prog_name[] = "user_tailcall";
@@ -271,9 +271,11 @@ err_exit_unload:
         for (__u8 i = 0; i < MAP_ENTRIES; ++i) {
                 if (bpf_prog_fds[i] > 0)
                         (void)close(bpf_prog_fds[i]);
-                /* free NULL pointer is OK */
-                free(log_bufs[i]);
+
+
         }
+        /* free NULL pointer is OK */
+        free(log_bufs);
 
         (void)close(bpf_pa_fd);
         return 0;

@@ -2423,7 +2423,7 @@ BPF system call :
         is a recursion limiter that fixed to 32 times.
         file descriptor in program array can be modified at runtime,thus we
         can get flexibility to change behaviors based on specific requirements.
-           +--> User Mode process issued system call
+           +--> Kernel eBPF Virtual Machine
            |
            |    eBPF_program1:
            |            ...
@@ -2435,9 +2435,9 @@ BPF system call :
            |                            .                          |
            |                            .                          V # execution
            |                            .                          .
-           |            ... # rest                                 .
-           |                                                       .
-           |                                                       |
+           |            ... # rest      |                          .
+           |                            |                          .
+           |                            V                          |
            +-------------------------------------------------------+ # return path
            /**
             * This jumping usually happens call to bpf_tail_call().
@@ -2637,6 +2637,11 @@ BPF system call :
                   BPF_PROG_TYPE_LWT_IN,
                   BPF_PROG_TYPE_LWT_OUT,
                   BPF_PROG_TYPE_LWT_XMIT,
+                  /**
+                   * when setup a eBPF program has this program type,
+                   * the value in bpf_reg0 used for exit code,must
+                   * be 0 OR 1.
+                   */
                   BPF_PROG_TYPE_SOCK_OPS,
                   BPF_PROG_TYPE_SK_SKB,
                   BPF_PROG_TYPE_CGROUP_DEVICE,
@@ -2970,7 +2975,358 @@ BPF system call :
                 
                 R1 -- R5 are clobbered
 
+BPF in kernel :
+        the system call bpf() is defined in <kernel/bpf/syscall.c>.
 
+        <kernel/bpf/syscall.c>
+          /**
+           * sys_bpf - the system call service routine for bpf()
+           * @cmd:     BPF command
+           * @uattr:   BPF attritbue union
+           * @size:    attribute union size
+           * return:   0 OR error code
+           * # this function just a wrapper to __sys_bpf().
+           *   @uattr will be converted by USER_BPFPTR() before pass to
+           *   __sys_bpf().
+           * # "static inline bpfptr_t USER_BPFPTR(void __user *p);" is
+           *   defined in <linux/bpfptr.h>,it returns an object is type of
+           *   bpfptr_t,the member @user is set to @p.
+           *   bpfptr_t is a type alias of type sockptr_t.
+           */
+          SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr,
+                          unsigned int size);
+          => asmlinkage long sys_bpf(int cmd, union bpf_attr __user *uattr,
+                                     unsigned int size);
 
-               
-                
+          /**
+           * __sys_bpf - the BPF command dispatcher
+           * @cmd:       command
+           * @uattr:     attribute
+           * @size:      size of attribute from User Mode
+           * return:     0 OR error code
+           */
+          static int __sys_bpf(enum bpf_cmd cmd, bpfptr_t uattr, unsigned int size);
+
+          description for __sys_bpf() :
+            at the beginning,this routine invoke bpf_check_uarg_tail_zero() on @uattr,
+            with its size and the @size of User Mode attribute.
+            /**
+             * attribute @size cant larger than PAGE_SIZE,otherwise -E2BIG.
+             * for attribute from User Mode(@uattr.is_kernel set to false),
+             * invoke check_zeroed_user(),it is defined in <lib/usercopy.c>.
+             * the routine checks whether the memory space determined by a
+             * given start position and a size value is all zeroed out.
+             * in bpf_check_uarg_tail_zero(),we expect the memory start
+             * from "@uattr.user + sizeof(bpfptr_t)" with size "@size - sizeof(bpfptr_t)"
+             * is all zero filled.
+             */
+            next,take the minimal value between @size and sizeof(union bpf_attr),then
+            we copy attribute from User Mode in local object @attr with the size.
+            invoke security_bpf(),pass it @cmd, &@attr, the minimal size, @uattr.is_kernel,
+            to does security checking(LSM),if security test failed,we return the error code.
+            invoke different helper functions depends on @command.
+            /* there is a lot of commands available,we would not describe all things. */
+            for BPF_MAP_CREATE
+              map_create() is called,pass &@attr, @uattr.
+            for BPF_MAP_LOOKUP_ELEM
+              map_lookup_elem() is called,pass &@attr.
+            for BPF_MAP_UPDATE_ELEM
+              map_update_elem() is called,pass &@attr, @uattr.
+            for BPF_PROG_LOAD
+              bpf_prog_load() is called,pass &@attr, @uattr,the minimal size.
+            return value of this __sys_bpf() depends on the called helper.
+
+          /**
+           * CHECK_ATTR - this macro is used to check unused fields of 'union bpf_attr' are
+           *              zero.
+           * @CMD:        current command relative to the @attr
+           * return:      true  => Bad
+           *              false => OK
+           * # in the definition,name @attr is used,thus the scope called this macro must
+           *   has such object matches the name.
+           */
+          #define CHECK_ATTR(CMD)
+
+          /**
+           * map_create - handler for command BPF_MAP_CREATE.
+           * @attr:       BPF attr,local object but data copied from User Mode.
+           * @uattr:      bpfptr_t object.
+           * return:      0 OR error code
+           */
+          static int map_create(union bpf_attr *attr, bpfptr_t uattr);
+
+          description for map_create() :
+            first,get NUMA node number of the @attr through bpf_map_attr_numa_node().
+            if @attr->map_flags enabled BPF_F_NUMA_NODE,then we use @attr->numa_node.
+            otherwise,the node is NUMA_NO_NODE.
+            check @attr through CHECK_ATTR(),if unused fields are not zeroed,returns
+            -EINVAL.
+            extrace value of BPF_F_TOKEN_FD in @attr->map_flags,and disable the flag.
+            if @attr->btf_vmlinux_value_type_id is TRUE,there are three conditions
+            must not be satisfied,otherwise,returns -EINVAL.
+              cond 1 => @attr->map_type cant be BPF_MAP_TYPE_STRUCT_OPS
+              cond 2 => @attr->btf_key_type_id must be zero
+              cond 3 => @attr->btf_value_type_id must be zero
+            if no @btf_vmlinux_value_type_id,we just requires @btf_key_type_id is zero
+            OR @btf_value_type_id is not zero.
+            proceeding to check map type,if it is not BFP_MAP_TYPE_BLOOM_FILTER AND it
+            is not BPF_MAP_TYPE_ARENA but @attr->map_extra is not zero,that will be
+            invalid;only these two types can let @map_extra to _zero_.
+            next,invoke bpf_get_file_flag() on @map_flags to get file flag,
+              BPF_F_RDONLY => O_RDONLY
+              BPF_F_WRONLY => O_WRONLY
+              no both two specified => O_RDWR
+              /* both are specified in flags is invalid case */
+            if NUMA node is not NUMA_NO_NODE,the node number must be less than maximum
+            number value and which must be online now.
+            @map_type can in valid range of map types.
+            convert @map_type to array idx through array_index_nospec(),on array @bpf_map_types.
+            use the idx to retrieves bpf_map_ops object in @bpf_map_types[],if no such
+            ops is registered,returns -EINVAL.
+            if @ops requires check before allocate memory(@map_alloc_check() method is not NULL),
+            must does checking at first,failed to pass test then give up to this creation.
+            if @attr->map_ifindex is not _zero_,we use @bpf_map_offload_ops rather than the @ops
+            from @bpf_map_types[].
+            for either @ops,@map_mem_usage() method must be defined.
+            now,check token flag,if token flag is set before,we get token through function
+            bpf_token_get_from_fd(),pass it @attr->map_token_fd.
+            if the token does not allow BPF_MAP_CREATE command OR does not allow current @map_type,
+            we put the token and set @token to NULL./* ignore the token,we'll use system-wide
+                                                     * capabilities checks later
+                                                     */
+            check if @sysctl_unprivileged_bpf_disabled AND bpf_token_capable() on @token
+            disallowed CAP_BPF,we goto label "put_token",give up creation.
+            /* system-wide capability allowed CAP_BPF or we are root user,return TRUE */
+            for a lot of map types,there is no additional testing,but for BFP_MAP_TYPE_XSKMAP,
+            we need CAP_NET_ADMIN,for BPF_MAP_TYPE_INSN_ARRAY,we need CAP_BPF.
+            now we can allocate map through @ops->map_alloc(),pass it @attr,if succeed,it will
+            create an object is type of struct bpf_map and returns the object's address.
+            use @ops and @map_type(get from @bpf_map_types,idx) set the @map.
+            if we specified @map_name in @attr,copy the named into @map.
+            disable preemption,invoke gen_cookie_next() on @bpf_map_cookie to create cookie
+            for this new @map,set its @cookie member,enable preemption.
+            set @map->refcnt to 1,@map->usercnt to 1,init @map->freeze_mutex.
+            spinlock acquire @map->owner_lock.
+            check,if @btf_key_type id is not zero OR @btf_value_type_id is not zero OR
+            @btf_vmlinux_value_type_id is not zero,then we need invoke btf_get_by_fd()
+            on @attr->btf_fd to get a btf descriptor,use @btf to set @map->btf;use @attr's
+            @btf_key_type_id,@btf_value_type_id,@btf_vmlinux_value_type_id to setup
+            corresponding members in @map.
+            /* @btf can not be kernel space btf,and if @attr->btf_value_type_id is not zero,
+             * we need to call map_check_btf(),pass it @map, @token, @btf, @btf_key_type_id,
+             * @btf_value_type_id.
+             */
+            check @attr->excl_prog_hash,if it is true,we need to make_bpfptr() from @attr's
+            @excl_prog_hash,and copy the hash into @map->excl_prog_sha.
+            if @excl_prog_hash is not true but @attr->excl_prog_hash_size is not zero,returns
+            -EINVAL.
+            invoke security_bpf_map_create(),does security test(Linux Security Module).
+            allocate 'id' for @map through bpf_map_alloc_id().
+            /* this calling will publish this @map into userspace */
+            invoke bpf_map_save_memcg() on @map to set memory cgroup info into @map->objcg,
+            if @memcg_bpf_enabled() returned ture. /* cgroup info get through
+                                                    * get_obj_cgroup_from_current(),that is
+                                                    * object cgroup of current task.
+                                                    */
+            put token,allocate new file descriptor based on file flags(extraced before) for
+            @map. /* if failed,invoke bpf_map_put_with_uref() on @map to decrease @usercnt,
+                   * @refcnt,free 'id' if necessary -- @refcnt becomes zero.
+                   * free @map.
+                   * ! the bpf_map descriptor will be stored into fd's private data.
+                   */
+            finally,return the result to caller.
+
+            /* normal error return path */
+            "free_map_sec":
+              invoke security_bpf_map_free() to free @map->security,reset to
+              NULL.
+            "free_map":
+              call bpf_map_free() to free @map.
+            "put_token":
+              call bpf_token_put() on @token.
+              return error code.
+
+          /**
+           * map_lookup_elem - hander for command BPF_MAP_LOOKUP_ELEM.
+           * @attr:            in kernel space BPF attribute descriptor
+           * return:           0 OR error code
+           * # this routine will does
+           *     1> CHECK_ATTR()
+           *     2> use @attr->map_fd get bpf_map descriptor,need FMOD_CAN_READ
+           *     3> bpf_map_check_op_flags() on @map,@attr->flags,allowed flags is
+           *        BPF_F_LOCK -- other flags cause -EINVAL
+           *        # if has such flags,@map->record the btf record must has field
+           *          BPF_SPIN_LOCK.
+           *     4> copy key from @attr,size is @map->key_size
+           *     5> get @map->value_size,use the size allocate GFP_USER memory as
+           *        buffer
+           *     6> for BPF_MAP_TYPE_BLOOM_FILTER,copy @attr->value into value buffer,
+           *        and then invoke bpf_map_copy_value() to copy the real value
+           *        into value buffer,through @map->ops->map_peek_elem().
+           *        # if @map is offloaded map,the work will hands over to 
+           *          bpf_map_offload_lookup_elem.
+           *        # for this map BPF_MAP_TYPE_BLOOM_FILTER,we just goto label "free_value"
+           *          at end of this branch.does not go into 7>
+           *     7> invoke bpf_map_copy_value(),invoke copy_to_user() to copy value in
+           *        value buffer to @attr->value.
+           *     "free_value":
+           *       kvfree() value buffer
+           *     "free_key":
+           *       kvfree() copied key,return result
+           */
+          static int map_lookup_elem(union bpf_attr *attr);
+
+          /**
+           * map_update_elem - handler for command BPF_PROG_LOAD
+           * @attr:            in kernel space BPF attribute descriptor
+           * @uattr:           bpfptr_t constructed from userspace attribute
+           * return:           0 OR error code
+           * # this routine similar to map_lookup_elem(),but it copy value from
+           *   userspace,and insert it into the map,requires FMODE_CAN_WRITE.
+           *   the disallow all flags in bpf_map,otherwise -EINVAL.
+           *   # check operation flags
+           *   duplicates value into kernel space,and invoke the helper
+           *   bpf_map_update_value().(similar to bpf_map_copy_value())
+           *   if succeed,we call to maybe_wait_bpf_programs() to RCU sync,
+           *   for the map type is BPF_MAP_TYPE_HASH_OF_MAPS OR
+           *   BPF_MAP_TYPE_ARRAY_OF_MAPS.
+           *   finally,release allocated memory,and return result.
+           */
+          static int map_update_elem(union bpf_attr *attr, bpfptr_t uattr)
+
+          /**
+           * bpf_prog_load - handler for command BPF_PROG_LOAD
+           * @attr:          in kernel space attribute descriptor
+           * @uattr:         bpfptr_t object constructed from userspace attribute
+           * @uattr_size:    size of @uattr
+           * return:         0 OR error code
+           */
+          static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size);
+
+          description for bpf_prog_load() :
+            the first work still is CHECK_ATTR().
+            @attr->prog_flags is restricted to one of the following
+              BPF_F_STRICT_ALIGNMENT
+              BPF_F_TEST_STATE_FREQ
+              BPF_F_SLEEPABLE
+              BPF_F_TEST_RND_HI32
+              BPF_F_XDP_HAS_FRAGS
+              BPF_F_XDP_DEV_BOUND_ONLY
+              BPF_F_TEST_REG_INVARIANTS
+              BPF_F_TOKEN_FD
+            some prog type needs the expected attach type,function
+            bpf_prog_load_fixup_attach_type() is used to adjust expected type for
+            BPF_PROG_TYPE_CGROUP_SOCK and BPF_PROG_TYPE_SK_REUSEPORT,if current
+            prog type is one of those two,and @expected_attach_type of @attr is
+            0,set to BPF_CGROUP_INET_SOCK_CREATE and BPF_SK_REUSEPORT_SELECT,
+            respectively.
+            if BPF_F_TOKEN_FD is enabled in flags,we get the token,the token
+            must allows BPF_PROG_LOAD command,otherwise,we use the system-wide
+            capabilities checking.(like the action in map_create())
+            the system-wide capability must has CAP_BPF,or we are root user.
+            /* we can load the program,even @syscal_unprivileged_bpf_disabled,
+             * if we have CAP_BPF.
+             */
+            if no CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS AND BPF_F_ANY_ALIGNMENT
+            is set in flags AND we have not CAP_BPF,just give up the loading.
+            @attr->insn_cnt is _zero_ OR exceeded the maximum value of insns,
+            goto "put_token" label,error code is -E2BIG.
+            for prog type is neither BPF_PROG_TYPE_SOCKET_FILTER,nor is
+            BPF_PROG_TYPE_CGROUP_SKB,we must have CAP_BPF,otherwise give up.
+            if current prog type is net admin prog type AND
+              /* BPF_PROG_TYPE_CGROUP_SKB and BPF_PROG_TYPE_SK_REUSEPORT
+               * #^always unpriv             #^equivalent to SOCKET_FILTER,
+               *                               need CAP_BPF only
+               * are not net admin prog type
+               */
+            token has no CAP_NET_ADMIN,give up and goto label "put_token",
+            error code is -EPERM.
+            else if current type is perfmon prog type but token has no
+            CAP_PERFMON,also goto "put_token".
+            /* KPROBE, TRACEPOINT, PERF_EVENT, RAW_TRACEPOINT,
+             * RAW_TRACEPOINT_WRITABLE, TRACING, LSM, STRUCT_OPS, EXT
+             * are perfmon prog type
+             */
+            test @attr->attach_prog_fd,if this eBPF program wants to attach
+            to another program,we need to get dst_prog through @attach_prog_fd,
+            if failed to get the program,we use @attr->attach_btf_obj_fd to
+            get btf descriptor of that program,both are failed then give up
+            this loading.
+            else if no @attach_prog_fd,but has @attr->attach_btf_id,then
+            we get the btf descriptor through bpf_get_btf_vmlinux(),failed then
+            give up.
+            next to check whether we are able to attach to the program,if condition
+            is not satisfied,release the bpf_prog descriptor/btf descriptor of that 
+            program,and give up loading.
+            we ready to allocate new prog descriptor(struct bpf_prog) for the being
+            load program through bpf_prog_alloc(),gfp flag is GFP_USER,size is
+            computed by bpf_prog_size() based on @attr->insn_cnt.
+            setup the fields of the new descriptor,@expected_attach_type,@sleepable,etc.
+            copy the instructions in userspace attribute's @insns member into the
+            new prog descriptor's @insns member.
+            copy license,then check license,because eBPF program hard requires "GPL"
+            license.
+            if @attr->signature is not zero,invoke bpf_prog_verify_signature() to
+            the new prog descriptor,this will verify whether the program constructed
+            by a reliable user.
+            set @prog->orig_prog to NULL(has no tail call now),and set @prog->jited to 0.
+            set @prog->aux->refcnt to 1.if @prog->aux is device bound,invoke
+            bpf_prog_dev_bound_init() on @prog with @attr. /* device binding */
+            if prog type is BPF_PROG_TYPE_EXT AND @dst_prog is not NULL AND
+            @dst_prog is device bound,we invoke bpf_prog_dev_bound_inherit() to let
+            @prog derives device bound from this @dst_prog.
+            if type is BPF_PROG_TYPE_TRACING AND @dst_prog is not NULL AND @dst_prog's
+            type is BPF_PROG_TYPE_TRACING,set @prog->aux->attach_tracing_prog to true.
+            try find_prog_type() on @prog with the type,SOCKET_FILTER or TRACING_FILTER,
+            the idx of current type into @bpf_prog_types will stored in @prog->type,
+            and @ops for this type must been defined.
+            set @prog->aux->load_time to the current time since system booted.
+            copy @attr->prog_name into @prog->aux->name.
+            /* the above goto label "free_prog" or goto "put_token" if failed */
+
+            does LSM testing on @prog. /* goto "free_prog_sec" if failed */
+
+            /* [[ goto label "free_used_maps" if failed */
+            call to bpf_check() on @prog,this function will run eBPF verifier on this
+            @prog to see whether the instructions of this program is "good"(syntax correct,
+            no security violate,etc).
+            invoke bpf_prog_select_runtime() on @prog,this function is defined in
+            <kernel/bpf/core.c>,which select exec runtime for this eBPF program.
+            it tries to JIT this program,if JIT is not available,use interpreter,
+            the BFP program will be executed via bpf_prog_run() function.
+            invoke bpf_prog_mark_insn_arrays_ready() on @prog.
+            /**
+             * it processes a for-loop,stop condition is @prog->aux->used_map_cnt
+             * is beyonded by iterator.
+             * for each prog->aux->used_maps[i],if the map type is BPF_MAP_TYPE_INSN_ARRAY,
+             * invoke bpf_insn_array_read() on the map.
+             */
+            invoke bpf_prog_alloc_id() on @prog,give it an 'id',this will publishes it
+            to userspace.
+            /* goto label "free_used_maps" if failed ]] */
+
+            invoke bpf_prog_kallsyms_add(),to add this @prog in kallsyms table.
+            feed a perf bpf even PERF_BPF_EVENT_PROG_LOAD.
+            invoe bpf_audit_prog() on @prog,second parameter is BPF_AUDIT_LOAD,we audit
+            this loading.
+            invoke bpf_prog_new_fd() to create a new fd for this program.
+            finally,return result.
+
+            /* error handing */
+            "free_used_maps":
+              __bpf_prog_put_noref(),pass it @prog, @prog->aux->real_func_cnt.
+              return error code.
+
+            "free_prog_sec":
+              security_bpf_prog_free() on @prog.
+            "free_prog":
+              free_uid() on @prog->aux->user,btf_put() is has any attached btf,
+              bpf_prog_free() on @prog to release it.
+            "put_token":
+              bpf_token_put(),and return error code.
+
+          !! eBPF PROGRAM IS NOT EXECUTED RIGHT AFTER IT BEEN LOADED,BUT RELATED TO
+             THE WHAT THE TYPE IT IS.
+             FOR EXAMPLE,IF THE PROGRAM IS 'TRACEPOINT',THEN IT WILL BE CALLED WHEN
+             KERNEL CONTROL PATH TOUCHED THE CORRESPONDING TRACEPOINT,ON THAT PATH,
+             SUCH eBPF PROGRAM USUALLY IS CALLED BY trace_call_bpf().
