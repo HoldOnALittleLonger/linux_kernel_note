@@ -3251,7 +3251,14 @@ BPF in kernel :
             to another program,we need to get dst_prog through @attach_prog_fd,
             if failed to get the program,we use @attr->attach_btf_obj_fd to
             get btf descriptor of that program,both are failed then give up
-            this loading.
+            this loading. /**
+                           * structure btf is defined in
+                           *   <kernel/bpf/preload/iterators/iterators_bpf.c>
+                           * which contains three members
+                           *   const char *strings;
+                           *   struct btf_type **types; # contains __u32 @name_off
+                           *   struct btf_header hdr;   # contains __u32 @str_len
+                           */
             else if no @attach_prog_fd,but has @attr->attach_btf_id,then
             we get the btf descriptor through bpf_get_btf_vmlinux(),failed then
             give up.
