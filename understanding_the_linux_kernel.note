@@ -27539,6 +27539,7 @@ Chapter 13 : I/O Architecture and Device Drivers
 
             ! header <linux/fs.h> defined two static function,register_chrdev() and unregister_chrdev(),
               they are wrappers for __register_chrdev() and __unregister_chrdev(),respectively.
+              /* the minor number is start from 0,and count is 256 */
 
         Accessing a Character Device Driver :
           the file operation @def_chr_fops have defined open method only,the chrdev_open().the remain

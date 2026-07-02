@@ -1,0 +1,49 @@
+                                                             Linux Device Driver 3rd Edition
+/**
+ * Kernel Version used for the Book => 2.6.10
+ * Kernel Version used for this note => 2.6.34    
+ */
+
+Char Devices :
+        scull => Simple Character Utility for Loading Localities
+        /* a char driver acts on a memory area as though it were a device */
+          [scull0, scull3] => resembling to a shared memory area,
+                              global and persistent(re-open no data lost)
+          [scullpipe0, scullpipe3] => pipe(several reader happens race cond)
+          scullsingle => only allows one process at a time to use
+          scullpriv => private to each virtual console
+          sculluid, scullwuid => limited to one user at a time,
+                                 can be opened multiple times
+
+        Major number
+          identifies the driver associated with the device.
+          /* modern linux kernel supports major number is shared between
+           * several different drivers.
+           */
+        Minor number
+          used by kernel to determine exactly which device is being referred to.
+
+        dev_t
+          holds both major number and minor number.
+          major number => 12 bits
+          minor number => 20 bits
+          /* we extract these parts or construct new value through kernel macros.
+           * in header <linux/kdev_t.h>
+           * in earlier kernel,both numbers are limited to 255 numbers,
+           * but recent kernel supports wider range.
+           */
+
+        register_chrdev_region
+          routine to register char device number region.
+          its first parameter is a device number(contains major and minor) identifies
+          the start point.
+
+        alloc_chrdev_region
+          dynamically allocate char device number region.
+
+        unregister_chrdev_region
+          free char device number region.
+
+        ! best to get device number dynamically rather than pick a unused static device
+          number.
+       
