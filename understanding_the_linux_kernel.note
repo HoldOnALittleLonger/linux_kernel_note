@@ -22429,6 +22429,15 @@ Chapter 12 : The Virtual Filesystem
           *   in @i_fop,but VFS is able to modify the file operations later
           *   (actually,when a filesystem is installed,the pre-defined file operation implementations is also 
           *    loaded into memory)
+          * ! in linux 2.6.34.1,no "sendfile" method is declared in this structure,but kernel suppoets
+          *   sendfile() system call,the helper for do_sendfile() is do_splice_direct().
+          *   this system call is defined in file <fs/read_write.c>,and do_splice_direct() is defined in
+          *   file <fs/splice.c>.
+          *   # userspace splice() system call requires one of two fds must be a pipe.
+          * ! method get_unmapped_area() in this structure is used to supports special alignment requirements
+          *   for particular file(such special device file).
+          *   the purpose of this method is to find out unmapped memory area in process address space that
+          *   can be used for memory mapping.
           */
          struct file_operations {
                  struct module *owner;
@@ -27193,7 +27202,7 @@ Chapter 13 : I/O Architecture and Device Drivers
           };
 
         <fs/char_dev.c>
-          /* cdev operation lock,used by chrdev_open(),cd_forget(),cdev_purge(),and etc. */
+          /* cdev operation lock,used by chrdev_open(),cd_forget(),cdev_purge(),etc. */
           static DEFINE_SPINLOCK(cdev_lock);
 
           /**
@@ -27420,8 +27429,17 @@ Chapter 13 : I/O Architecture and Device Drivers
              *           __register_chrdev_region(MAJOR(n), MINOR(n), next - n, name);
              *                                              |         ^minor number count
              *                                              ^base minor number
-             *   the @n is an iterator,@next is the next device number,for @n in @from to @from + @count - 1,
+             *   @n is an iterator,@next is the next device number,for @n in @from to @from + @count - 1,
              *   @next can not greater than @from + @count (@next := MKDEV(MAJOR(n) + 1, 0)).
+             *           @to default to @from + @count
+             *           @next := MKDEV(MAJOR(@n) + 1, 0)
+             *           if @next > @to
+             *           then
+             *                   @next := @to
+             *           ! @minorct passed to __register_chrdev_region() is
+             *               @next - @n
+             *             if we want to register only one device number,we just let @count to 1 as well,
+             *             in this case,the minor number is 0.
              *
              *   the region : [(@from, 0) | (@from + 1, 0) | (@from + 2, 0) | ... | (@from + @count - 1, 0)]
              *                |           |                |

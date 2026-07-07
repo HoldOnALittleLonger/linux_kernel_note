@@ -35,8 +35,8 @@ Char Devices :
 
         register_chrdev_region
           routine to register char device number region.
-          its first parameter is a device number(contains major and minor) identifies
-          the start point.
+          its first parameter is a device number(contains major and minor)
+          identifies the start point.
 
         alloc_chrdev_region
           dynamically allocate char device number region.
@@ -44,6 +44,59 @@ Char Devices :
         unregister_chrdev_region
           free char device number region.
 
-        ! best to get device number dynamically rather than pick a unused static device
-          number.
-       
+        ! best to get device number dynamically rather than pick a unused static
+          device number.
+
+        most of the fundamental driver operations involve three important kernel
+        data structures :
+          1> struct file_operations
+               device number <=>  driver's operations
+                              |
+                              +--> file_operations
+             NULL operations :
+               readdir() <= fs only
+               sendfile() <= usually NULL
+               sendpage() <= usually NULL
+               get_unmapped_area() <= usually NULL
+               dir_notify() <= fs only
+             The others has default behavior supported by kernel,when design
+             character device driver,we need to see what operations the data
+             stream need to supports.
+             /* usually,lseek() is not supported by data stream like pipe and
+              * network socket.
+              * if the device is a keyboard,lseek also is not possible.
+              */
+          2> struct file
+             for device file,because "everything is a file".
+          3> struct inode
+             for filesystem where this device file residing on has an inode
+             associated with.
+             /* character device driver usually focus on @i_rdev and @i_cdev
+              * members.
+              * <linux/fs.h>
+              *   imajor(*inode) -> major device number
+              *   iminor(*inode) -> minor device number
+              * these two routines get results from @inode->i_rdev through
+              * device number macros.
+              * we should prefer to these routines rather one use @i_rdev
+              * directly.
+              */
+
+        struct cdev
+          character device descriptor in kernel space.
+    
+          allocating and initializing: cdev_alloc()
+          only initializing: cdev_init()
+          add to @chrdevs: cdev_add()
+          remove from @chrdevs and deallocate: cdev_del()
+          query: cdev_index() /* use inode query cdev in Kobject Mapping Domain */
+          ! the @count parameter for cdev_add() is used to tell kernel the
+            number of device numbers that should be associated with the
+            device.(range of minor numbers)
+          ! if we register char device through register_chrdev() path,
+            we do not need to invoke cdev_alloc() and cdev_add() manually.
+          ! register_chrdev() default will register 0-255 minor numbers for
+            the char device,and a cdev descriptor corresponds to these
+            device numbers.
+            if we want to control the range of minor numbers,we can register
+            char device through interfaces cdev_add() or register_chrdev_region().
