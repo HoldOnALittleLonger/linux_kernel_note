@@ -100,3 +100,115 @@ Char Devices :
             device numbers.
             if we want to control the range of minor numbers,we can register
             char device through interfaces cdev_add() or register_chrdev_region().
+
+        open() and release()
+          open()
+            provided for a driver to do any initialization in preparation for
+            later operations.
+            /* tasks usually performed :
+             *   1> check device-specific errors(such device not ready error)
+             *   2> initialize the device if it is being opened for the first
+             *      time
+             *   3> update @f_op of file descriptor if necessary
+             *   4> allocate and fill any data structure to be put in
+             *      @private_data of file descriptor
+             */
+            the device file inode is will be passed as the first parameter of
+            open() method.(in which,@i_cdev is the char device descriptor)
+            /* if we wrapped cdev in custom device descriptor,the macro
+             * container_of() can helps us to extract that descriptor.
+             */
+
+          release()
+            reverse of open().
+            /* tasks need to perform :
+             *   1> deallocate anything that open allocated in @private_data of
+             *      file descriptor
+             *   2> shut down the device on last close
+             */
+            ! flush() method usually is when close() is called,but very
+              few drivers implement flush() method.
+
+        read() and write()
+          read()
+            copy data from device to userspace,usually depends on copy_to_user().
+            if there is no more data available,we need to return EOF or block
+            current task until new data has came in.
+            /* for network stream,we usually need to wait for new data come in */
+            /**
+             * return value :
+             *   == @count => transferred all
+             *   > 0 AND < @count => a part
+             *   == 0 => EOF
+             *   < 0 => error
+             * in userspace,EOF is defined to "-1".
+             */
+
+          write()
+            data is written out from userspace to device,usually depends on
+            copy_from_user().
+            generally,write operation is less blocking.if device is not ready
+            to receives user's data,we need to return error or wait for device
+            become ready.
+            /**
+             * return value :
+             *   == @count => transferred all
+             *   > 0 AND < @count => a part
+             *                       # usually happens in network transferring
+             *   == 0 => failure reason specific to device(not error)
+             *   < 0 => error
+             */
+
+          ! if data size from userspace or to userspace is greater than PAGE_SIZE,
+            kernel would not guarantees atomic operation(copy_to_user() and
+            copy_from_user()).
+            the two helper also would check whether userspace pointer is valid,
+            no copying will performed otherwise.
+            /* if an invalid address is encountered during the copy,only part of
+             * the data is copied.
+             * ! but in linux 2.6.34.1,for the x86 platform,access_ok() is used
+             *   to check userspace pointer,if invalid address is found,no
+             *   data would be copied,even a part of the data.
+             * for the inatomic copying,if a memory area of userspace eventually
+             * becomed invalid,only a part of data is copied.
+             */
+
+          ! read() and write() returns the size of transferred data,even only a
+            part of data is transffered for some special reasons,no error will
+            be reported at this time if it occurred.
+            but at the next time these methods are called,the previous error
+            would be reported,so our driver needs to remember the error has
+            occurred so that it can return the error status in the future.
+            /* specific to device driver operations */
+              struct scull_dev *device = (struct scull_dev *)flip->private_data;
+              if (device->last_error)
+                      return last_error;
+              ...
+              ret = device_read(...);
+              if (ret && ret < count) {
+                      status = device_status_query(...);
+                      if (status > 0)
+                              device->last_error = -EIO;
+              } else if (ret == count) {
+                      device->last_error = 0;
+                      ...
+              }
+              ...
+
+        readv() and writev()
+          these two system calls are supported by kernel,and they rely on
+          driver's read and write methods,respectively.
+          in this case,these vector versions will be implemented with
+          multiple calls to read and write methods of our driver.
+          /**
+           * in the early version of kernel,file_operations struct contains
+           * readv() and writev() methods,but in kernel 2.6.34.1,they are been
+           * removed from file_operations,and the readv(),writev() entrypoints
+           * are vfs_readv() and vfs_writev(),respectively.
+           * if file operations defined aio_read(),then readv() relies on it,
+           * otherwise fallback to a loop of read() method;the writev() relies
+           * on aio_write(),fallback to a loop of writev() if such function is
+           * not implemented.
+           */
+             
+           
