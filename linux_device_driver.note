@@ -210,5 +210,87 @@ Char Devices :
            * on aio_write(),fallback to a loop of writev() if such function is
            * not implemented.
            */
-             
-           
+
+Advanced Char Driver Operations :
+        ioctl        
+          this interface usually is offered for hardware device control.
+          for example,lock its door,report error,change baud rate,etc.
+          if we want our device to provides such interface,we must implement
+          the ioctl() in file_operations struct.
+          /**
+           * Kernel provides some static ioctl commands that been integered into
+           * kernel.
+           * if we want our ioctl CMDs also enter the kernel,we need put them
+           * into some related kernel file,and re-compile kernel,this is not
+           * a good idea.
+           * so we can provides these CMD definitions into userspace,via a
+           * header comes with out driver module.
+           * user can knows what commands our driver provides through check
+           * the header.
+           */
+          ! "..." in ioctl() prototype in userspace library is not means it
+            receives variable number of parameters,it just receives an
+            additional optional parameter.
+            traditionally,the last parameter is identified as "char *argp".
+            # just to prevent type checking during compilation.
+            and because,the type checking is disabled,the bad third parameter
+            to ioctl() will cause undefined behavior without compiler warning.
+          each CMD of kernel ioctl(),essentially is a separate,usually
+          undocumented system call,there is no way to audit these calls in
+          any sort of comprehensive manner.
+
+        ioctl commands selection
+          the entrypoint of ioctl facility is do_vfs_ioctl(),which is defined in
+          <fs/ioctl.c> and called by sys_ioctl().
+          in that routine,only some common file-related ioctl commands are
+          defined.
+          for the commands that are not matches to those commands,the default
+          path will jump to vfs_ioctl() or to file_ioctl(),if the file is
+          regular file,then file_ioctl(),otherwise vfs_ioctl().
+          in vfs_ioctl(),unlocked_ioctl() of file_operations struct is prefered
+          than ioctl() of file_operations struct.
+          the difference between them is that,ioctl() is locked version,
+          vfs_ioctl() calls to this function need to invoke lock_kernel() to
+          lock kernel at first,and unlock kernel later after operation finished.
+          for unlocked_ioctl() branch,-ENOIOCTLCMD will be checked and convert
+          to -EINVAL.
+          thus,we must ensure that our ioctl commands' numbers are not in the
+          common ioctl commands that kernel defined.
+          the list of common commands :
+            FIOCLEX                set close on exec
+            FIONCLEX               unset close on exec
+            FIONBIO                no bio
+            FIOASYNC               async io
+            FIOQSIZE               get file size through inode_get_bytes()
+            FIFREEZE               filesystem freeze
+            FITHAW                 filesystem thaw
+            FS_IOC_FILEMAP         file map
+            FIGETBSZ               get block size of the super block that
+                                   current inode belongs to
+            ! except the list,more global kernel ioctl command numbers can be
+              found in <Documentation/ioctl-number.txt>,those ioctl command
+              numbers been used by some kernel drivers,we should prevent
+              reuse them in our driver.
+              # newer kernel is
+                  <Documentation/userspace-api/ioctl/ioctl-number.rst>
+                in that file, "Code" means type,"Seq" means numbers.
+            ! if we just for test,our driver code can reuse those numbers,
+              but if we are developing a driver for real device in real world,
+              and want it will be received by kernel,we must choose the free
+              ioctl command numbers.
+              #^ if our ioctl() interface will uses some kernel routines
+                 with our ioctl command number,must prevent conflict with those
+                 in-use numbers.
+                 actually,vfs_ioctl() will invoke our device file's ioctl
+                 interface,reuse the same number is no problem,but if our ioctl
+                 interface will across kernel routines,reuse same number will
+                 cause undefined behavior probably.
+                 we prevent from reuse at the starting time can help us to
+                 get rid of such kind of problems,because we usually
+                 forget some important things.
+    
+          ! the older kernel use 16 bits for ioctl command,but the newer kernel
+            changed to use 32 bits for ioctl command.
+            in lower 16 bits of 32 bits,top 8 bits for type,and bottom 8 bits
+            for number.
+    
