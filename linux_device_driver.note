@@ -1,4 +1,4 @@
-                                                             Linux Device Driver 3rd Edition
+                                                              Linux Device Driver 3rd Edition
 /**
  * Kernel Version used for the Book => 2.6.10
  * Kernel Version used for this note => 2.6.34    
@@ -259,7 +259,7 @@ Advanced Char Driver Operations :
           the list of common commands :
             FIOCLEX                set close on exec
             FIONCLEX               unset close on exec
-            FIONBIO                no bio
+            FIONBIO                no blocking io(O_NONBLOCK flag)
             FIOASYNC               async io
             FIOQSIZE               get file size through inode_get_bytes()
             FIFREEZE               filesystem freeze
@@ -267,6 +267,11 @@ Advanced Char Driver Operations :
             FS_IOC_FILEMAP         file map
             FIGETBSZ               get block size of the super block that
                                    current inode belongs to
+            ! those pre-defined commands can be classified to three groups
+                for any files(include FIFO,socket, ...)
+                for regular files only
+                specific to filesystem(depends on filesystem implementation,
+                                       for example,"chattr" command)
             ! except the list,more global kernel ioctl command numbers can be
               found in <Documentation/ioctl-number.txt>,those ioctl command
               numbers been used by some kernel drivers,we should prevent
@@ -293,4 +298,145 @@ Advanced Char Driver Operations :
             changed to use 32 bits for ioctl command.
             in lower 16 bits of 32 bits,top 8 bits for type,and bottom 8 bits
             for number.
+
+        ioctl return value
+          -ENOTTY => inappropriate ioctl command(POSIX standard)
+          -EINVAL => invalid ioctl command
+          -ENOIOCTLCMD => appears in kernel ioctl code,no such ioctl command
+
+        Capabilities and Restricted Operations
+          driver must performs additional capabilities checking to determines
+          whether current user is granted to executes particular operations
+          on the device.
+          the User Mode system calls capget() and capset() can be used to
+          get and set a thread's capabilities respectively.
+          ! if we want to add a new capability,need to modify the kernel source.
+          some device driver related capabilities
+            CAP_DAC_OVERRIDE        override access restrictions on files and
+                                    directories
+                                    DAC => data access control
+            CAP_NET_ADMIN           ability to perform network adiministration
+                                    tasks
+            CAP_SYS_MODULE          load or remove kernel modules
+            CAP_SYS_RAWIO           ability to perform 'raw' I/O operations
+                                    such access device ports and communicate
+                                    directly with USB devices
+            CAP_SYS_ADMIN           for system administration operations
+            CAP_SYS_TTY_CONFIG      ability to perform tty configuration tasks
+          ! we usually return -EPERM if current thread has no requested
+            capability.
+
+        Control Device via Control Sequence
+          we can configure a device by write control sequence to the device
+          itself,rather than issue an ioctl system call.
+          this way requires the device driver can responses to such control
+          sequence.
+          /* for example,"setterm" command for console can be used to send
+           * console control sequence.
+           * ! controlling program can live on a different computer from
+           *   the controlled device,a simple redirection of the data stream
+           *   does the configuration job.
+           * # the sysfs or /proc/ for kernel special options setup is similar
+           *   to write control sequence to device.
+           */
+          drawback
+            controlling by printing is that it adds policy constraints to
+            the device.
+            we need to ensure the control sequence can not appear in the
+            data being written to the device during normal operation.
+            /* when we "cat" a binary file,the result is console's font
+             * became weird.
+             */
+          instead of turning the "write" method into an interpreter and
+          avoiding "ioctl",we can avoid "write" altogether and use "ioctl
+          commands" exclusively.that is,provide a command-line tool to
+          send those commands to the driver,this can moves the complexity
+          from kernel to userspace.
+
+        Blocking I/O
+          blocking I/O means we need to put the task into sleep state or
+          add it into a wait queue because operations cant be accomplished
+          right now.
+          if we decide to put it into waiting state,must invoke the kernel
+          function schedule() to give up CPU time let the scheduler to
+          selects next task to run.
+          blocking rules
+            > cant sleep in atomic operation
+            > cant sleep in interrupt context
+            > cant sleep when holding a lock
+            > cant sleep when local interrupt been disabled
+            > cant sleep if there is no one will wake up this task        
+            > can sleep when holding a semaphore,but this sleep must be
+              short because other tasks may also sleep to wait this
+              semaphore
+            > need to re-check neccessary conditions after wake up
+          some kernel sleep related primatives
+            /**
+             * these routines will add our task into wait queue,and
+             * call to schedule().
+             * the loop will be broken when the condition becomes true.
+             * waiting tasks are grouped into non-exclusive tasks and
+             * exclusive tasks.
+             * the wake_up will always wakes up all non-exclusive tasks,
+             * and some exclusive tasks(one or more,or all -- number of
+             * exclusive tasks to be woken up is 0 <= non-exclusive wake up).
+             * kernel implements this by put exclusive tasks at the
+             * tail of wait queue,when we traverse the list,all
+             * non-exclusive tasks will always be woken up.
+             */
+            wait_event(wq, cond)
+            wait_event_interruptible
+            wait_event_timeout
+            wait_event_interruptible_timeout
+
+            wake_up(wq)
+            wake_up_interruptible
+
+            wait_for_completion(completion)
+            wait_for_completion_killable
+            wait_for_completion_interruptible
+            wait_for_completion_timeout
+    
+            complete(completion)
+            complete_all
+
+          !O_NONBLOCK driver behavior
+            "read" blocking if no data available,and woken up as soon as the
+            data arrives,then the data is returned to userspace process even
+            the size of data is less than @count.
+
+            "write" blocking if no space in data buffer,and it must be on a
+            different wait queue from the one used for reading.
+            the task is woken up as soon as it can write data,and "write"
+            system call succeeds,even there is only a part been written.
+                                 #^ no room for all data count by @count
+
+            /**
+             * driver provides input buffer and output buffer can reduce number
+             * of context switches and user-level/kernel-level transitions.
+             * because driver can accepts a large chunk of data,and it can buffer
+             * the data from userspace,transfer those data to the device when the
+             * size reach the defined threshold.
+             * (the example is BIO in kernel for block device I/O)
+             */
+
+          O_NONBLOCK driver behavior
+            just returns -EAGAIN if request cant be satisified now.
+
+          ! drivers may provide O_NONBLOCK open() method and !O_NONBLOCK open()
+            method.(deal with two cases in the implementation)
+            because,some devices need a long time to initialization.for the open
+            without blocking,-EAGAIN should be returns immediately if the device
+            is initializing;for the open with blocking,the task should wait for
+            the device fully initialized.
+            /* blocking open as an alternative to EBUSY */
+            
+
+          
+
+
+    
+
+        
+        
     

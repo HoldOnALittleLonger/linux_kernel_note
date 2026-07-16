@@ -2692,7 +2692,7 @@ Chapter 3 : Processes
 
           !  all macros wakeup all nonexclusive processes.
              that is the parameter @nr to __wake_up*() functions is 0,just wake up everything;
-            (includes all nonexclusive processes and all exclusive processes)
+             (includes all nonexclusive processes and all exclusive processes)
              if @nr == small + venumber,then wake up all nonexclusive processes and one
              exclusive process.(that is what wake_up() to do)
              e.g. (code)
