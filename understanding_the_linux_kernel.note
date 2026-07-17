@@ -2526,6 +2526,11 @@ Chapter 3 : Processes
            */
           #define DEFINE_WAIT(name)  DEFINE_WAIT_FUNC(name, autoremove_wake_function)
 
+          /** initialize local wait_queue_t object.
+           *  ->private := current
+           *  ->func := autoremove_wake_func
+           */
+          #define init_wait(wait)
 
           !  use these three functions to complete INSERT | INSERT INTO EXCLUSIVE | REMOVE operations.
 
@@ -2549,7 +2554,7 @@ Chapter 3 : Processes
           !  use this function to check if the wait queue is active.
 
           /*  waitqueue_active - check if @q is activing(it is not empty) now.  */
-          static inline int waitqueue_active(wait_queue_head_t @q);
+          static inline int waitqueue_active(wait_queue_head_t *q);
 
       Wait bit queue :
         a wait queue used to waiting for a specified bit is set.
@@ -2574,6 +2579,38 @@ Chapter 3 : Processes
                   struct wait_bit_key key;
                   wait_queue_t wait;
           };
+
+          /**
+           * declare and initialize a local wait_bit_queue object has @name.
+           * ->wait->private := current
+           * ->wait->func := wake_bit_function
+           */
+          #define DEFINE_WAIT_BIT(name, word, bit)
+
+          /**
+           * wait_on_bit - wait for a bit to be changed
+           * @word:        the word being waited on,a kernel virtual address
+           * @bit:         the bit of the word being waited on
+           * @action:      the function used to sleep,which may take
+           *               special actions
+           * @mode:        the task state to sleep in
+           * return:       0 => @bit been set
+           *               return value from @action or 0 if the bit
+           *               been set before call to @action
+           * # this function will just return 0 if @bit is not set in
+           *   @word,otherwise,call to out_of_line_wait_on_bit().
+           *   that function is defined in <kernel/wait.c>,and which
+           *   will call to __wait_on_bit().
+           *   (the function,will gets the wait_queue_head_t object
+           *    from @wait_table_bits of the zone the @word belongs to,
+           *    and constructs a wait_bit_queue object,then invokes
+           *    __wait_on_bit())
+           * # there also a locked version wait_on_bit_lock(),which
+           *   will invokes __wait_on_bit_lock()
+           */
+          static inline int wait_on_bit(void *word, int bit,
+                                        int (*action)(void *),
+                                        unsigned mode);
 
           ! wait bit usually is handled by __wait_on_bit_lock(),which do checking in
             a do-while cycle,stop condition is test_and_set_bit(@key.bit_nr, @key.flags),
@@ -2633,7 +2670,7 @@ Chapter 3 : Processes
                     DEFINE_WAIT(__wait);                                         \
                                                                                  \
                     for (;;) {                                                   \
-                            prepare_to_wait (wq, &__wait, TASK_UNINTERRUPTIBLE);  \
+                            prepare_to_wait (wq, &__wait, TASK_UNINTERRUPTIBLE); \
                             if (condition)                                       \
                                     break;                                       \
                             schedule();                                          \
@@ -6785,6 +6822,7 @@ Chapter 5 : Kernel Synchronization
             <arch/x86/include/asm/bitops.h>
               test_bit(nr, addr)            ->       return the value of the @nr-th bit of *addr
                                                      result : @nr-th bit of *@addr != 0
+                                                     # determine whether a bit is set
               set_bit(nr, addr)             ->       set the @nr_th bit of *addr
               clear_bit(nr, addr)           ->       clear the @nr_th bit of *addr
               change_bit(nr, addr)          ->       invert the @nr_th bit of *addr
@@ -9747,7 +9785,7 @@ Chapter 6 : Timing Measurements
             */
            #define udelay(n)  (__builtin_constant_p(n) ? \
                                ((n) > 20000 ? __bad_udelay() : __const_udelay((n) * 0x10c7ul)) \
-                               __udelay(n))
+                               : __udelay(n))
 
            !!  __udelay => __const_udelay(n * 0x000010c7)
 
@@ -10651,7 +10689,8 @@ Chapter 7 :
         The try_to_wake_up() function :
           awake a sleeping or stopped process by setting its state to TASK_RUNNING and inserting it into
           the runqueue of the local CPU.
-
+          ! default_wake_function() just call to this routine.
+    
           <kernel/sched.c>
             /**
              * try_to_wake_up - try to wake up threads are satisfied condition

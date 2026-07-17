@@ -430,6 +430,149 @@ Advanced Char Driver Operations :
             is initializing;for the open with blocking,the task should wait for
             the device fully initialized.
             /* blocking open as an alternative to EBUSY */
+
+          ! we should not use sleep_on() and its variants in driver code,because
+            it offers no way to protect against race conditions.
+            it is implemented through construct a wait_queue_t object and adds
+            the object into wait_queue_head_t the wait queue,then invoke
+            schedule_timeout() with maximum timeout.
+            if a wakeup come right before schedule() is called,and there is
+            only once wakeup,we miss it and sleep forever.
+            # actually,kernel code should not sleep unconditionally.
+
+        poll and select
+          query and wait for open files are readable or writeable without
+          blocking.
+          if we want our device driver support this I/O Multiplexing,we must
+          provide the poll() method implementation of file_operations struct
+          of our driver.
+    
+          system call service routine will call to our custom poll() method
+          when user issued poll() or select() system call.
+          system call service routine sys_poll() hands over the main works
+          to do_sys_poll() function.which function will creates a local
+          poll_wqueues object,initialize it,and pass it to do_poll().
+          do_poll() will walk-through a poll_list,for each pollfd object
+          on the list,it iterates each fd that contained in the range
+          defined by this pollfd object,call do_pollfd() on those fds.
+          the do_pollfd(),will invokes the poll() method of the file
+          descriptor that corresponding to current fd(if the method is
+          implemented).
+          ! the pollfd array is copied from userspace into poll_list's
+            @entries member,and the member @len means the amount of
+            pollfd(s) in that array.
+          ! poll_list structure is defined in <fs/select.c>,and
+            poll_table structure is defined in <linux/poll.h>.
+            the poll_table pointer passed to poll() file operation
+            points to the poll_wqueues->pt member.
+            the member is initialized by init_poll_functpr(),which
+            function will sets the @qproc function pointer of @pt
+            to __pollwait().
+            __pollwait() is used to adds a new poll wait entry
+            into the poll_table_page of poll_wqueues.
+            its prototype is
+              static void __pollwait(struct file *filp,
+                                     wait_queue_head_t *wait_address,
+                                     poll_table *p);
+            and defined in <fs/select.c>.
+            inline function poll_wait() can be called by our driver
+            to invoke @qproc of @pt to adds a new entry.
+              poll_wait(filp, &dev->inq, pt);
+              #^ @pt is passed by do_pollfd()
+          ! unsigned int poll(*@filp, *@poll_table)
+            # will returns a mask indicates the I/O state of the
+              @filp,the mask is constructed from poll event bits.
+            # the poll_table @pt got from the poll_wqueues object.
+
+          the steps that driver's poll() method need to does
+            1> invoke poll_wait() on one or more wait queues that could
+               indicate a change in the poll status.if no file descriptors
+               are currently available for I/O,the kernel causes the process
+               to wait on the wait queues for all file descriptors passed
+               to the system call.
+            2> return a bit mask describing the operations(if any) that
+               could be immediately performed without blocking.
+
+          available poll status
+            POLLIN                readable without blocking
+            POLLRDNORM            "normal" data is available for reading
+            POLLRDBAND            "out-of-band" data is available for reading
+            POLLPRI               high-priority data(out-of-band) can be read
+                                  without blocking
+            POLLHUP               EOF
+            POLLERR               poll error,readable and writeable,read and
+                                  write return an error code without blocking
+            POLLOUT               writeable without blocking
+            POLLWRNORM            "normal" writeable
+            POLLWRBAND            "out-of-band" writeable
+
+            ! for a device is readable,state POLLIN | POLLRDNORM should be
+              returned by poll() method.
+
+          the poll_wait() called by our driver will put the device file's
+          @filp into the poll_table_entry,if all pollfd(s) are not ready,
+          then kernel will invoke poll_schedule_timeout() to let current
+          sleep until some event is happened,the wakeup function is
+          __pollwake(),the wrapper is pollwake() function,and it will be
+          set to the wake-up function of the wait entry that is constructed
+          in __pollwait().
+          if some state is changed,our driver's component should invoke the
+          wake_up() the poll waiters that are waiting on the wait queue is
+          passed to poll_wait() previously.
+          ! the resume is not from poll_wait() or driver's poll() method,
+            because in which no schedule() function is called.
+            the resume point is the function do_poll(),and the loop for
+            checking filp(s) state is restart again,do_pollfd() is called
+            on those filp(s).
+            # pollwake() is invoke default_wake_function() on a dummy wait
+              queue,in which the task is the member polling_task of that
+              poll_wqueues @pt belongs to.
+              (we just need it to wakeup current task that is blocking on
+               sys_poll() now)
+            # the removing to poll waiter's wait_queue_t objects is deferred
+              to the time that do_poll() returned,in routine poll_freewait().
+              (signal interrupt also cause do_poll() return,with error code
+               -EINTR)
+            # there is only once add_wait_queue() is called by __pollwait(),
+              because after all poll waiters been registered,do_poll() will
+              set pointer @pt to NULL,then poll_wait() called by driver's
+              poll() method will just returns with do nothing.
+            e.g.
+              pipe_poll:
+                ...
+                poll_wait(filp, &des->inq, pt);
+                poll_wait(filp, &des->outq, pt);    
+                ...
+                if (!des->input_buffer.empty)
+                  return POLLIN | POLLRDNORM;
+                if (des->output_buffer.empty)
+                  return POLLOUT | POLLWRNORM;
+                ...
+              pipe_write:
+                ...
+                /* set des->input_buffer.empty to FALSE */
+                fill_datum_entry(...);
+                /**
+                 * wake up the poll waiter(s) on input queue
+                 */
+                wake_up(des->inq);
+                ...
+
+              pipe_read:
+                ...
+                /* set des->output_buffer.empty to TRUE */
+                remove_datum_entry(...);
+                /**
+                 * wake up the poll waiter(s) on output queue
+                 */
+                wake_up(des->outq);
+                ...
+                
+              
+
+
+        
+    
             
 
           
