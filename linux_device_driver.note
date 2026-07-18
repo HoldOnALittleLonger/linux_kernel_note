@@ -446,18 +446,52 @@ Advanced Char Driver Operations :
           if we want our device driver support this I/O Multiplexing,we must
           provide the poll() method implementation of file_operations struct
           of our driver.
+          ! do_select() also depends on poll components.
     
           system call service routine will call to our custom poll() method
           when user issued poll() or select() system call.
           system call service routine sys_poll() hands over the main works
           to do_sys_poll() function.which function will creates a local
           poll_wqueues object,initialize it,and pass it to do_poll().
+          /**
+           * poll_wqueues
+           *   ->pt             : poll_table
+           *   ->table          : struct poll_table_page *
+           *   ->polling_task   : struct task_struct *
+           *   ->triggered      : int
+           *   ->error          : int
+           *   ->inline_index   : int
+           *   ->inline_entries : struct poll_table_entry[]
+           *                      N_INLINE_POLL_ENTRIES
+           * # if there is a room in @inline_entries,no poll_table_page
+           *   would be newly allocated.
+           */
           do_poll() will walk-through a poll_list,for each pollfd object
           on the list,it iterates each fd that contained in the range
           defined by this pollfd object,call do_pollfd() on those fds.
+          /**
+           * poll_list
+           *   ->next    : struct poll_list *
+           *   ->len     : int
+           *   ->entries : struct pollfd[0]
+           * # @next    => next poll_list entry on list
+           *   @len     => number of elements in @entries
+           *   @entries => copied from userspace
+           * # new poll_list object is allocated via kmalloc() with gfp flag
+           *   GFP_KERNEL
+           */
           the do_pollfd(),will invokes the poll() method of the file
           descriptor that corresponding to current fd(if the method is
           implemented).
+          ! if timeout value is set to 0,then enter no-wait case,do_poll() will
+            set @pt to NULL.hence,poll_wait() will returns immediately without
+            adds any wait entity into driver's poll wait queue.
+            after a loop for calling to do_pollfd(),do_poll() will ends the
+            external loop without calls to poll_schedule_timeout().
+            # timeout value -1 means wait infinitely.
+            # do_pollfd() still calls to driver's poll() method,but the
+              poll_wait() called by driver code has no effect,so poll()
+              of driver should returns the result mask immediately.
           ! the pollfd array is copied from userspace into poll_list's
             @entries member,and the member @len means the amount of
             pollfd(s) in that array.
@@ -465,11 +499,59 @@ Advanced Char Driver Operations :
             poll_table structure is defined in <linux/poll.h>.
             the poll_table pointer passed to poll() file operation
             points to the poll_wqueues->pt member.
-            the member is initialized by init_poll_functpr(),which
+            /**
+             * poll_table_struct 
+             *   ->qproc : poll_queue_proc
+             *   ->key   : unsigned long
+             * (type-definition poll_table)
+             */
+            member @pt is initialized by init_poll_functpr(),which
             function will sets the @qproc function pointer of @pt
             to __pollwait().
+            /**
+             * type of @qproc
+             *   typedef void (*poll_queue_proc)(struct file *,
+             *                                   wait_queue_head_t *,
+             *                                   struct poll_table_struct *);
+             */
             __pollwait() is used to adds a new poll wait entry
             into the poll_table_page of poll_wqueues.
+            /**
+             * poll_table_entry
+             *   ->filp         : struct file *
+             *   ->key          : unsigned long
+             *   ->wait         : wait_queue_t
+             *   ->wait_address : wait_queue_head_t *
+             * # @wait_address => usually points to the driver's poll wait
+             *                    queue
+             *   @filp         => the file
+             *   @key          => assigned from @pt->key
+             *   @wait         => newly initialized by __pollwait(),and
+             *                    will be added into @wait_address,the
+             *                    wake-up function is pollwake()
+             *
+             * poll_table_page
+             *   ->next    : struct poll_table_page *
+             *   ->entry   : struct poll_table_entry *
+             *   ->entries : struct poll_table_entry[0]
+             * # defined in <fs/select.c>.
+             * # @next    => next poll_table_page struct on the list
+             *   @entry   => usually points to @entries
+             *   @entries => array of poll_table_entry(s)
+             * # routine poll_get_entry() is used to get next poll table entry
+             *   from poll table page.this function also takes care of
+             *   allocation of new poll table page.
+             *   new page is allocated through __get_free_page(GFP_KERNEL),
+             *   the starting region of new page contains poll_table_page struct.
+             *   new page is inserted front to the old list of poll_wqueues.
+             *   the first entry slot of a new poll table page start from
+             *   index "1" of @entries.
+             *     new_table->entry = new_table->entries;
+             *     new_table->next = table;
+             *     p->table = new_table;
+             *     table = new_table;
+             *     return table->entry++;
+             */
             its prototype is
               static void __pollwait(struct file *filp,
                                      wait_queue_head_t *wait_address,
@@ -478,7 +560,10 @@ Advanced Char Driver Operations :
             inline function poll_wait() can be called by our driver
             to invoke @qproc of @pt to adds a new entry.
               poll_wait(filp, &dev->inq, pt);
-              #^ @pt is passed by do_pollfd()
+              # 1st param => file descriptor
+                2nd param => wait_queue_head_t *
+                3rd param => poll_table
+                             #^ @pt passed by do_pollfd()
           ! unsigned int poll(*@filp, *@poll_table)
             # will returns a mask indicates the I/O state of the
               @filp,the mask is constructed from poll event bits.
@@ -516,27 +601,37 @@ Advanced Char Driver Operations :
           __pollwake(),the wrapper is pollwake() function,and it will be
           set to the wake-up function of the wait entry that is constructed
           in __pollwait().
-          if some state is changed,our driver's component should invoke the
-          wake_up() the poll waiters that are waiting on the wait queue is
+          if some state have changed,our driver's component should invoke the
+          wake_up() for poll waiters that are waiting on the wait queue is
           passed to poll_wait() previously.
           ! the resume is not from poll_wait() or driver's poll() method,
             because in which no schedule() function is called.
             the resume point is the function do_poll(),and the loop for
             checking filp(s) state is restart again,do_pollfd() is called
             on those filp(s).
-            # pollwake() is invoke default_wake_function() on a dummy wait
+            # pollwake() will invoke default_wake_function() on a dummy wait
               queue,in which the task is the member polling_task of that
-              poll_wqueues @pt belongs to.
-              (we just need it to wakeup current task that is blocking on
+              poll_wqueues object which @pt belongs to.
+              (we just need it to wakeup the task that is blocking on
                sys_poll() now)
             # the removing to poll waiter's wait_queue_t objects is deferred
               to the time that do_poll() returned,in routine poll_freewait().
-              (signal interrupt also cause do_poll() return,with error code
+              (signal interrupt also cause do_poll() returns,with error code
                -EINTR)
             # there is only once add_wait_queue() is called by __pollwait(),
               because after all poll waiters been registered,do_poll() will
               set pointer @pt to NULL,then poll_wait() called by driver's
               poll() method will just returns with do nothing.
+              /* if do_pollfd() returns a non-zero value -- state changed,
+               * local counter @count will be increased by do_poll(),and it
+               * will set @pt to NULL,then next calling to do_pollfd() in
+               * the internal loop will not add any poll wait entity to the
+               * driver's poll wait queue.(because @pt == NULL)
+               * this is because,if any file's state is changed,the current
+               * task should not sleep,thus call to poll_wait() with a
+               * non-NULL @pt is nosense.(do not need to consume CPU time
+               * to build wait list)
+               */
             e.g.
               pipe_poll:
                 ...
@@ -567,8 +662,95 @@ Advanced Char Driver Operations :
                  */
                 wake_up(des->outq);
                 ...
-                
-              
+
+          execution flow
+            application -> sys_poll() -> do_sys_poll() -> do_poll()
+            do_poll() :
+              loop0 {
+                for each node on poll_list
+                  for each fd in node's entries
+                    call to do_pollfd()
+                      do_pollfd() :
+                        f_op->poll(@filp, @pt) :
+                          poll_wait(@filp, @wait_address, @pt) :
+                            if @pt == NULL || @wait_address
+                              return
+                    if result is not _zero_ /* state changed,even error occurs */
+                    then
+                      @count++
+                      @pt = NULL /* at least one file's state changed */
+                @pt = NULL /* set to NULL to prevent re-add in next iteration */
+                if !@count
+                  @count = signal_pending(current) ? -EINTR : wait->error
+                if @count || @timed_out
+                  break
+                poll_schedule_timeout()
+              }
+
+        reading data from the device
+          > data in input buffer
+              read returns immediately(no noticeable delay)
+              # regardless amount of data less than requested
+              # poll returns POLLIN | POLLRDNORM
+          > no data in input buffer
+              O_NONBLOCK
+                read returns immediately with error code -EAGAIN
+                # poll returns POLLERR
+              !O_NONBLOCK
+                read blocks current task until at least one byte of data
+                arrived
+                # poll suspend current task
+          > EOF
+              read returns immediately with return value _zero_
+              # regardless to O_NONBLOCK
+              # poll returns POLLHUP
+
+          ! those rules can be bent for special cases.
+
+        writing to the device
+          > has space in output buffer
+              write returns immediately without delay
+              # even the room is not enough to holds requested size of data
+                (at least,one byte)
+              # poll returns POLLOUT | POLLWRNORM
+          > has no space in output buffer
+              O_NONBLOCK
+                write returns immediately with error code -EAGAIN
+                # poll returns POLLERR
+              !O_NONBLOCK
+                write blocks current task until there is a space to holds
+                data,at least one byte
+
+              # whether or not O_NONBLOCK is setting,if device is not ready
+                to accept data,-ENOSPC should be returned
+          > never make a write call wait for data transmission before returning,
+            even if O_NONBLOCK is clear
+            # from kernel buffer(allocated by driver) to the real device
+            # this is because if poll() or select() reported writeable,the write
+              must not block.
+              if program wants to ensure the data issued actually transmitted,
+              driver needs to provide an fsync() method.
+
+          ! those rules can be bent for special cases.    
+
+        fsync method
+          driver can provides this method to let the program can determine the
+          data in output buffer actually sent to the real device.
+          # regardless of whether or not O_NONBLOCK is set
+          fsync() returns when the data all have been transmitted,otherwise it
+          needs to block current task to wait complement.
+          this method's third parameter is @datasync,it is used to tell kernel
+          do data sync only(== 1) or include metadata(== 0).
+          filesystem needs to handle metadata,but device driver does not.
+
+          /**
+           * no special requirements on the implementation of this method.
+           * only ensure when the function returns,the data must been
+           * transmitted.
+           * char device driver can leaves this function pointer to NULL.
+           * block device driver can make use of fsync_bdev() which is defined
+           * in <fs/block_dev.c>.
+           */
 
 
         
