@@ -551,6 +551,12 @@ Advanced Char Driver Operations :
              *     p->table = new_table;
              *     table = new_table;
              *     return table->entry++;
+             *   this is because,at the time free poll waiters,@entry and
+             *   @entries will be combined as stop condition of loop
+             *     @p->entry > @p->entries
+             *     then
+             *       free entry
+             *       --@p->entry
              */
             its prototype is
               static void __pollwait(struct file *filp,
@@ -751,6 +757,135 @@ Advanced Char Driver Operations :
            * block device driver can make use of fsync_bdev() which is defined
            * in <fs/block_dev.c>.
            */
+
+        asynchronous notification
+          signal is asynchronous,so we can use it to implement asynchronous
+          notification from kernel to user process.
+          when a user process wants to receives asynchronous signal on a given
+          file,it must invoke fcntl with F_SETOWN on the file descriptor.this
+          will let kernel saves the process id into @f_owner of the file's
+          descriptor.
+          ! the user process also need to set FASYNC flag via fcntl() with
+            F_SETFL.
+            # we can activate this when opening file set O_ASYNC flag for
+              open().
+          ! asynchronous I/O notification is useful only for there is only
+            one file setup asynchronous I/O notification.because the signals
+            delivered by kernel thread does not carry any additional information
+            except the signal number -- SIGIO.hence,if there is more than one
+            file setup asynchronous I/O notification,we can not distinguish
+            which one corresponds to current signal.
+
+          /**
+           * when we invoke F_SETFL with FASYNC,the kernel will invoke the
+           * fasync() method of the file's operations,if such method
+           * is implemented.
+           * kernel provides fasync_helper(),it will creates and adds a new
+           * fasync entry for current file,and set FASYNC flag.
+           * if we have no special requirements on our driver,we can make use
+           * of this helper like the pipe component did.
+           * the 3rd parameter of fasync() is a boolean value @on.
+           * if @on is not true,fasync_helper() needs to remove fasync entry of
+           * current file.
+           * ! the entries are reside on list has type struct fasync_struct.
+           *   fasync() method should passes such list to fasync_helper().
+           *   # we pass the address of the list descriptor.
+           *     => struct fasync_struct **
+           */
+
+        driver behavior for FASYNC
+          > driver's descriptor needs to hold a fasync list -- the type is
+            struct fasync_struct *.
+            /**
+             * <linux/fs.h>
+             *   fasync_struct
+             *     ->magic   : int
+             *     ->fa_fd   : int
+             *     ->fa_next : struct fasync_struct *
+             *     ->fa_file : struct file *
+             *   # @magic   => fasync magic number,it is 0x4601(FASYNC_MAGIC)
+             *     @fa_fd   => file descriptor in userspace
+             *     @fa_next => next entry
+             *     @fa_file => open file descriptor in kernel space
+             *   # fasync_helper() will creates such entry and insert it into
+             *     fasync list.
+             */
+          > driver needs to implement fasync() method,which usually relies on
+            fasync_helper().
+            the last argument to the function is fasync list for current device,
+            and often has two lists to corresponds two directions.(in / out)
+            for read operations,should pass read fasync list.
+            for write operations,should pass write fasync list.
+          > if I/O event happens,invoke kill_fasync() to signal file's owner.
+            /**
+             * <fs/fcntl.c>
+             *   # kill_fasync - signal waiters on fasync list
+             *   # @fp:          fasync list
+             *   # @sig:         signal will delivered to f_owner
+             *   # @band:        data type,band data or out-of-band data
+             *                   for readable,usually is POLL_IN
+             *                   for writeable,usually is POLL_OUT
+             *                   (POLL_IN == POLLIN | POLLRDNORM
+             *                    POLL_OUT == POLLOUT | POLLWRNORM)
+             *   void kill_fasync(struct fasync_struct **fp, int sig, int band);
+             *   # EXPORT_SYMBOL
+             *   # this routine calls to __kill_fasync() with @fasync_lock
+             *     holding if *@fp is not NULL
+             *   # __kill_fasync(),the primary worker.
+             *     traverses @fa,for each entry has FASYNC_MAGIC,invoke
+             *     send_sigio() to the file's owner if and only if
+             *     @sig is not SIGURG AND f_owner's @signum is not _zero_.
+             *     ! for bad fasync magic,a KERN_ERR msg would be printed.
+             */
+           > when device file is closed,need to invoke fasync() method again
+             in the release() method,to remove fasync entry -- pass the 3rd
+             parameter _zero_ of fasync() method can let fasync_helper()
+             remove entry(@on == 0).
+           ! there is no requirement that the device can only has one f_owner,
+             because for each open file,a file descriptor is created,and each
+             file descriptor are differen from the first one,even they refers
+             to the same file.
+             (if we create new task with CLONE_FILES,the threads will share the
+              same file descriptor)
+             thus,it is not hard to imagine there would be a lot of processes
+             waiting on the device's fasync list,kill_fasync() will signal to
+             each waiting process.
+             F_SETFL will adds an entry into the device's fasync list,and
+             release() will remove an entry from the device's fasync list.
+
+        seeking device
+          for char device,it similar to data stream.
+          seek a char device,is likely to adjust file descriptor's @f_pos.
+          the new @f_pos is equal to
+            base point + relative offset
+          the base points are
+            SEEK_SET    => starting position
+            SEEK_CURR   => current position
+            SEEK_END    => ending position
+          if our device is a keyboard,it should not supports device seeking.
+          if our device is a pipe,it should supports device seeking like a
+          regular file's seeking.
+          after seeking,the file descriptor's @f_pos should be up to dated.
+    
+          ! if our device does not support llseek(),we must invoke the routine
+            nonseekable_open() in our open() method,to tell kernel such truth.
+            nonseekable_open() is defined in <fs/open.c>,which will disable
+            flags FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE for our filp.
+            the future calling to llseek() on this file,kernel will ensures
+            that would not success,and we also need to let llseek() method
+            of our driver points to no_llseek() routine.
+            # no_llseek() is defined in <fs/read_write.c>,it simply returns
+              -ESPIPE.
+
+          ! llseek on block device is more complex,because that would relate
+            to disk addressing.
+            the generic method provided by kernel is block_llseek(),which will
+            adjust file's @f_pos,when Generic Block Layer issues request to
+            disk,the disk controller should moves head to correct position,
+            then we can read data from the position we expected.
+            (block device has minimum read size -- block size,the real reading
+             position may start from the block our expected position falling
+             into it)
 
 
         

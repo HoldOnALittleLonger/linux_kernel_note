@@ -22383,7 +22383,7 @@ Chapter 12 : The Virtual Filesystem
           * @f_flags:    flags specified when opening the file
           * @f_mode:     file permission
           * @f_pos:      file position,the next file operations such start from there
-          * @f_owner:    file's owner
+          * @f_owner:    used for I/O asynchronous notification via signal
           * @f_cred:     security context,includes some identification info
           * @f_ra:       file's readahead state,includes some info such start,size,mmap_miss,etc
           * @f_version:  automatically increased after each use
@@ -22409,7 +22409,23 @@ Chapter 12 : The Virtual Filesystem
            unsigned int f_flags;
            fmode_t f_mode;
            loff_t f_pos;
+    
+           /**
+            * fown_struct - I/O asynchronous notification descriptor
+            * @lock:        (rwlock_t)used to protects @pid,@uid,@euid
+            * @pid:         (struct pid *)PID or -PGRP where SIGIO should be
+            *               sent to             
+            *               # pid value is negative means process group(-PGRP)
+            * @pid_type:    (enum pid_type)kind of process group SIGIO should
+            *               be sent to
+            * @uid:         (uid_t)user id
+            * @euid:        (uid_t)effect user id
+            * @signum:      (int)posix.1b real-time signal to be delivered on I/O
+            * # system call fcntl() will setup this member for the calling process
+            * # the asynchronous I/O notification is SIGIO
+            */
            struct fown_struct f_owner;
+    
            const struct cred *f_cred;
            struct file_ra_state f_ra;
            
