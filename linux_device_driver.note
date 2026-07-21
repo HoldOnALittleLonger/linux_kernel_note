@@ -369,7 +369,7 @@ Advanced Char Driver Operations :
             > can sleep when holding a semaphore,but this sleep must be
               short because other tasks may also sleep to wait this
               semaphore
-            > need to re-check neccessary conditions after wake up
+            > need to re-check neccessary conditions after been waken up
           some kernel sleep related primatives
             /**
              * these routines will add our task into wait queue,and
@@ -887,16 +887,139 @@ Advanced Char Driver Operations :
              position may start from the block our expected position falling
              into it)
 
+        Access Control on Device
+          Single-Open Devices
+            permit a device can be opened by only one process at a time,but this
+            method best to be avoided.
+            if we only keep a track of a open counter in driver descriptor,any
+            future open request from processes of the same user would be refused.
+              e.g.
+                process A open file <= counter increase
+                process A start system() call
+                  new shell try to open the same file <= counter is 0,
+                                                         resource unavailable
+            to implement this access control is very easy,just let the driver
+            descriptor holds an atomic integer,initial value is 1,decrease
+            when open is permitted,increase in release.
 
-        
+          Single-User Devices
+            similar to single-open device,but we rather to hold the user's
+            effect ID,and a counter.
+            the counter is used to keep track of times the device is opened.
+            if saved user ID is not equal to current->uid and current->euid,
+            we need to refuse this request;but for root user,it is always
+            permitted to open the device.
+              e.g.
+                spin_lock(des->single_usr_lock);
+                if (device_open_counter &&
+                    saved_uid != current->uid &&
+                    saved_uid != current->euid &&
     
-            
+                    /* or use CAP_DAC_OVERRIDE for this test */
+                    current->uid != 0) {
+    
+                        spin_unlock(des->single_usr_lock);
+                        return -EBUSY;
+                }
+
+                if (!device_open_counter)
+                        saved_uid = current->uid;
+                ++device_open_counter;
+                spin_unlock(des->single_usr_lock);
+            we perform these checking in open(),restore the saved id and
+            the counter in release() method.
+            /* we can just restore open counter to 0,then new user id
+             * would be saved in open().
+             */
+
+        Blocking open as an Alternative to EBUSY
+          the example is pipe,if we try to write open a pipe with blocking,
+          process would be blocked until there is another entity read opened
+          this pipe.
+          if we want to implement this mechanism,we need to use the wait queue,
+          and let the driver wakes up waiting processes in the proper driver
+          method(event happens).
+          if O_NONBLOCK is specified,open() should returns -EAGAIN instead wait
+          silently.
+            e.g.
+              spin_lock(des->status_lock);
+              while (query_status(des) != DEV_AVAILABLE) {
+                spin_unlock(des->status_lock);
+                if (filp->f_flags & O_NONBLOCK)
+                        return -EAGAIN;
+                if (wait_event_interruptible(
+                            des->wq,
+                            query_status(dev) == DEV_AVAILABLE))
+                        return -ERESTARTSYS;
+                spin_lock(des->status_lock);
+                /**
+                 * query_status() does not acquire @status_lock,
+                 * if we was woken up,we need to check the status
+                 * again with lock is holding.
+                 * we also can design lock version :
+                 *   acquire lock before perform test
+                 *   return TRUE with lock is holding
+                 *   return FALSE with lock is released
+                 * ! query_status() is read-side,thus no lock is not a problem
+                 *   at there because we will re-check the condition as soon as
+                 *   we have woken up.
+                 *   if the routine related to write operation,race condition
+                 *   must be prevent at the start.
+                 *   we often put us into wait queue because we want to wait
+                 *   for a state is changed by someone,thus there is rarely
+                 *   write operation occurs.
+                 */
+              }
+              ...
+              spin_unlock(des->status_lock);
+
+          ! some command line tools would not set O_NONBLOCK in open flags,
+            the default is blocking open.if the device is not available now,
+            return -EBUSY or -EAGAIN is better than blocking on open() method.
+            (interactive user)
+
+        Cloning the Device on Open
+          ! this requires the device is not bound to hardware object.
+          we can make different copies of the original device for each different
+          processes,as private copy.
+          virtual devices :
+            the copies of the device are created by the software driver.
+          (for example,virtual console and physical tty)
+          the most easy way to implement this is make use of a list to collects
+          all virtual devices.
+          open :
+            use identify information try to find the device from list,if no such
+            device,we create a new virtual device and add it into collection.
+            /* actually,userspace file descriptor is no sense at there,because
+             * each process has its own private copy.
+             */
+            e.g.
+              int ret = dev_try_find(dev_pid2key(current->pid));
+              return ret;
+
+              dev_try_find :
+                list_for_each(...) to find entity has the same key.
+                if no such key,try to allocate a new virtual device,and
+                initialize it with this key.
+                allocation failed return -ENOMEM.
+                creation success return 0.
+          release :
+            as usual,release the resource corresponding to the private copy at
+            the last close -- because each process has one private copy,thus
+            the reference counter usually is 1.
+            /* deallocate the virtual device */
+          read and write :
+            operates only on the virtual device this process owns.if no such
+            virtual device,need to return an error.
+
+          ! if the software device is a in-memory device,we can defer the memory
+            allocation for device buffer until the first I/O operation is
+            issued.
+            the release() method,need to release the device buffer and virtual
+            device if its reference counter down to _zero_.
 
           
+            
 
-
-    
 
         
-        
-    

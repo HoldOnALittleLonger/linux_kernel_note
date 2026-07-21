@@ -22493,6 +22493,9 @@ Chapter 12 : The Virtual Filesystem
           *   for particular file(such special device file).
           *   the purpose of this method is to find out unmapped memory area in process address space that
           *   can be used for memory mapping.
+          * ! method open() is called in dentry_open() control path,which function is called by
+          *   nameidata_to_filp(),through do_last() or finish_open(),the entrypoint is do_filp_open().
+          *   if open() returned 0,means success,otherwise,should return error code.
           */
          struct file_operations {
                  struct module *owner;
