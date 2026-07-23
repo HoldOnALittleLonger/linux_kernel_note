@@ -1018,6 +1018,203 @@ Advanced Char Driver Operations :
             the release() method,need to release the device buffer and virtual
             device if its reference counter down to _zero_.
 
+Communicating with Hardware :    
+        I/O Ports and I/O Memory
+          peripheral device is controlled by writing and reading its registers.
+          those registers usually is mapped to either the memory address space
+          or I/O address space.
+
+          I/O Memory -
+            the memory space used to map peripheral device's registers.
+            when the I/O Memory is allocated to a peripheral device,from CPU
+            view point,this memory region represents the peripheral device.
+
+          I/O Port -
+            an I/O Port is a memory position in I/O Memory region which maps
+            to a register  of peripheral device.
+
+          L
+          0x00000200
+          [ reg0 | reg1 | ... ] <= I/O Memory <= peripheral device
+          | |                 0x00000400
+          | |                 H
+          | +--> an I/O port
+          V
+          |<----------------->|<----------------->|<----------------->|
+                           I/O BUS Memory Address Space
+            ^
+            |
+            |
+            peripheral device needs to register it on the proper bus
+    
+          ! for hardware,the memory region same as the I/O region.
+            I/O command through address bus and control bus.
+            data transferring through data bus.
+
+          ! some CPU implements a single address space,that peripheral devices
+            are different from memory and,deserve a separate address space.
+    
+          ! x86 CPU family have separate read and write electrical lines for
+            I/O ports and special CPU instructions to access ports.
+
+          ! even if the peripheral bus has a separate address space for
+            I/O ports,not all devices map their registers to I/O ports.
+
+          ! architectures that support only memory-mapped I/O registers fake
+            port I/O by remapping port address to memory addresses.
+
+        I/O Registers and Conventional Memory
+          main difference between I/O registers and RAM :
+            I/O operations have side effects,while memory operations have none.
+          RAM operation optimizations :
+            /* no-side-effects */
+            1> value cache
+            2> read/write instructions reorder
+
+            ! we must to avoid the I/O register operation is optimized by CPU
+              or compiler that they think this is a RAM operation.
+              for this reason,the driver needs to ensure no caching is
+              performed and no read or write reordering when accesses to
+              the device's registers.
+
+          if we want to prevent reordering,we need to put a memory barrier
+          between I/O register operation and other RAM operation.
+          /* the barrier also can prevent compiler optimization */
+
+          routines that make a memory barrier :
+            <linux/compiler-gcc.h>
+              barrier()
+                just use an inline assembly statement with no instructions,
+                but mark memory is changed.
+                  asm("":::"memory");
+                ! prevent compiler optimizations across the barrier,but leaves
+                  the hardware free to do its own reordering.
+
+            <arch/x86/include/asm/system.h>
+              /* hardware memory barrier */
+              mb()
+                mfence
+                /* barrier for reads and writes */
+              rmb()
+                lfence
+                /* reads only */
+              wmb()
+                sfence
+                /* writes only */
+
+              /* SMP version */
+              smp_mb()
+              smp_rmb()
+              smp_wmb()
+
+              read_barrier_depends()
+                flush all pending reads that subsequents reads depends on.
+                /* blocks only the reordering of reads that depend on data
+                 * from other reads.
+                 */
+
+              /* SMP version */
+              smp_read_barrier_depends()
+
+            example :
+              writeb(0, device->registers.control);
+              writeb(2, device->registers.operation);
+              wmb();
+              writel(4, device->registers.operation);
+
+          ! use memory barrier where it is really needed.
+            kind of operation needs to correspond the barrier's type.
+
+        Using I/O Ports
+          struct resource
+            I/O port resource tree node.
+            used to represents a set of I/O ports.
+            instead to stores the I/O port numbers,kernel stores I/O memory
+            region address in this structure.
+            ! the root of I/O port tree is @ioport_resource,it represents
+              I/O port number 0 -- 65535.
+    
+          allocation
+            struct resource *request_region(@start, @n, @name)
+            # @start => resource start position(memory address)
+                        type is resource_size_t <= phys_addr-t
+              @n     => number of memory units
+              @name  => name of the resource,for our device
+            # request a resource region of this system.
+            ! resource is used to represents the I/O memory region,
+              but the I/O port is mapped to device register,there is no
+              guarantee the size of port always 8 bits,its size usually
+              is depends on size of device's register.
+
+          release
+            void release_region(@start, @n)
+
+          query
+            int check_region(@start, @n)
+            /* __deprecated */
+            /* 0 => region is free now
+             * -EBUSY => region is busy
+             * ! checking and allocation is not an atomic operation,
+             *   thus no guarantee the allocation would be success
+             *   later.
+             *   we should not use this routine,instead,we try to
+             *   request region directly through request_region(),
+             *   its result tells us whether the region is available.
+             */
+
+          manipulating I/O ports
+            readb                read iomem and return 8 bits
+            writeb               write 8 bits to iomem
+            readw                read iomem and return 16 bits
+            writew               write 16 bits to iomem
+            readl                read iomem and return 32 bits
+            writel               write 32 bits to iomem
+            readq                read iomem and return 64 bits
+            writeq               write 64 bits to iomem
+
+            /* unsigned char/short/int read*(const volatile void __iomem *addr);
+             * void write*(unsigned char/short/int val, volatile void __iomem *addr);
+             */
+
+            /* early kernel used functions such inb(),outb(),inw(),outw(),etc.
+             * the newer kernel implemented new methods,and let the older methods
+             * become wrappers of new methods.
+             * we should use these new methods.
+             */
+
+            memcpy_fromio        @dst : void * <= @src : void __iomem *
+                                 @count : size_t => size of data
+            memcpy_toio          @dst : void __iomem * <= @src : void *
+                                 @count : size_t => size of data
+            memset_io            @addr : void __iomem * <= @val
+                                 @count : memory units need to setup
+
+            ! because mark "__iomem" means "noderef",we can only access to the
+              I/O ports through the routines listed above.
+                correct :
+                  writeb(0, device->register.opcode);
+                incorrect :
+                  /* maybe the architecture needs additional steps before
+                   * access to I/O Memory.
+                   */
+                  *(device->register.opcode) = 0;
+              the implementation of read*/write* is like this
+                /**
+                 * some architectures the memory mapped I/O stuff
+                 * needs to be accessed differently,but for x86,
+                 * we can read/write the memory location directly.
+                 */
+                readb {
+                  /* x86 */
+                  return *(volatile u8 __force *) addr;
+                }
+              "__force" <= __attribute__((force))
+              
+
+
+            
+
+              
           
             
 

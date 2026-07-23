@@ -1887,7 +1887,10 @@ Chapter 3 : Processes
          */
         #define set_current_state(state_value)    set_mb(current->state, (state_value))
 
-        /*  set_mb - enable memory barrier before set value,disable it later.  */
+        /*  set_mb - enable memory barrier before set value,disable it later.
+         *    => do { var = value; barrier(); } while (0) <= !CONFIG_SMP
+         *    => do { (void)xchg(&var, value); } while (0) <= CONFIG_SMP
+         */
 
 
     Identifying a Process :
@@ -26816,6 +26819,8 @@ Chapter 13 : I/O Architecture and Device Drivers
           physical memory,then must make up a mapping for it through noncontiguous memory area,that is the
           vm_struct descriptor.
 
+          /* <linux/compiler.h> : #define __iomem __attribute__((noderef, address_space(2))) */
+
           <arch/x86/include/asm/io.h>
             /**
              * ioremap_nocache - map bus memory into CPU space without hardware cache,make bus memory CPU
@@ -26881,7 +26886,7 @@ Chapter 13 : I/O Architecture and Device Drivers
               @prot_val,return error if failed.
               call to ioremap_page_range() with arguments @vaddr, @vaddr + @size, @phys_addr, @prot.
               this routine is defined in <lib/ioremap.c>,it modify Kernel Page Table entries to make
-              the mapping go into effect.
+              the mapping get effect.
               finally,returns the address of mapped linear address.
 
           some architecture-dependent functions used when accessing I/O shared memory :
