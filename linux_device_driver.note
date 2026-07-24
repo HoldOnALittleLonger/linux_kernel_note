@@ -1053,6 +1053,10 @@ Communicating with Hardware :
 
           ! some CPU implements a single address space,that peripheral devices
             are different from memory and,deserve a separate address space.
+            # I/O ports for peripheral devices are reside on this special
+              address space,differen from the memory address space where tasks
+              resides on.
+              x86 provides such I/O address space.
     
           ! x86 CPU family have separate read and write electrical lines for
             I/O ports and special CPU instructions to access ports.
@@ -1176,10 +1180,12 @@ Communicating with Hardware :
              * void write*(unsigned char/short/int val, volatile void __iomem *addr);
              */
 
-            /* early kernel used functions such inb(),outb(),inw(),outw(),etc.
-             * the newer kernel implemented new methods,and let the older methods
-             * become wrappers of new methods.
-             * we should use these new methods.
+            /* kernel provides functions inb(),outb(),inw(),outw(),etc.they
+             * has the same effects of read*() and write*().
+             * but the different is
+             *   read* and write* are implemented via "mov" instruction.
+             *   in* and out* are implemented via "in*" and "out*" instruction.
+             *                                    #^ inb/insb ...,outb/outsb ...
              */
 
             memcpy_fromio        @dst : void * <= @src : void __iomem *
@@ -1189,8 +1195,15 @@ Communicating with Hardware :
             memset_io            @addr : void __iomem * <= @val
                                  @count : memory units need to setup
 
-            ! because mark "__iomem" means "noderef",we can only access to the
-              I/O ports through the routines listed above.
+            ! the annotation "__iomem" is defined as
+                __attribute__((noderef, address_space(2)))
+              it is used by Sparse tool -- static code checking code.
+    
+              "noderef" "address_space(2)"
+                if we derefered the pointer directly has this annotation,
+                Sparse will shows warnning message,and it is in
+                "address space 2" -- the normal address space is 0.
+  
                 correct :
                   writeb(0, device->register.opcode);
                 incorrect :
@@ -1198,25 +1211,130 @@ Communicating with Hardware :
                    * access to I/O Memory.
                    */
                   *(device->register.opcode) = 0;
+
+                ! those annotations is useful only to Sparse,no effects to
+                  GCC.
+    
               the implementation of read*/write* is like this
                 /**
                  * some architectures the memory mapped I/O stuff
                  * needs to be accessed differently,but for x86,
                  * we can read/write the memory location directly.
                  */
-                readb {
-                  /* x86 */
-                  return *(volatile u8 __force *) addr;
+                static inline u8 readb(const volatile void __iomem *addr)
+                {
+                        /* x86 */
+                        return *(const volatile u8 __force *) addr;
+                              /* ^we do force conversion to u8 pointer */
                 }
               "__force" <= __attribute__((force))
-              
+    
+            ! kernel also provided "string version" of in*() and out*(),such
+              insb(),outsb().
+              but has no reads*() and writes().
+              for x86 platform,the ins and outs version are implemented via
+              "rep" prefix,the counter is stored into RCX register.
+              the generic implementation is included in <asm-generic/io.h>,
+              in which those routines are implemented via a loop.
+              NOTE,insb() is different from memcpy_fromio(),the target of
+              insb() is a single 1 byte memory unit -- the port.
+            ! kernel also provided "pause version" of in*() and out*(),such
+              inb_p(),outb_p().
+              if peripheral device is too slower than processor's clock,
+              when the CPU transfers data too fast,the device may misses some
+              data.
+              to prevent such problem,"_p" version will insert slow_down_io()
+              after an I/O instruction.
+              slow_down_io() relies on native_io_delay(),which routine can be
+              implemented via several ways :
+                1> transfer 1 byte(in AL) to 0x80 port
+                2> transfer 1 byte(in AL) to 0xed port
+                3> udelay(2) /* delay 2ms */
 
+                # 0x80 => POST
+                  0xed => alternative POST
+              NOTE,no such functions read*_p(),write*_p() are defined.
 
-            
+          from userspace
+            if we want to access to I/O ports from userspace,must set access
+            permission for our thread.
+            the system call ioperm() can set permissions for us.
+            <sys/io.h>
+              /**
+               * ioperm - set port I/O permissions
+               * @from:   the port address to start,usually is the port number
+               * @num:    the number of bits need to set
+               * @turn_on:
+               *          nonzero => set bits
+               *          zero    => clear bits
+               * return:  0 OR error code
+               * # NEED CAP_SYS_RAWIO
+               * # this routine sets permission bits,but it start from port
+               *   address,the range is defined by @from and @num.
+               *   range => [@from, @from + @num - 1]
+               *   each port in the range corresponds to 1 permission bit.
+               */
+              int ioperm(unsigned long from, unsigned long num, int turn_on);
 
-              
-          
-            
+              ! another iopl() system call been deprecated,thus we do not list
+                it.
+              ! some helpers such inb(),inb_p(),outb(),outb_p(),insb(),outsb(),
+                etc,defined in the same header.
+                they are defined as inline macros,thus we must compile program
+                with "-O" or "-O2",otherwise will cause link time error.
+                suffix 'p' means program will pause until I/O complete.
+                suffix 's' means sequence I/O,it receives an array and size of
+                buffer.
+                'b' 'w' 'l' means data width.
 
+            ! some host platform has no ioperm() and iopl(),userspace can still
+              access I/O ports by using '/dev/port' device file,however,that
+              file is very platform-specific and not likely useful for anything
+              but the PC.
+              /* usually,x86-specific */
 
-        
+            e.g.
+              if (ioperm(0x0060, 2, 1) < 0) {
+                      fprintf(stderr, "error: failed to set port permissions\n");
+                      return -EPERM;
+              }
+
+              uint8_t b = 0;
+              b = inb_p(0x0060);
+              fprintf(stdout, "info: inb on 0x0060 returned %hhu\n", b);
+
+          platform dependencies
+            I/O port read/write is highly depends on platform.
+    
+            for example,x86 supports 64-kB I/O space,the type port parameter
+            in the routines are "unsigned short",but for other platforms,
+            they are "unsigned long",because where ports are just special
+            locations in the same address space as memory.
+    
+            another example,"Alpha" architecture supports all I/O functions,
+            and ports are memory-mapped,but the implementation of port I/O
+            is different in different "Alpha" platforms,according to the
+            chipset they use.ports are "unsigned long".
+
+            "ARM",ports are memory-mapped,all functions are supported,string
+            functions are implemented in C,ports are "unsigned int".
+
+          parallel interface
+            /* in minimal configuration(ECP and EPP modes)
+             * come with three 8-bit ports.
+             */
+            the PC standard starts the I/O ports for the first parallel interface
+            at (memory location)0x378 and for the second at 0x278.
+            0x378 is bidirectional data register,it connects directly to pins
+            2 -- 9 on the physical connector.
+            0x278 is a read-only status register.
+            the 3rd port is an output-only control register.
+
+            signal levels used in parallel communications
+              standard TTL(transistor-transistor logic) 0 -- 5 volts,
+              logic threshold at about 1.2 volts.
+
+            ! parallel connector is not isolated from the computer's internal
+              circuitry.
+              wiring correctly is very important,otherwise it will damages
+              the motherboard.

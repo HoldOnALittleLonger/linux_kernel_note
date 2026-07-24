@@ -25388,6 +25388,15 @@ Chapter 13 : I/O Architecture and Device Drivers
             outb_p, outw_p, outl_p      =>  out[b/w/l] with an io delay
             insb, insw, insl            =>  ins[b/w/l]
             outsb, outsw, outsl         =>  outs[b/w/l]
+
+            /* '_p' => pause until I/O complete
+             * 's'  => sequence(string) operation,use a buffer for data,
+             *         some platform may provide a single instruction to
+             *         does this task,or kernel implement it through a loop
+             *
+             * insb  => void insb(unsigned port, void *addr, unsigned long count);
+             * outsb => void outsb(unsigned port, void *addr, unsigned long count);
+             */     
           
           <arch/x86/include/asm/io.h>
             #define BUILDIO(bwl, bw, type)                             \
@@ -25412,7 +25421,7 @@ Chapter 13 : I/O Architecture and Device Drivers
             }                                                          \
                     ...
             
-            ! for the function execute a "dummy" instruction to introduce pause
+            ! for the function executes a "dummy" instruction to introduce pause
               is implemented by call to slow_down_io() right after the auxiliary
               function.
             ! slow_down_io() is implemented by native_io_delay(),which is defined in
@@ -26371,36 +26380,39 @@ Chapter 13 : I/O Architecture and Device Drivers
             /**
              * bus_type - structure used to represent a bus
              * @name:     name of the bus
-             * @bus_attrs:    attributes of this bus
-             * @dev_attrs:    attributes of devices host on this bus
-             * @drv_attrs:    attributes of drivers that attach to this bus
-             * @match:        checks whether a given driver supports a given driver
-             * @uevent:       userspace event support
-             * @probe:        device probe
-             * @remove:       remove a device from bus
-             * @shutdown:     shutdown a device hosted on this bus
-             * @suspend:      suspend device
-             * @resume:       resume device
-             * @pm:           Power Management Operations
-             * @p:            bus private data <drivers/base/base.h>
-             *                  struct kset subsys
-             *                    - kset that defines this bus
-             *                      corresponds to "/sys/bus/*"
-             *                  struct kset *drivers_kset
-             *                    - drivers attached to this bus
-             *                  struct kset *devices_kset
-             *                    - devices hosted on this bus
-             *                  struct klist klist_devices
-             *                    - iterate over @devices_kset
-             *                  struct klist klist_drivers
-             *                    - iterate @drivers_kset
-             *                  struct blocking_notifier_head bus_notifier
-             *                    - bus notifier list for anything that cares about
-             *                      things on this bus
-             *                  unsigned int drivers_autoprobe:1
-             *                    - automatically probe
-             *                  struct bus_type *bus
-             *                    - pinter back to the struct bus_type object
+             * @bus_attrs:
+             *            attributes of this bus
+             * @dev_attrs:
+             *            attributes of devices host on this bus
+             * @drv_attrs:
+             *            attributes of drivers that attach to this bus
+             * @match:    checks whether a given driver supports a given driver
+             * @uevent:   userspace event support
+             * @probe:    device probe
+             * @remove:   remove a device from bus
+             * @shutdown: shutdown a device hosted on this bus
+             * @suspend:  suspend device
+             * @resume:   resume device
+             * @pm:       Power Management Operations
+             * @p:        bus private data <drivers/base/base.h>
+             *              struct kset subsys
+             *                - kset that defines this bus
+             *                  corresponds to "/sys/bus/*"
+             *              struct kset *drivers_kset
+             *                - drivers attached to this bus
+             *              struct kset *devices_kset
+             *                - devices hosted on this bus
+             *              struct klist klist_devices
+             *                - iterate over @devices_kset
+             *              struct klist klist_drivers
+             *                - iterate @drivers_kset
+             *              struct blocking_notifier_head bus_notifier
+             *                - bus notifier list for anything that cares about
+             *                  things on this bus
+             *              unsigned int drivers_autoprobe:1
+             *                - automatically probe
+             *              struct bus_type *bus
+             *                - pinter back to the struct bus_type object
              * # entries under devices and drivers directories of this bus in sysfs are symlinks to
              *   the real device and driver
              */
