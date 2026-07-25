@@ -12301,7 +12301,7 @@ Chapter 8 : Memory Management
                       PG_slab,
                       PG_owner_priv_1,          /* owner use.if pagecache,fs may use */
                       PG_arch_1,
-                      PG_reserved,
+                      PG_reserved,              /* this page is reserved */
                       PG_private,               /* if pagecache,has fs-private data */
                       PG_private_2,             /* if pagecache,has fs aux data */
                       PG_writeback,             /* page is under writeback */
@@ -25452,11 +25452,24 @@ Chapter 13 : I/O Architecture and Device Drivers
                * ioport_resource - the root of I/O port tree of this system,
                *                   it spans the whole I/O address space from
                *                   port number 0 to 65535
+               *                   #^ IO_SPACE_LIMIT -- 0xffff
+               *                      <arch/x86/include/asm/io.h>
+               *                      the generic definition is 0xffffffff
                */
               extern struct resource ioport_resource;
 
               /**
-               * resource - I/O port resource tree node
+               * iomem_resouce - the root of I/O Memory tree of this system.
+               * # this descriptor is initialized in <kernel/resource.c>,
+               *   it is devoted to PCI Memory.
+               *   @start set to 0,@end set to -1.
+               *   because phys_addr_t is either u64 or u32,-1 will wraparound
+               *   to the maximum value of the data type.
+               */
+              extern struct resource iomem_resource;
+
+              /**
+               * resource - peripheral device resource tree node
                * @start:    start of resource range
                *            # @start it is not the I/O port number,
                *              it is the starting address of memory area
@@ -26877,12 +26890,42 @@ Chapter 13 : I/O Architecture and Device Drivers
               check @phys_addr at first,it can not greater than system physical memory.
               test valid to @phys_addr,return NULL and print KERN_WARNING, if it is not valid addr.
               /* if undefined CONFIG_PHYS_ADDR_T_64BIT,phys_addr_valid() will always returns 1. */
+              if the range is ISA bus region,invoke phys_to_virt() on @phys_addr,because ISA region
+              resides on lower address,that is always been mapped,we just return the virtual linear
+              address as well.
               check if the request spans more than any BAR in the iomem resource tree,print warning
               if it is.
               travers pfns starting from @phys_addr to last addr of iomem,return NULL if current
               address is registered as "System RAM" in iomem_resource list AND current pfn is using
               AND current page is not for reserve.this checking forbid anybody to remap normal RAM that
               we are using.
+              /**
+               * This is handled by walk_system_ram_range(),the entrypoint is page_is_ram(),but this
+               * function is marked __weak,architecture can overrides it.
+               * page_is_ram() pass current pfn and 1 -- number of pages,to walk_system_ram_range().
+               * the function uses a loop to traverse "System RAM" in the resource tree,and invoke
+               * a callback on the page(__is_ram() is passed as callback,it always returns 1).
+               * find_next_system_ram() is used to find next System RAM,the resource has flags
+               * IORESOURCE_MEM | IORESOURCE_BUSY.
+               * the range is extracted through
+               *   @res.start = @pfn << PAGE_SHIFT
+               *   @res.end   = ((@pfn + @nr_pages) << PAGE_SHIFT) - 1
+               * if find_next_system_ram() found a resource that is "System RAM",then it will
+               * overwrites the contents of a resource descriptor,passed to it at the first parameter.
+               * !! USUALLY,THE "System RAM" REGIONS ARE DETERMINED AT BOOT PHASE,BUT "MEMORY HOTPLUG"
+               *    CAN ADDS "System RAM".
+               *    WE CAN GET THE SYSTEM MEMORY MAPPING INFO FROM /proc/iomem .
+               *    AT SYSTEM BOOT PHASE,BIOS PROVIDES PHYSICAL MEMORY MAP,BUT KERNEL INITIALIZING
+               *    PROGRAMS AND EFI PROGRAM CAN MODIFY THE MAP.
+               * we give up to use this high address memory if (AND)
+               *   this page is "System RAM"    --> The system ram address space
+               *   page number is valid         --> The page number is legal
+               *   the page has no PG_reserved  --> The page is not for reserved use,such as I/O memory
+               * # x86 provides separate address space for peripheral devices' ports,we can access
+               *   those ports through in*() and out*();or ioremap them to I/O Memory,then we can
+               *   access the regions through read[b/w/l]() and write[b/w/l],memcpy_fromio(),
+               *   memcpy_toio(),memset_io().
+               */
               do page aligning for @phys_addr and @size,reserve memory type for the aligned @phys_addr
               and @size with type @prot_val,return NULL if failed to reserve memory type.
               a local variable named @new_prot_val is used in reserve_memtype(),the routine returns

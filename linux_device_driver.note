@@ -1021,21 +1021,27 @@ Advanced Char Driver Operations :
 Communicating with Hardware :    
         I/O Ports and I/O Memory
           peripheral device is controlled by writing and reading its registers.
-          those registers usually is mapped to either the memory address space
-          or I/O address space.
+          those registers usually is mapped to either the _memory address space_
+          or _I/O address space_.
 
           I/O Memory -
-            the memory space used to map peripheral device's registers.
+            peripheral device's registers are mapped into the memory address
+            space,and the region for those registers is called I/O Memory.
             when the I/O Memory is allocated to a peripheral device,from CPU
             view point,this memory region represents the peripheral device.
+            /* the device memory also is included in I/O Memory term */
+            it is simply a region of RAM-like locations that the device makes
+            available to the processor over the bus.
 
           I/O Port -
-            an I/O Port is a memory position in I/O Memory region which maps
-            to a register  of peripheral device.
+            peripheral device's registers are mapped into a separate address
+            space,the address space is different from the memory address space
+            that now visible to the CPU.
+            the mapping on the separate address space is called I/O Port.
 
           L
           0x00000200
-          [ reg0 | reg1 | ... ] <= I/O Memory <= peripheral device
+          [ reg0 | reg1 | ... ] <= peripheral device register mapping
           | |                 0x00000400
           | |                 H
           | +--> an I/O port
@@ -1167,11 +1173,17 @@ Communicating with Hardware :
              */
 
           manipulating I/O ports
+            inb                  read I/O port and return 8bits
             readb                read iomem and return 8 bits
+            outb                 write 8bits to I/O port
             writeb               write 8 bits to iomem
+            inw                  read I/O port and returns 16bits
             readw                read iomem and return 16 bits
+            outw                 write 16bits to I/O port
             writew               write 16 bits to iomem
+            inl                  read I/O port and returns 32bits
             readl                read iomem and return 32 bits
+            outl                 write 32bits to I/O port
             writel               write 32 bits to iomem
             readq                read iomem and return 64 bits
             writeq               write 64 bits to iomem
@@ -1180,14 +1192,18 @@ Communicating with Hardware :
              * void write*(unsigned char/short/int val, volatile void __iomem *addr);
              */
 
-            /* kernel provides functions inb(),outb(),inw(),outw(),etc.they
-             * has the same effects of read*() and write*().
-             * but the different is
+            /**
+             * on x86,the difference between in*()/write*() and read*()/write*()
              *   read* and write* are implemented via "mov" instruction.
              *   in* and out* are implemented via "in*" and "out*" instruction.
              *                                    #^ inb/insb ...,outb/outsb ...
+             * read*() and write*() usually is used for I/O Memory.
+             * in*() and out*() usually is used for I/O Port.
+             * for the architecutre that separate address space is featured for
+             * peripheral device,we should use in*() and out*() for port I/O.
              */
 
+            /* block I/O on I/O Memory */
             memcpy_fromio        @dst : void * <= @src : void __iomem *
                                  @count : size_t => size of data
             memcpy_toio          @dst : void __iomem * <= @src : void *
@@ -1338,3 +1354,205 @@ Communicating with Hardware :
               circuitry.
               wiring correctly is very important,otherwise it will damages
               the motherboard.
+
+        Using I/O Memory
+          depending on the platform and bus being used,I/O memory may or may
+          not be accessed through page tables.
+    
+          through page tables,kernel needs to arrange for the physical address
+          to be visible from driver,thus we must call ioremap() before doing
+          any I/O operations.
+    
+          if no page tables,the I/O Memory locations look like I/O Ports.
+
+          /* we should use wrappers rather than direct dereference the
+           * I/O Memory locations.
+           * -- even x86 supports direct pointer dereference on I/O Memory
+           *    locations
+           */
+
+          allocation
+            <linux/ioport.h>
+              /**
+               * request_mem_region - request I/O Memory region
+               * @start:              starting address
+               * @len:                region length
+               * @name:               name identifier
+               * return:              resource descriptor OR NULL
+               * # different from request I/O port,we request resource
+               *   from @iomem_resource,it is the system resource tree
+               *   for I/O Memory.
+               *   @ioport_resource is used for I/O Ports.
+               */
+              #define request_mem_region(start, n, name) \
+                      __request_region(&iomem_resource, (start), (n), (name), 0)
+
+              /* exclusive version,request userland may not map this resource */
+              #define request_mem_region_exclusive(start, n, name) \
+                      __request_region(&iomem_resource, (start), (n), (name), \
+                                       IORESOURCE_EXCLUSIVE)
+
+          release
+            <linux/ioport.h>
+              /* release resouce */
+              #define release_mem_region(start, n) \
+                      __release_region(&iomem_resource, (start), (n))
+
+          checking
+            <linux/ioport.h>
+              /* check whether the resouce is available
+               * ! check and allocation is not an atomic operation.
+               */
+              #define check_mem_region(start, n) \
+                      __check_region(&iomem_resource, (start), (n))
+
+          remap
+            not all platform supports direct pointer dereference on I/O Memory,
+            thus we may need to make the locations are visible to driver.
+            so,we need to map it at first.
+
+            function ioremap() can be used to map bus memory into memory space
+            that CPU can accesses via mmio helpers(includes inb/outb/readb ...).
+            the primary work is hands over to __ioremap_caller(),which remap an
+            arbitrary physical address space into the kernel linear address
+            space.
+            /* ioremap_page_range() is called to modify Kernel Page Table
+             * entries.
+             */
+            function iounmap() can be used to unmap the I/O Memory that has
+            been mapped.
+
+            ! we can get ioremap information from /proc/iomem .
+            ! even we have remapped the I/O memory,we still need to use the
+              accessor functions instead directly dereference pointer.
+            ! ioremap_nocache() can ensure the memory is not hardware cached.
+
+          accessing
+            <lib/iomap.c>
+              /**
+               * IO_COND - this macro is needed by ioread* and iowrite*
+               *           it convert @addr to unsigned long,saves result
+               *           in local @port.
+               *           if @port >= PIO_RESERVED => Memory I/O
+               *           if @port > PIO_OFFSET => Port I/O
+               *           otherwise,bad_io_access().
+               */
+              #define IO_COND(addr, is_pio, is_mmio)
+
+              /**
+               * ioread* - read on remapped I/O memory
+               * # rely on IO_COND()
+               *     8bit => @is_pio == return inb(port)
+               *             @is_mmio == return readb(addr)
+               *     ...
+               */
+              unsigned int ioread8(void __iomem *addr);
+              unsigned int ioread16(void __iomem *addr);
+              unsigned int ioread32(void __iomem *addr);
+              unsigned int ioread32be(void __iomem *addr);
+
+              /* similar to ioread*,but for write,relies
+               * on IO_COND(),and out*(),write*()
+               */
+              unsigned int iowrite8(void __iomem *addr);
+              unsigned int iowrite16(void __iomem *addr);
+              unsigned int iowrite32(void __iomem *addr);
+              unsigned int iowrite32be(void __iomem *addr);
+
+              /* repeat version */
+              void ioread*_rep(void __iomem *addr, void *dst, unsigned long count);
+              void iowrite*_rep(void __iomem *addr, const void *dst,
+                                unsigned long count);
+
+              /* block I/O on remapped I/O memory relies on
+               *   memcpy_fromio
+               *   memcpy_toio
+               *   memset_io
+               */
+
+        Ports as I/O Memory
+          we can create virtual mapping that maps port to iomem.
+    
+          <lib/iomap.c>
+            /**
+             * encode the physical Port I/O address(0 -- 0xffff) into
+             * the pointer by offsetting them with a constant(0x10000)
+             * and assuming that all the low addresses are always
+             * Port I/O.
+             */
+            #define PIO_OFFSET 0x10000UL
+            #define PIO_MASK   0x0ffffUL
+            #define PIO_RESERVED 0x40000UL
+    
+            /**
+             * ioport_map - map I/O Port to "I/O Memory" location
+             * @port:       port number
+             * @nr:         number of ports to map
+             * return:      I/O Memory address OR NULL
+             * # if @port greater than PIO_MASK,NULL would be returned,
+             *   otherwise,returns
+             *     (void __iomem *)(unsigned long)(@port + PIO_OFFSET)
+             * # we can access them via ioread*() and iowrite*() helpers.
+             * # just make I/O ports look like memory,but the ports still
+             *   needed to be allocated with request_region().
+             */
+            void __iomem *ioport_map(unsigned long port, unsigned int nr);
+
+            /* NULL Body,does nothing */
+            void ioport_unmap(void __iomem *addr);
+
+        ISA Memory Below 1MB
+          /* ISA -- Industry Standard Architecture */
+          ISA I/O Memory appears almost all PC,the memory range is
+            [640kB, 1MB]
+            0xa0000 -- 0x100000
+            size is 384kB
+          the memory region belongs to "non-directly-mapped class of memory".
+          /** 
+           * ISA space is "always mapped' on a typical x86 system,no need to
+           * explicitly ioremap() it.
+           * in header <arch/x86/include/asm/io.h>,a macro definition
+           *   __ISA_IO_base ((char __iomem *)(PAGE_OFFSET))
+           * is exists,and the ISA space is start from PAGE_OFFSET in the
+           * kernel space,as the virtual linear address.
+           *
+           * the macro ISA_START_ADDRESS is defined to 0xa0000,
+           * and macro ISA_END_ADDRESS is defined to 0x100000.
+           * if ISA space is not mapped,we need to ioremap() it before make use
+           * of the memory region.
+           * # header is <arch/x86/include/asm/e820.h>
+           *   -- as physical address
+           * # E820 BIOS routine is a standard x86 firmware interface used
+           *   during system boot in real mode to query the physical
+           *   System Address Map.
+           *   kernel does early printk these mapping information,usually
+           *   we can get it through "dmesg".
+           * ! ISA Space is used by the old devices,modern devices can
+           *   remap their ports,thus a kernel configure option allows us
+           *   to get the ISA Space away from memory mapping.
+           *   # such as sound cards,early video graphic adapters,etc.
+           *
+           * in source <arch/x86/kernel/setup.c>,the physical address region
+           * start from 0xa0000,end at 0xbffff,devoted to "Video RAM area".
+           * # described through a resource descriptor,named
+           *     video_ram_resource
+           *
+           * for the Xen CPU,init function xen_memory_setup() will add a
+           * memory region spanned the ISA space with type
+           * E820_RESERVED,through routine e820_add_region().
+           * # source is <arch/x86/xen/setup.c>
+           *
+           * for old PC with older kernel version,we may need to ioremap()
+           * 0xa0000 at first,but modern kernel and PC do not need to
+           * invoke ioremap(),kernel handles this automatically
+           * at booting phase.
+           */
+
+          ! ISA I/O Memory exists only in x86-class computers.
+          ! the old routines such isa_read* isa_write* been removed from
+            kernel,instead,we should use the I/O Memory accessor functions
+            to access ISA space.
+            /* kernel 2.4/2.5,removed those routines */
+          
+            
+            
