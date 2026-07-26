@@ -4686,14 +4686,14 @@ Chapter 4 : Interrupts and Exceptions
 
           /*  struct irq_desc - the irq descriptor structure represents an interrupt.
            *  @irq:             interrupt number for this descriptor.
-           *  @handler_irq:     high-level irq-events handler [if NULL, __do_IRQ()].
+           *  @handl_irq:       high-level irq-events handler [if NULL, __do_IRQ()].
            *  @action:          the irq action chain.
            *  @status:          status information.
            */
           struct irq_desc {
                 unsigned int irq;
                 ...
-                irq_flow_handler_t handler_irq;
+                irq_flow_handler_t handl_irq;
                 ...
                 struct irqaction *action;
                 unsigned int status;
@@ -4704,7 +4704,7 @@ Chapter 4 : Interrupts and Exceptions
            *             between IRQ vector and IRQ descriptor.
            *  @NR_IRQS:  number of IRQs in the system,architecture dependent,
            *             if undefined,then it is defined with 64.
-           *  #  the @handler_irq field for per-irq_desc is setup to "handle_bad_irq",
+           *  #  the @handle_irq field for per-irq_desc is setup to "handle_bad_irq",
            *     and @status field is setup to "IRQ_DISABLED".
            */
           struct irq_desc irq_desc[NR_IRQS];
@@ -4820,7 +4820,26 @@ Chapter 4 : Interrupts and Exceptions
            *  @disable:         disable the interrupt.
            *  @ack:             start of a new interrupt.
            *  ...
-           *  @typename:        obsoleted by name,kept as migration helper. 
+           *  @typename:        obsoleted by name,kept as migration helper.
+           *  # the irq_chip is an abstraction of PIC,kernel provides several different chip
+           *    descriptors.
+           *    at system initialization phase,kernel will invoke set_irq_chip_and_handler_name()
+           *    to sets irq_desc(s)' @irq, @handl_irq, @chip, @name.
+           *    on x86,for ISA interrupts,the @handle_irq is set to handle_level_IRQ(),and
+           *    @chip is set to @i8259A_chip.
+           *    the descriptors for non-ISA interrupts,@chip is set to @ioapic_chip,
+           *    and @handle_irq set to either handle_edge_irq() or handle_fasteoi_irq().
+           *    and @name is "edge" and "fasteoi",respectively.
+           *    this is handled by setup_IO_APIC_irqs(),which is defined in the source
+           *    <arch/x86/kernel/apic/io_apic.c>,entrypoint is setup_IO_APIC().
+           *    function setup_IO_APIC() is called by native_smp_prepare_cpus(),this routine
+           *    is the default value to @smp_ops.smp_prepare_cpus.
+           *    function smp_prepare_cpus() invoke this method,and which is called by
+           *    kernel_init() in a kthread for rest_init().
+           *    ! the x86 initialization operations do not contains this control path,
+           *      for irq init,the x86 initialization operations only deal with
+           *      ISA descriptors,and some interrupt gates.
+           *      the function is native_init_IRQ(),called by init_IRQ(),from start_kernel().
            */
           struct irq_chip {
                 const char *name;
@@ -4868,6 +4887,21 @@ Chapter 4 : Interrupts and Exceptions
                 struct task_struct *thread;
                 unsigned long thread_flags;
           };
+
+          relationship figure :
+             struct irq_desc
+              ||
+              VV
+            [IRQ 0 | IRQ 1 | IRQ 2 | ... | IRQ n]   <-- IRQ lines
+             \         |        /           /
+              \        |       /           /
+               \       |      /           /
+                \      |     /           /
+            <===================================>   <-- PIC <== irq_chip
+                ^      ^     ^       ^      ^
+                |      |     |       |      |       <-- INT outline
+                V      V     V       V      V
+            <===================================>   <-- peripheral devices
 
           some values for irqaction.flags :
             IRQF_DISABLED           keep irqs disabled when calling the action handler
@@ -5200,8 +5234,8 @@ Chapter 4 : Interrupts and Exceptions
               serviced.
 
           6>  enter a loop to process ISR.
-              before "handle_IRQ_event()" is called with the ISR,spin lock of the interrupt descriptor must be
-              released.
+              before "handle_IRQ_event(@irq, @irq_desc->action)" is called with the ISR,spin lock of the
+              interrupt descriptor must be released.
               this allows the second @irq is occurred while in handler or in "do_IRQ()",so the second @irq will
               be serviced after the previous @irq is handled completely.
               BUT THIS LOOP ONLY HANDLE THE SECOND INSTANCE,NEITHER THE THIRD,NOR THE FOURTH...
@@ -5381,6 +5415,7 @@ Chapter 4 : Interrupts and Exceptions
 
         <linux/interrupt.h>
         typedef irqreturn_t (*irq_handler_t)(int, void *);
+        /* the 2nd parameter usually is irqaction->dev_id passed by handle_IRQ_event */
 
         #ifdef CONFIG_GENERIC_HARDIRQS
           extern int __must_check request_threaded_irq(unsigned int irq, irq_handler_t handler, 
@@ -5402,7 +5437,10 @@ Chapter 4 : Interrupts and Exceptions
          *  @name:        device specified information used in "/proc/irq" and "/proc/interrupts".
          *  @dev:         device specified data.
          *  return:       0 or error code.
-         */ 
+         */
+
+        ! those two routines usually one relies on another.
+          request_irq() usually is call to request_threaded_irq() with @thread_fn == NULL.
 
         /*  request_threaded_irq - request to register an ISR with threaded environment.
          *  @irq:                  IRQ number.

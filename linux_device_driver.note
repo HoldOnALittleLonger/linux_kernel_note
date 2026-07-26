@@ -1542,7 +1542,7 @@ Communicating with Hardware :
            * E820_RESERVED,through routine e820_add_region().
            * # source is <arch/x86/xen/setup.c>
            *
-           * for old PC with older kernel version,we may need to ioremap()
+           * for old PC with old kernel version,we may need to ioremap()
            * 0xa0000 at first,but modern kernel and PC do not need to
            * invoke ioremap(),kernel handles this automatically
            * at booting phase.
@@ -1553,6 +1553,104 @@ Communicating with Hardware :
             kernel,instead,we should use the I/O Memory accessor functions
             to access ISA space.
             /* kernel 2.4/2.5,removed those routines */
-          
-            
-            
+
+Interrupt :    
+        Autodetecting the IRQ Number
+          driver needs to determine which IRQ line is going to be used by the
+          device.in order to install ISR correctly for the device,this
+          information is necessary to device driver.
+          some devices feature a default behavior,driver can assumes that
+          the default values apply.
+          /**
+           * e.g.
+           *   if no IRQ line is specified at module loading
+           *     default IRQ line is 7 if I/O address is 0x378
+           *     default IRQ line is 2 if I/O address is 0x278
+           *     default IRQ line is 5 if I/O address is 0x3bc
+           *   # parallel port.
+           */
+          some devices can tell us which IRQ line they are going to use.
+          driver can retrieves the number by read a status byte from one of
+          the registers of device,or from PCI configuration space.
+          /* probing */
+          /* if the device resides on PCI bus,the standard requires it
+           * declares which IRQ line it is going to use.
+           */
+
+          probe interrupt
+            driver tells the device to generate interrupts and watches what
+            happens.
+
+            kernel-assisted probing
+              <kernel/irq/autoprobe.c>
+                /**
+                 * probe_irq_on - begin an interrupt autodetect
+                 * return:        a bit mask of unassigned interrupts,such
+                 *                interrupts' descriptors have IRQ_AUTODETECT
+                 *                is set
+                 * # EXPORT_SYMBOL
+                 * # this function should comes with probe_irq_off()
+                 */
+                unsigned long probe_irq_on(void);
+
+                description for probe_irq_on() :
+                  first,this routine invoke async_synchronize_full() to sync
+                  or asynchronous tasks,then acquire mutex @probing_active.
+                  next,executes three loops.
+                  /**
+                   * for each IRQ line has no ISR installed,and no IRQ_NOPROBE,
+                   * we invoke startup() on this chip to trigger an interrupt.
+                   */
+                  loop1 for_each_irq_desc_reverse()
+                    for each IRQ line(IRQ vector,the total number is determined
+                    by NR_IRQS in global variable @nr_irqs),if the IRQ line's
+                    descriptor's @action is NULL AND @status disabled IRQ_NOPROBE
+                    we invoke the @chip's startup() function,pass it current
+                    IRQ line(index start from 0).
+                    /* before if-statement test,we need to hold the descriptor's
+                     * @lock member,and release it before next iteration.
+                     * for old-style architecture,compat_irq_chip_set_default_handler()
+                     * will be called.
+                     * if the chip need to know about probing in progress,need to
+                     * call @chip's set_type() method,pass it the IRQ line and
+                     * flag IRQ_TYPE_PROBE.
+                     */
+                  call msleep() to wait 20ms.
+                  /**
+                   * for each IRQ line has no ISR installed,and no IRQ_NOPROBE,
+                   * we set proper status bit,and invoke startup() on the chip
+                   * again.
+                   * this will enable any unassigned irqs.
+                   * # startup again here because if a longstanding irq happened
+                   *   in the loop1,it may have masked itself.
+                   */
+                  loop2 for_each_irq_desc_reverse()
+                    for each descriptor has no @action AND disabled IRQ_NOPROBE,
+                    we enable IRQ_AUTODETECT | IRQ_WAITING on its @status.
+                    invoke the chip's startup() with current IRQ line,if the
+                    result is TRUE,we set IRQ_PENDING on its @status.
+                    /* startup() returned non-zero,the interrupt is pending */
+                  msleep 100ms.
+                  /**
+                   * we have set IRQ_AUTODETECT and IRQ_WAITING in the loop2.
+                   * if the interrupt is "spurious interrupt",the IRQ_WAITING
+                   * set in its descriptor's @status member,will be cleared.
+                   * this is because the generic flow handler of the irq_desc
+                   *   ->handle_irq
+                   * usually clears IRQ_WAITING,and if the @action member is
+                   * NULL,it will returns without handles current interrupt.
+                   * if a IRQ line is not requested by any device,IRQ_DISABLED
+                   * is set in its descriptor's @status.
+                   */
+                  loop3 for_each_irq_desc()
+                    if current descriptor has IRQ_AUTODETECT is set,we continue
+                    to test whether IRQ_WAITING is disabled,if it is,we disable
+                    IRQ_AUTODETECT of it,and invoke its chip's shutdown() method
+                    on the IRQ line.
+                    IRQ_WAITING still set,we set the corresponding bit in the mask
+                    to current IRQ line.
+                    /* @mask is modified if and only if current IRQ line less than
+                     * 32
+                     * # 32 -- FIRST_EXTERNAL_VECTOR
+                     */
+                  finally,return the mask.
