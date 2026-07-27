@@ -1598,8 +1598,13 @@ Interrupt :
                   or asynchronous tasks,then acquire mutex @probing_active.
                   next,executes three loops.
                   /**
-                   * for each IRQ line has no ISR installed,and no IRQ_NOPROBE,
-                   * we invoke startup() on this chip to trigger an interrupt.
+                   * in the loop1,we traverse the IRQ lines from the tail to
+                   * head.the front IRQ lines usually is non-maskable
+                   * interrupts and architecture-specific interrupts.
+                   * we want to probe a free IRQ line our device may going
+                   * to use,such IRQ line has no irqaction registered.
+                   * for each such IRQ line,the startup() method of the
+                   * chip will enabled this IRQ line.
                    */
                   loop1 for_each_irq_desc_reverse()
                     for each IRQ line(IRQ vector,the total number is determined
@@ -1617,12 +1622,12 @@ Interrupt :
                      */
                   call msleep() to wait 20ms.
                   /**
-                   * for each IRQ line has no ISR installed,and no IRQ_NOPROBE,
-                   * we set proper status bit,and invoke startup() on the chip
-                   * again.
-                   * this will enable any unassigned irqs.
-                   * # startup again here because if a longstanding irq happened
-                   *   in the loop1,it may have masked itself.
+                   * in loop2,we set kernel IRQ line probing flags,the
+                   * IRQ_AUTODETECT and IRQ_WAITING.
+                   * the flow handler of interrupt will always disables
+                   * IRQ_WAITING in its execution.
+                   * we set those flags,then if there is such IRQ line raised
+                   * an interrupt,and its IRQ_WAITING will be clear.
                    */
                   loop2 for_each_irq_desc_reverse()
                     for each descriptor has no @action AND disabled IRQ_NOPROBE,
@@ -1632,15 +1637,16 @@ Interrupt :
                     /* startup() returned non-zero,the interrupt is pending */
                   msleep 100ms.
                   /**
-                   * we have set IRQ_AUTODETECT and IRQ_WAITING in the loop2.
-                   * if the interrupt is "spurious interrupt",the IRQ_WAITING
-                   * set in its descriptor's @status member,will be cleared.
-                   * this is because the generic flow handler of the irq_desc
-                   *   ->handle_irq
-                   * usually clears IRQ_WAITING,and if the @action member is
-                   * NULL,it will returns without handles current interrupt.
-                   * if a IRQ line is not requested by any device,IRQ_DISABLED
-                   * is set in its descriptor's @status.
+                   * in loop3,we traverse IRQ lines no irqaction registered from
+                   * head to tail,because we would need to setup the mask in
+                   * a right order.
+                   * IRQ_AUTODETECT and IRQ_WAITING is set in loop2,if there is
+                   * a IRQ line that raised interrupt,and IRQ_WAITING is cleared,
+                   * that means spurious interrupt happened,because the probe
+                   * window starts after probe_irq_on() returned.
+                   * anyway,the spurious interrupts are filter out,and we
+                   * shutdown() the IRQ lines,it will not effect our probe
+                   * window.
                    */
                   loop3 for_each_irq_desc()
                     if current descriptor has IRQ_AUTODETECT is set,we continue
@@ -1650,7 +1656,70 @@ Interrupt :
                     IRQ_WAITING still set,we set the corresponding bit in the mask
                     to current IRQ line.
                     /* @mask is modified if and only if current IRQ line less than
-                     * 32
-                     * # 32 -- FIRST_EXTERNAL_VECTOR
+                     * 32 -- potential interrupts.
+                     * usually,vectors 0 -- 19 devote to NMI and Exceptions,
+                     * and vectors 20 -- 31 devote to architecture-specific use.
+                     * the external interrupts' vectors start from 32.
                      */
                   finally,return the mask.
+
+                /**
+                 * probe_irq_off - end an interrupt autodetect
+                 * @val:           mask of potential interrups
+                 *                 (unused)
+                 * return:         the IRQ line number that interrupt raised on,
+                 *                 or a negative value which is the first
+                 *                 candidate to more than one IRQ lines on them
+                 *                 interrupt is found
+                 * # EXPORT_SYMBOL
+                 * # the interrupt probe logic state is returned to its previous
+                 *   value.
+                 * ! BUGS
+                 *     when used in a module(which arguably should not happen)
+                 *     nothing prevents two IRQ probe callers from overlapping,
+                 *     the results of this are non-optimal.
+                 */
+                int probe_irq_off(unsigned long val);
+
+                description for probe_irq_off() :
+                  we invoke this routine later after probe_irq_on() returned.
+                  probe_irq_on() and probe_irq_off() defined a probing window
+                  for interrupt.
+                  this function traverse irq_desc(s) from 0 to NR_IRQS,for each
+                  irq_desc object
+                    if its @status enabled IRQ_AUTODETECT -- set by probe_irq_on(),
+                    we continue to test if IRQ_WAITING is cleared.
+                    both are TRUE,then we found a IRQ line our device may using.
+                    we set local variable @irq_found to current IRQ line index,
+                    if the local recorder @nr_of_irqs is _zero_,because there may
+                    be more than one IRQ line raised interrupt.
+                    we increase @nr_of_irqs whenever we found an interrupt.
+                    next,set clear IRQ_AUTODETECT in this IRQ line's @status,
+                    invoke chip->shutdown() on it to disable it.
+                  when the loop ends,we test @nr_of_irqs,if it greater than 1,
+                  that means we found several IRQ lines,so we minus the
+                  @irq_found.
+                  finally,return @irq_found to caller.
+
+                Usage :
+                  kernel-driver :
+                    unsigned long mask = 0;
+                    int irqline = 0;
+                    ...
+                    /* @mask is useless for this probe */
+                    mask = probe_irq_on();          <-----------+ 
+                    ... /* we command the peripheral device     | irq probe
+                         * to raise an interrupt in this        | window
+                         * probe window.                        |
+                         * # through I/O Ports                  |
+                         */                                     |
+                    irqline = probe_irq_off(mask);  <-----------+
+                    if (irqline < 0) {
+                            printk(KERN_ERR "more than one interrupts raised"
+                                   " in probe window.");
+                            return -EAGAIN;
+                    }
+
+                   
+    
+

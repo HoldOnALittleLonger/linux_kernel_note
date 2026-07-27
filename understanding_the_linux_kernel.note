@@ -4687,13 +4687,15 @@ Chapter 4 : Interrupts and Exceptions
           /*  struct irq_desc - the irq descriptor structure represents an interrupt.
            *  @irq:             interrupt number for this descriptor.
            *  @handl_irq:       high-level irq-events handler [if NULL, __do_IRQ()].
+           *  @chip:            the PIC descriptor 
            *  @action:          the irq action chain.
            *  @status:          status information.
            */
           struct irq_desc {
                 unsigned int irq;
                 ...
-                irq_flow_handler_t handl_irq;
+                irq_flow_handler_t handle_irq;
+                struct irq_chip *chip;
                 ...
                 struct irqaction *action;
                 unsigned int status;
@@ -4706,6 +4708,8 @@ Chapter 4 : Interrupts and Exceptions
            *             if undefined,then it is defined with 64.
            *  #  the @handle_irq field for per-irq_desc is setup to "handle_bad_irq",
            *     and @status field is setup to "IRQ_DISABLED".
+           *  #  depends on kernel configuration,the irq_desc(s) table may constructed
+           *     through an array,or through a radix-tree.
            */
           struct irq_desc irq_desc[NR_IRQS];
 
