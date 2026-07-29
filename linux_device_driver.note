@@ -1720,6 +1720,246 @@ Interrupt :
                             return -EAGAIN;
                     }
 
+            do it by ourselves
+              the mechanism is the same
+                -- enable all unused interrupts,then wait and see what happens.
+              device usually can be configured to use one IRQ line number from
+              a set of three or four,we can just monitor those IRQs instead to
+              probe all unused IRQs.
+
+              instead to install real ISR,we install some probe routines to the
+              possible IRQ lines.
+              then we let the device raises an interrupt,the probe routine needs
+              to record the IRQ line number it actually seen.we can get the
+              real IRQ line through read the recorder.
+
+              e.g.
+                int real_irq = 0;
+
+                static irqreturn_t probe_IRQ(int irq, void *dev_id)
+                {
+                        real_irq = irq;
+                        return IRQ_HANDLED;
+                }
+
+                int possible_irqs[] = {3, 5, 7, 9};
+                for (unsigned idx = 0; idx < sizeof(possible_irqs) / sizeof(int);
+                     ++idx)
+                        if (request_irq(possible_irqs[idx], probe_IRQ,
+                                        IRQF_SAMPLE_RANDOM, "irq probe", NULL)
+                            < 0) {
+                                printk(KERN_ERR "request irq for probing failed.");
+                                goto err_exit;
+                        }
+                ... /* command device to raise interrupt */
+                ... /* wait a while -- udelay */
+                if (real_irq <= 0) {
+                        printk(KERN_ERR "failed to probe irq.");
+                        goto err_exit;
+                }
+                ...
+                err_exit:
+    
+                undo_req_irq(possible_irqs);
+                return real_irq <= 0 ? -1 : 0;
+
+        Disable IRQ line
+          kernel allows we to disable single IRQ line or disable all IRQ on
+          local CPU.
+
+          disable single irq
+            disable_irq(@irq)
+            disable_irq_nosync(@irq)
+            enable_irq(@irq)
+
+          disable all irq /* "cli" and "sti" instructions */
+            local_irq_disable()
+            local_irq_enable()
+            local_irq_save(@flags)
+            local_irq_restore(@flags)   /* @flags => EFLAGS */
+
+        Interrupt Sharing
+          linux supports irq sharing on all buses(even ISA bus),to avoid
+          irq conflict.
+          we can request an IRQ line that might shared with others through
+            1> pass flag IRQF_SHARED.
+            2> argument @dev_id must not be NULL and need to be unique.
+          the result depends on
+            1> the IRQ line is free.
+            2> all handlers already registered for this line also specified
+               IRQF_SHARED.
+
+          ! when driver needs to unregister its ISR from the shared IRQ line,
+            it must pass @dev_id to free_irq().
+          ! for the shared IRQ line,driver cant call disable_irq() on it,
+            because it is sharing the IRQ line,not owns it.
+    
+          the requirement that ISR needs to follow
+            1> @dev_id as a signature,if the interrupt should not be handled
+               by this ISR,must quickly exit with IRQ_NONE.
+
+
+          about shared IRQ probing
+            no probing function is available for shared handlers.
+            /* modern hardware designed for interrupt sharing is able to
+             * tell the processor which interrupt it is using,thus
+             * eliminating the need for explicit probing.
+             */
+
+          irqaction list
+            kernel add new ISR to the end of irq_desc->action,the @next member
+            of struct irqaction can get into next entry.
+            this happens only when the IRQ line is allowed to be shared.
+
+          ISRs on shared IRQ line
+            the ISRs registered on this shared IRQ line,they will be called
+            by handle_IRQ_event().that function makes use of a loop to
+            iterates each irqaction on the list,and invoke @handler member
+            of current irqaction entry.
+
+          determine whether or not current interrupt must handled by us
+            we can check the @dev_id passed by handle_IRQ_event(),or
+            we can do port I/O in ISR to ask our device if it just raised
+            an interrupt.
+
+          handling
+            at the top halves,ISR should quickly check and ack current
+            interrupt,the time-cost works should be handed over to
+            the bottom halves,kernel schedules the task in future.
+            e.g.
+              static void bottom_fn(unsigned long data)
+              {
+                      int v = *((int *)data);
+                      printk(KERN_INFO "device has sent %d .", v);
+              }
+
+              static irqreturn_t the_ISR(int irq, void *dev_id)
+              {
+                      if (dev_id != driver_dev_id_addr)
+                              return IRQ_NONE;
+                      outb(0x01, device_irq_ack_port);
+                      device_data_buffer = inl(device_irq_data_port);
+                      tasklet_schedule(driver_bottom_tasklet);
+                      return IRQ_HANDLED;
+              }
+
+        Interrupt-Driven I/O
+          usually,we provides data buffers for peripheral device,they
+          can help to detach data transmission and reception from
+          the write and read system calls.
+            input buffer : the buffer stores data from device
+            output buffer : the buffer stores data from write syscall
+          when ISR starts execution,it needs to
+            if device sent some data,the data should be stored into
+            input buffer,and readed by userspace process through
+            read system call later.
+            /* if the buffer is empty,and read is sleeping,then
+             * we needs to wake-up the process.
+             * if we hand over the task to tasklet,the bottom
+             * needs fill the input buffer,and wake-up that process.
+             */
+    
+            next,empty the output buffer from userspace,send them
+            to peripheral device,this usually is done via DMA.
+            /* we may also need to wake-up the process that is
+             * blocked on write system call because there is no
+             * room for new data.
+             */
+
+          interrupt-driven I/O on hardware
+            1> for input,the device needs to interrupt the processor
+               when new data has arrived,and is ready to be retrieved
+               by the system processor.
+               /* through I/O ports,I/O Memory,DMA */
+            2> for output,the device dlivers an interrupt either when
+               it is ready to accept new data or to acknowledge a
+               successful data transfer.
+               /* memory-mapped and DMA-capable devices usually
+                * generate interrupts to tell the system they are done
+                * with the buffer.
+                */
+
+          diagram
+            [ user process ]     [ kernel ]              [ ISR ]        [ device ]
+                  |                     |                   |               |
+                  V                     |                   |               |
+                read                    |                   |               |
+                  |                     V                   |               |
+                  |                driver mark input        |               |
+                  |                request                  |               |
+                  |                     |                   |               V
+                  |                     |                   |             data ready
+                  |                     |                   |               |
+                  |                     |                   |               V
+                  |                     |                   |             interrupt
+                  |                     |                   |               |
+                  |                     |                   v               |
+                  |                     |                  ACK              |
+                  |                     |                   |               V
+                  |                     |                   V              idle
+                  |                     |                 handle
+                  |                     |                   |
+                  |                     |                   V
+                  |                     |                 schedule
+                  |                     |                 bottom
+                  |                     |                 halves
+                  |                     |                 task
+                  |                     |                   |
+                  |                     |                   V
+                  |                     |                 return
+                  |                     |                 IRQ_HANDLED
+                  |                     |
+                  |                     V
+                  |                delayed function
+                  |                start
+                  |                     |
+                  |                     V
+                  |                read data from
+                  |                I/O Memory
+                  |                     |
+                  |                     V
+                  |                fill input buffer
+                  |                     |
+                  |                     V
+                  |                clear input request
+                  |                mark
+                  |                     |
+                  |                     V
+                  |                wake up process
+                  |                     |
+                  |                     V
+                  |                schedule
+                  V
+               woken up
+                  |
+                  V
+               copy_to_user
+                  |
+                  V
+               return from
+               syscall
+
+            ! write is the similar case.for interrupt driven-I/O,we just need
+              to require the ISR does additional output buffer handle as well
+              -- schedule bottom havles task that empty output buffer and send
+              data to peripheral device.
+              when the data transmission finished,the device may will raises
+              an interrupt to tell this truth,we can check both buffers in
+              this interrupt,and do the same tasks.
+            ! the input request mark just an assumption,not really need.
+              usually,the block-read should to wait until data is ready.
+              if the peripheral device is a network card,we do not know the
+              real time data will come in,thus request the device for input
+              is unrealistic.
+              we can request the device to send data such as it is a
+              random number generator connected to the computer.in this case,
+              read system call actually like a request,from view point of
+              programming,it is a calling to random().
+                long v = random();
+                printk(KERN_INFO "value is %ld .", v);
+                
+            
+    
                    
     
 
