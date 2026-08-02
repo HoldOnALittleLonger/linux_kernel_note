@@ -1958,8 +1958,117 @@ Interrupt :
                 long v = random();
                 printk(KERN_INFO "value is %ld .", v);
                 
-            
+Linux Device Model :
+        abstractions
+          power management and system shutdown
+          communications with user space
+          hotpluggable devices
+          device classes
+          object lifecycles
+
+        kobject
+          kobject is the fundamental structure holds the device model together.
+          it takes care of
+            object lifecycle        
+            sysfs entry             
+            subsystem               
+            model hierarchy         
+            hotplug event handling
+          this object usually is embedded into other device model to let the
+          device get into linux device model.
+          /* like an abstracted base class */
+
+          allocation
+            use kmalloc() or other memory allocation functions.because kobject
+            usually is embedded into other structure,this should be done by
+            the corresponding allocator.
+            if we are design a device and we need to create a new kobject for
+            the device descriptor,we can
+              > just use kobject_create() to create it.
+                /* kobject_create() allocates it via kzalloc(),and invokes
+                 * kobject_init() on it.
+                 */
+              > use kernel memory allocation function,and init it through
+                kobject_init(),etc.
+
+          deallocation
+            been initialized
+              must use kobject_put()
+            have not been initialized /* before kobject_init() called */
+              use kfree() if it is created via kmalloc(),kzalloc(),etc.
     
-                   
+          init step
+            kobject_init() /* set kref to 1 */
+
+            /* may failed because memory allocation failed(for @name field) */
+            kobject_set_name()
+
+          get and put
+            kobject_get()
+            kobject_put() /* must be called if kobject_init() is called */
+
+          ! get a reference of kobject,usually corresponds to get references
+            of its container and the module who created the container.
+            if the kobject is still being passed around,the module would not
+            unload.
+            /* module put is later than kobject put */
+
+          release
+            kobject_put() will invoke kref_put(),the callback passed to the
+            routine is kobject_release(),which function actually calls to
+            kobject_cleanup().
+            because the different types of kobjects may have different releasing
+            manner,thus the real release task is handed over to the @release
+            method of kobj_type structure,kobject has a member named @ktype
+            which points to such data structure.
+            the general release steps /* executed by kobject_cleanup() */
+              1> send uevent about KOBJ_REMOVE if necessary
+              2> invoke kobject_del() if the kobject been registered in
+                 sysfs
+              3> invoke release() member of @ktype if such method is
+                 implemented
+              4> kfree() @name if it is not NULL
+            ! kref_put() calls to callback if and only if the refcount
+              decreased to _zero_.
+
+            ! if our device descriptor holds a kobject,we must pay attention
+              to kobject's reference count
+                1> dev_get() also need to invoke kobject_get().
+                2> dev_put() also need to invoke kobject_put().
+
+                refcount becomes _zero_
+                  when refcount becomes 0,the release() of @ktype is called.
+                  we can let the implementation to deallocates the device
+                  descriptor together
+                    void __dev_free(struct kobject *kobj)
+                    {
+                            struct TheDev *devp = container_of(kobj,
+                                                              struct TheDev,
+                                                              kobj);
+                            ... /* other release steps */
     
+                            kfree(devp);
+                    }
+                    /**
+                     * we let the device descriptor to be deallocated when
+                     * kobject's refcount become 0.
+                     * if we make use of this strategy,we can simply let
+                     * the dev_get() and dev_put() become wrappers of
+                     * kobject_get() and kobject_put(),respectively.
+                     * in other word,struct TheDev does not provide an
+                     * additional refcounter,because kobject has
+                     * featured it.
+                     */
+
+                    /* the cdev's kobject release method is
+                     *   # for location allocation,no kfree() called
+                     *   cdev_default_release()
+                     *   # for dynamic allocation,kfree() called to
+                     *     free the cdev descriptor
+                     *   cdev_dynamic_release()
+                     *
+                     *   -> p = container_of(kobj, struct cdev, kobj);
+                     *      ...
+                     *      kfree(p);
+                     */
 

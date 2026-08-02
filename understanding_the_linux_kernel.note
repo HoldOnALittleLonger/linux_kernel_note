@@ -25967,14 +25967,19 @@ Chapter 13 : I/O Architecture and Device Drivers
                * @entry:   pointers for the list in which the kobject is inserted
                * @parent:  parent kobjec,if any
                * @kset:    kobject group information,that is the group this kobjec belonging to
-               * @ktype:  kobjec type descriptor
+               * @ktype:   kobjec type descriptor
                * @sd:      sysfs dentry info
                * @kref:    reference counter
-               * @state_initialized:    state initialization indicator
-               * @state_in_sysfs:       sysfs export indicator
-               * @state_add_uevent_sent:    state indicator for add uevent_sent
-               * @state_remove_uevent_sent: state indicator for remove uevent_sent
-               * @uevent_suppress:      uevent suppress indicator
+               * @state_initialized:
+               *           state initialization indicator
+               * @state_in_sysfs:
+               *           sysfs export indicator
+               * @state_add_uevent_sent:
+               *           state indicator for add uevent_sent
+               * @state_remove_uevent_sent:
+               *           state indicator for remove uevent_sent
+               * @uevent_suppress:
+               *           uevent suppress indicator
                * # the kobjects have the same type in the kset,the @parent field of these
                *   kobjects is points to kset->@kobj if it has not a parent already
                */
@@ -27353,12 +27358,14 @@ Chapter 13 : I/O Architecture and Device Drivers
           /**
            * cdev - character device
            * @kobj: kobject
-           * @owner:    remove proector
+           * @owner:
+           *        remove proector
            * @ops:  operations related to character device
            * @list: list of inodes relative to device files for this chr device
            * @dev:  initial major and minor numbers assigned to the device driver
-           * @count:    number of consecutive device numbers that this character device
-           *            required,it represents a range [@dev, @dev + @count - 1]
+           * @count:
+           *        number of consecutive device numbers that this character device
+           *        required,it represents a range [@dev, @dev + @count - 1]
            * # a character device might has several device files,@list collects the
            *   inodes of these device files
            * # device files whose numbers fall in the range(@count) are handled by the same
