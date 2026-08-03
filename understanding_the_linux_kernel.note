@@ -26077,7 +26077,6 @@ Chapter 13 : I/O Architecture and Device Drivers
 
                 /**
                  * kobject_add - add a kobject,the kobject name is set and added to the kobject hierarchy
-                 *               in this function
                  * @kobj:        kobject
                  * @parent:      its parent
                  * @fmt:         format to name the kobject with

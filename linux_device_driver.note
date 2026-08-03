@@ -2017,10 +2017,10 @@ Linux Device Model :
             kobject_put() will invoke kref_put(),the callback passed to the
             routine is kobject_release(),which function actually calls to
             kobject_cleanup().
-            because the different types of kobjects may have different releasing
-            manner,thus the real release task is handed over to the @release
-            method of kobj_type structure,kobject has a member named @ktype
-            which points to such data structure.
+            because the different types of kobjects' containers may have
+            different releasing manner,thus the real release task is handed
+            over to the @release method of kobj_type structure,kobject has
+            a member named @ktype which points to such data structure.
             the general release steps /* executed by kobject_cleanup() */
               1> send uevent about KOBJ_REMOVE if necessary
               2> invoke kobject_del() if the kobject been registered in
@@ -2071,4 +2071,116 @@ Linux Device Model :
                      *      ...
                      *      kfree(p);
                      */
+
+        Kobject Hierarchies and Ksets
+          kobject is often used to link together objects into a hierarchical
+          structure that matches the structure of the subsystem being modeled.
+          @parent member of kobject points to another kobject that is the
+          up one level to this kobject.
+
+          Ksets
+            a kset is a collection of kobjects embedded within structures of the
+            same type.
+
+            /* kobj_type => for the type of an object
+             * kset      => for collection of kobjects of objects have same type
+             * # kset like the top-level container class for kobjects,and kset
+             *   contains its own kobject internally.
+             */
+
+            add kobject to kset
+              /**
+               * @kobj->parent set to @parent or @kobj->kset->kobj
+               * @kobj->name set to resolved @fmt
+               * if @kobj->kset is not NULL,kobj_kset_join() to let @kobj joins
+               * @kobj->kset.
+               * create sysfs dentry.
+               * # increase parent's refcounter
+               *   increase kset's refcounter
+               */
+              kobject_add(@kobj, @parent, @fmt, ...)
+
+              /* been removed in 2.6.34.1 */
+              kobject_register()
+
+            remove kobject from kset
+              /**
+               * @kobj->parent set to NULL
+               * kobj_kset_leave() called to leave from the kset
+               * # decrease parent's refcounter
+               *   decrease kset's refcounter
+               */
+              kobject_del(@kobj)
+
+              /* been removed in 2.6.34.1 */
+              kobject_unregister()
+
+            ! kobject->parent may points to kobject->kset->kobj,or points to
+              another kobject,if we did kobject_add().
+
+            ! ktype for a kset is represented by the kset->kobj->ktype,kset
+              has not @ktype member.
+            ! kset's ktype is used to describing the kobjects it contains.
+            ! if we want to add a kobject to a kset,we must initialize its
+              @kset member before invoke kobject_add().
+              for example,a kobject can set its @kset to @module_kset,if its
+              container is a kernel module.
+
+            dynamicly creation
+              /**
+               * @parent_kobj is NULL also be okay,the kobject_add_internal()
+               * will select the kset's internal @kobj's kset,if both are NULL,
+               * that means no parent.in this case,the kset dir would be created
+               * at the sysfs's root -- /sysfs/
+               * ! the kset's internal @kobj must has name setup.
+               */
+              kset_create(@name, @uevent_ops, @parent_kobj)
+
+            init kset
+              /* kobject_init() the kset's internal @kobj */
+              kset_init()
+
+            register kset
+              /* kobject_add_internal() the kset's internal @kobj */
+              kset_register()
+
+            unregister kset
+              /* just kobject_put() the kset's internal @kobj */
+              kset_unregister()
+
+            get and put
+              kset_get()
+              kset_put()
+
+            release
+              kset_release() /* should not be called directly,instead,kset_put()
+                              * will calls to this routine if refcounter becomes
+                              * _zero_
+                              */
+
+            !! "subsystem" STRUCTURE IS A COLLECTION OF "kset"(s),AND IT BEEN
+               REMOVED SINCE 2.6.22 .
+                 /sys/bus/pci/drivers/serial/new_id
+                  |   |   |   |       |      |
+                  |   |   |   |       |      |
+                  |   |   |   |       |      +-> attribute
+                  |   |   |   |       +-> kobject
+                  |   |   |   +-> kset
+                  |   |   +-> subsystem
+                  |   +-> subsystem
+                  +-> sysfs root
+
+               ! subsystem not always show up in sysfs.
+
+               IF THERE IS NO SPECIAL REQUIREMENTS,SHOULD NOT ADD NEW SUBSYSTEM
+               INTO KERNEL.
+
+               ! cgroup is introduced since 2.6.24.each subsystem needs to
+                 declares itself in <linux/cgroup_subsys.h> if cgroup is
+                 supported.
+                   SUBSYS(blkio)
+                   => extern struct cgroup_subsys blkio_subsys;
+                   SUBSYS(_x) => extern struct cgroup_subsys _x ## _subsys;
+                   /* <linux/cgroup.h> */
+            
 
