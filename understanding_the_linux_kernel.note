@@ -25950,7 +25950,10 @@ Chapter 13 : I/O Architecture and Device Drivers
                *             some special methods and attributes are held by this structure 
                * @release:   method executed when the kobject is being freed
                * @sysfs_ops: sysfs operations
-               * @default_attrs:    a list of default attributes for the sysfs filesystem
+               * @default_attrs:
+               *             a list of default attributes for the kobject contains this ktype
+               *             under sysfs filesystem
+               *             ! the list ends with a NULL pointer
                * # about @release,the method usually defined only if the container of the kobject
                *   was allocated dynamically,frees the container itself
                */

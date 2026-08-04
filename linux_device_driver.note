@@ -2182,5 +2182,55 @@ Linux Device Model :
                    => extern struct cgroup_subsys blkio_subsys;
                    SUBSYS(_x) => extern struct cgroup_subsys _x ## _subsys;
                    /* <linux/cgroup.h> */
-            
+
+        Low-Level sysfs Operations
+          sysfs is a in-memory virtual filesystem,it describes the linux
+          device model,the most important component is kobject.
+            /sys /* top level @sysfs_root */
+            |
+            +---- block/
+            |
+            +---- bus/
+            |
+            +---- class/
+            |
+            +---- dev/
+            |
+            +---- devices/
+            |
+            +---- firmware/
+            |
+            +---- fs/
+            |
+            +---- kernel/
+            |     |
+            |     +-------- address_bits    /* attribute */
+            |     |
+            |     +-------- boot_params/
+            +---- module/
+            |
+            +---- power/
+
+                  /* subsystems,and each contains a kobject in its
+                   * kernel data structure.
+                   */
+
+          "attribute" is a file that contains kernel-generated informations.
+          a kobject has a member named @sd,it is a pointer to sysfs dir entry.
+          in which structure,some attribute related members are exist.
+          the directories are created through function create_dir(), which is
+          called by kobject_add().
+
+          1> the sysfs entry for a kobject always a directory.
+          2> the name of kobject is used as the name of directory.
+             because the dentries under the same parent directory,can not have
+             the same name,thus kobjects in the hierarchy under the same
+             parent kobject must have unique names.
+             # name cant contains slash,and should not contains white space.
+          3> parent directory of the kobject is ->parent,if it is NULL,then
+             it is kset->kobj->parent;both are NULL then it is top level
+             @sysfs_root .
+
+          
+    
 
