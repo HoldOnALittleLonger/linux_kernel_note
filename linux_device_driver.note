@@ -2231,6 +2231,88 @@ Linux Device Model :
              it is kset->kobj->parent;both are NULL then it is top level
              @sysfs_root .
 
+        default attributes
+          kobject->ktype->default_attrs is an array of pointers to struct
+          attribute objects that represents default attributes to this
+          kobject,it ends with NULL pointer.
+          member @sysfs_ops of kobj_type structure can be used to implement
+          these attributes.
+            /* e.g.
+             *   the method show() of sysfs_ops usually is called in the
+             *   default read implementation of sysfs.
+             *   # through sysfs_buffer structue.
+             *   at opposite,method store() of sysfs_ops is called in
+             *   write system call.
+             */
+
+          ! the 3rd parameter to show() is type of char * which points
+            to buffer provided by kernel,the size is PAGE_SIZE.
+          ! the 3rd parameter to store() is type of const char * which
+            points to kernel buffer,and the 4th parameter is the length of
+            data in the buffer,usually the maximum length is PAGE_SIZE.
+            the data is received from userspace,we must validate it
+            at first.
+          ! show() and store() is called on all attributes for I/O,
+            thus the implementation needs to determine which attribute
+            now is request.
+            e.g.
+              ssize_t the_show_method(struct kobject *kobj,
+                                      struct attribute *attr,
+                                      char *buffer)
+              {
+                      ssize_t length = 0;
+                      enum ATTR_ID attr_id = ATTR_NONEXIST;
+                      attr_id = resolve_attr_id(kobj, attr);
+                      switch (attr_id) {
+                      case ATTR_MODULE_NAME:
+                              length = store_module_name(buffer);
+                              break;
+                      /* ... for other attributes */
+                      default:
+                              return 0;
+                      }
+                      return length;
+              }
+
+              /**
+               * because the elements in @default_attrs are pointers,
+               * we can wrap the attribute structure into a meaningful
+               * structure,and use the container_of() macro to extract
+               * the container,in which we use some fields to store
+               * the value should be returned by show() for this
+               * attribute.
+               *   struct attr_wrapper {
+               *           struct attribute attr_id;
+               *           ssize_t (*get_value)(char *buffer);    
+               *           const char value[64];
+               *   };
+               *
+               *   struct attr_wrapper *wrapper
+               *           = container_of(attr, struct attr_wrapper, attr_id);
+               *   ssize_t length = wrapper->get_value(buffer);
+               *   # we can assign different implementation to @get_value,
+               *     then we do not need to distinguish the actual attr
+               *     via string-compare or hash function.
+               *     the struct attr_wrapper is like an abstract base class.
+               */
+
+          attribute->name points to a C-style string,it will be the name
+          of regular file that corresponds to this attribute.
+    
+          attribute->mode is the file mode for that regular file.
+          /* usually is S_IRUGO for read-only;S_IWUSR for write-only.
+           *                                 #^ only root writible
+           */
+    
+          attribute->owner is a pointer to module structure,points to the
+          module implements this attribute.(owns this kobject)
+
+          ! convention
+              sysfs state that each attribute should contain a single,
+              human-readable value.
+              # if there is more information,we should split it into
+                other attributes.
+
           
     
 
