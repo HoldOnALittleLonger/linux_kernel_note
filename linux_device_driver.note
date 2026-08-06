@@ -2313,6 +2313,184 @@ Linux Device Model :
               # if there is more information,we should split it into
                 other attributes.
 
-          
-    
+        non-default attributes    
+          except the default attributes,kernel also allows add new attributes
+          to the kobject.
+          /* but those new attributes are handled by show() and store()
+           * methods,too.
+           */
 
+          there are three kinds of additional attributes
+            1> regular file
+            2> binary attribute
+            3> symbolic link
+
+          regular attribute
+            add
+              sysfs_create_file()
+            remove
+              /* unlink until the last opened file closed */
+              sysfs_remove_file()
+
+            the regular attribute as same as the default attribute,just a
+            regular file would be created under the kobject's directory.
+
+          binary attribute
+            a file also created by kernel,but it acts like a pipe used to
+            transfer binary data from userspace to kernel space,or from
+            kernel space to userspace.
+            /* there is no synchronous mechanism can takes place,the user
+             * program needs to take charge of that.
+             */
+
+            different from regular attribute,the I/O on binary attribute
+            is handled by read() and write() methods that contained in
+            the bin_attribute structure.
+
+            <linux/sysfs.h>
+              /**
+               * bin_attribute - the binary attribute in sysfs
+               * @attr:          attribute identifier
+               * @size:          the maximum chunk size of binary data
+               *                 # 0 means no maximum
+               * @private:       private data
+               * @read:          method called when read from this attribute
+               * @write:         method called when write to this attribute
+               * @mmap:          method called when memory mapping on this
+               *                 attribute
+               * # bin_attribute likes a wrapper of attribute
+               */
+              struct bin_attribute {
+                      struct attribute attr;
+                      size_t size;
+                      void *private;
+
+                      /* 3rd param - buffer pointer
+                       * 4th param - file offset
+                       * 5th param - size of buffer
+                       * return    - size of data been transferred
+                       */                
+                      ssize_t (*read)(struct kobject *, struct bin_attribute *,
+                                      char *, loff_t, size_t);
+                      ssize_t (*write)(struct kobject *, struct bin_attribute *,
+                                       char *, loff_t, size_t);
+    
+                      int (*mmap)(struct kobject *, struct bin_attribute *attr,
+                                  struct vm_area_struct *vma);
+              };
+
+            add
+              sysfs_create_bin_file()
+    
+            remove
+              sysfs_remove_bin_file()
+
+          symbolic link attribute
+            this type of attribute usually is used to reflects the relathionship
+            between kobjects.
+            for example
+              /sys/bus/pci/devices/0000:04:00.0
+              |
+              | <= a symbolic link
+              |
+              V
+              # ../../../devices/pci0000:00/0000:00:1d.0/0000:04:00.0
+              /sys/devices/pci0000:00/0000:00:1d.0/0000:04:00.0
+    
+            the symbolic link is the symlink attribute.
+
+            add
+              /* @kobj:        the parent directory
+               * @target:      the target kobject
+               * @name:        name of this being create dentry
+               */
+              sysfs_create_link(@kobj, @target, @name)
+
+            remove
+              sysfs_remove_link()
+
+            ! even the target kobject is removed in sysfs,the symbolic link
+              still persists.
+              if we have a way to monitoring the target kobject's persistence,
+              we can adjust the symlink attribute in real-time.
+
+        hotplug event
+          a hotplug event is a notification to user space from the kernel that
+          something has changed in the system's configuration.
+          they are generated whenever a kobject is created or destroyed.
+          /**
+           *  in Linux-2.6.34.1,kobject_add() would not invoke kobject_uevent()
+           *  inside its body.this is handed over to implementation,after
+           *  all sysfs dentries are created,the implementation should
+           *  invokes kobject_uevent() with KOBJ_ADD to notify userspace.
+           *  # caller should setup all of the necessary sysfs files for
+           *    the object and then call kobject_uevent().
+           *  different from kobject_add(),kobject_del() will invoke
+           *  kobject_uevent() with KOBJ_REMOVE if caller did not
+           *  send this event previously,this is done by kobject_cleanup().
+           *
+           *  order
+           *    create sysfs file
+           *    caller KOBJ_ADD
+           *
+           *    caller KOBJ_REMOVE
+           *    remove sysfs file
+           */
+
+          ! in the early kernel version,the hotplug event is send through the
+            methods defined in structure kset_hotplug_ops,and kset has a member
+            named @hotplug_ops.
+            in 2.6.34.1,the structure is changed to
+              struct kset_uevent_ops
+            and kset->uevent_ops points to the implementations.
+
+          <linux/kobject.h>
+            /**
+             * kobj_uevent_env - kobject userspace event environment
+             * @envp:            environment variables,pointers point to
+             *                   @buf's locations
+             * @envp_idx:        current end of @envp
+             *                   # size of valid pointers in @envp
+             * @buf:             string buffer for environment variables
+             * @buflen:          all valid strings in @buf,includes the
+             *                   '\0' of the string                  
+             */
+            struct kobj_uevent_env {
+                    /* UEVENT_NUM_ENVP - 32 */
+                    char *envp[UEVENT_NUM_ENVP];
+                    int envp_idx;
+                    /* UEVENT_BUFFER_SIZE - 2048 */
+                    char buf[UEVENT_BUFFER_SIZE];
+                    int buflen;
+            };
+
+            /**
+             * kset_uevent_ops - userspace event operations
+             * @filter:          called whenever kernel is considering
+             *                   generating an event for a given kobject
+             *                   # return 0 => event is not created
+             *                   # kset code use this method to decide
+             *                     which events should be passed to userspace
+             *                     and which should not
+             * @name:            usually returns a string describes the subsystem
+             *                   this uevent comes from
+             *                   # would be stored in environment
+             *                       "SUBSYSTEM=$(name)"
+             * @uevent:          used to add additional kset information to
+             *                   the environment
+             *                   # return 0 if succeed to add informations,
+             *                     non-zero will let kobject_uevent() abort
+             *                     generation to this uevent
+             */
+            struct kset_uevent_ops {
+                    int (*const filter)(struct kset *kset, struct kobject *kobj);
+                    const char *(* const name)(struct kset *kset, struct kobject *kobj);
+                    int (* const uevent)(struct kset *kset, struct kobject *kobj,
+                                         struct kobj_uevent_env *env);
+            };
+
+          kobject_uevent() finally invoke call_usermodehelper() to start a user
+          process that handles the uevent send by kernel.
+          the helper's path is "/sbin/hotplug" on x86 architecture.
+          but newer distribution been migrated to "udev",thus the uevent is
+          handled by udevd -- a User Mode daemon.
