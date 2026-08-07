@@ -26529,6 +26529,8 @@ Chapter 13 : I/O Architecture and Device Drivers
              * # device has non-zero return value is not retained in any way,nor is the
              *   refcount incremated,if caller wants,then it can use callback to retain
              *   it,and increase refcount in callback
+             *   -- the device's descriptor,if we want it,then need the @fn retrieves
+             *      it for us,and if necessary,need to increase its refcount.
              */
             int bus_for_each_dev(struct bus_type *bus, struct device *start,
                                  void *data, int (*fn)(struct device *, void *));

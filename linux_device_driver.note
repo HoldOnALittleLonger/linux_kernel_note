@@ -2494,3 +2494,134 @@ Linux Device Model :
           the helper's path is "/sbin/hotplug" on x86 architecture.
           but newer distribution been migrated to "udev",thus the uevent is
           handled by udevd -- a User Mode daemon.
+
+        Buses
+          a bus is a channel between the processor and one or more devices.
+                  CPU
+                   |
+                   |
+                   |
+            ===============
+            | | | | | | | |
+            d d d d d d d d   
+            e e e e e e e e
+            v v v v v v v v
+            1 2 3 ....... N
+                          |
+                          +--> a USB controller
+                          |
+                          |
+                        ===== <- USB bus
+
+          all devices are connected via a bus,even if it is an internal,virtual
+          "platform" bus.
+          each buses can plug into each other. /* but no ring is allowed */
+
+          bus_type
+            a structure represents a type of bus.
+
+          registeration/unregisteration
+            bus_register()
+            bus_unregister()
+
+            /* if we succeed to register a new bus,it will appears at the
+             * top-level of sysfs
+             */
+
+          bus methods
+            ->match
+              - method used to called when a new device or driver is added to
+                the bus.
+                it receives a device descriptor and a driver descriptor,if
+                the device can be handled by the driver,nonzero value will
+                be returned.
+
+                /* the match method usually going to checks whether the
+                 * device's id is included in the driver's device id table,
+                 * if found,that means the device can be handled by this
+                 * driver.
+                 */
+
+            ->uevent
+              - method called when the bus needs to send event notification
+                to userspace.
+
+            ->probe
+              - method called when a device connected to the bus and needs
+                to probe bus driver for this device.
+
+            ->remove
+              - method to remove a device from the bus.
+
+            ->shutdown
+              - shutdown a device hosted on this bus.
+
+            ->suspend
+              - suspend a device.
+
+            ->resume
+              - resume a been suspended device.
+
+          iteration on bus's devices and drivers
+            int bus_for_each_dev(@bus, @start, @data, @fn)
+            int bus_for_each_drv(@bus, @start, @data, @fn)
+
+            these functions are not macro functions,so we can not use them
+            like the list_for_each() macro.
+
+            *_dev performs an iteration on @bus's devices,@start is a pointer
+            points to struct device object.if it is not NULL,the iteration start
+            from where,otherwise start from the first device.
+            for current device,@fn is called on it,pass to it the device's
+            descriptor and @data.
+            *_drv is similar but perform on drivers.
+
+            ! if @fn returned nonzero,the loop would stops,and the result is
+              returned to the caller.
+
+            ! in the early kernel version,those two routines will acquire
+              bus subsystem's semaphore,but in 2.6.34.1,subsystem structure
+              is no longer exists,thus bus_type has no member is type of
+              subsytem.
+
+          bus attributes
+            member ->bus_attrs is type of struct bus_attribute *,this type just
+            a wrapper of struct attribute,and which is defined in
+            <linux/device.h>.
+              struct bus_attribute {
+                      struct attribute attr;
+                      ssize_t (*show)(struct bus_type *bus, char *buf);
+                      ssize_t ((store)(struct bus_type *bus, const char *buf,
+                                       size_t count);
+              };
+
+            a macro function BUS_ATTR(@name, @mode, @show, @store) is defined
+            in the same header,it is used to declare and initialize a local
+            struct bus_attribute object.
+            /* it relies on __ATTR() macro,it works like a generic initializer
+             * to attribute wrapper has such form
+             * {
+             *         @attr        <= struct attribute
+             *         @show        <= show method
+             *         @store       <= store method
+             * };
+             */
+
+            note that,member ->bus_attrs is a pointer,in other view point,it can
+            be an array of struct bus_attribute objects.as the usual,the last
+            element is used as a mark of end.
+            the last element's @attr's @name member must be a NULL pointer.
+
+            add sysfs file
+              bus_create_file(@bus, @bus_attr)
+
+            remove sysfs file
+              bus_remove_file(@bus, @bus_attr)
+
+            ! the sysfs files usually is created under path
+                /sys/bus/<bus-name>/
+              e.g.
+                /sys/bus/pci/drivers_autoprobe
+            
+
+    
