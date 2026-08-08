@@ -26225,7 +26225,7 @@ Chapter 13 : I/O Architecture and Device Drivers
                     struct device_type *type;
                     struct sempahore sem;
                     struct bus_type *bus;
-                    struct device_dirver *driver;
+                    struct device_driver *driver;
                     void *platform_data;
                     struct dev_pm_info power;
 
@@ -26277,6 +26277,12 @@ Chapter 13 : I/O Architecture and Device Drivers
 
             related routines -
 
+            /**
+             * dev_name - retrieves the name of @dev->kobj
+             * # <linux/device.h>
+             */
+            static inline const char *dev_name(const struct device *dev);
+
             /* get_device - atomically increase the reference count for the device */
             extern struct device *get_device(struct device *dev);
 
@@ -26298,7 +26304,7 @@ Chapter 13 : I/O Architecture and Device Drivers
              *     class symlink add
              *     attributes add
              *     bus add
-             *     dmp sysfs add
+             *     dpm sysfs add
              *     device pm add
              *     platform notify add
              *     create some files
@@ -26458,6 +26464,8 @@ Chapter 13 : I/O Architecture and Device Drivers
              *            attributes of this bus
              * @dev_attrs:
              *            attributes of devices host on this bus
+             *            # the default device attributes for
+             *              every device added to this bus
              * @drv_attrs:
              *            attributes of drivers that attach to this bus
              * @match:    checks whether a given driver supports a given driver

@@ -2525,7 +2525,9 @@ Linux Device Model :
             bus_unregister()
 
             /* if we succeed to register a new bus,it will appears at the
-             * top-level of sysfs
+             * top-level of sysfs,in "devices" directory.that means
+             * implicitly an actual bus is a device,and must be registered
+             * separately.
              */
 
           bus methods
@@ -2622,6 +2624,102 @@ Linux Device Model :
                 /sys/bus/<bus-name>/
               e.g.
                 /sys/bus/pci/drivers_autoprobe
-            
+
+        Devices
+          every device on the system has a device descriptor associated with it.
+
+          struct device
+            the descriptor represents a device on the system -- lowest level.
+            this structure usually is embedded into the actual device
+            descriptor for that certain subsystem,because except the information
+            in this device structure,it may needs to track additional
+            informations -- like the kobject structure is embedded into others.
+            /* such as gendisk,hd_struct,pci_dev, etc. */
+
+          some members
+            ->parent
+              - points to the parent device -- the device to which it is
+                attached.
+                usually is a bus or host controller.
+                the top-level device has NULL parent.
+
+            ->kobj
+              - kobject for this device.
+                /* as general rule,this->kobj->parent is equal to
+                 * &this->parent->kobj
+                 */
+
+            ! 2.6.34.1,member @bus_id is no longer exists.
+
+            ->init_name
+              - initial name of the device.
+                /* kernel routine device_add() would use this name to set
+                 * device's kobject's name,and reset this member to NULL.
+                 */
+    
+            ->bus_type
+              - points to the bus this device connected.
+
+            ->driver
+              - points to an object is type of struct device_driver.
+                the driver manages this device.
+
+            ->platform_data
+              - void pointer to platform specific data.
+                this data may needed by driver code.
+
+            ->release
+              - method to release this device.
+                this function will be called by kobject's cleanup routine.
+
+          registeration/unregisteration
+            device_register()
+            device_unregister()
+
+            /* the kobject of this device would be created under its
+             * parent's kobject,usually is the bus's kobject
+             * directory.
+             * e.g. /sys/devices/isa
+             */
+
+          get/put
+            get_device()
+            put_device()
+
+          device attributes
+            the structure device_attributes is no longer contained in
+            device structure in 2.6.34.1,it been moved into the structure
+            class,and device descriptor has a member named @class points
+            to the class this device belongs to.
+
+            <linux/device.h>
+              /**
+               * device_attribute - device's attribute structure
+               * # a device's attributes are collected in the array
+               *   this_device->class->dev_attrs,the last element's
+               *   ->attr->name must be a NULL pointer.
+               * # bus_type->dev_attrs is the default device attributes
+               *   for every device added to the bus
+               */
+              struct device_attribute {
+                      struct attribute attr;
+                      ssize_t (*show)(struct device *dev,
+                                      struct device_attribute *attr,
+                                      char *buf);
+                      ssize_t (*store)(struct device *dev,
+                                       struct device_attribute *attr,
+                                       const char *buf, size_t count);
+              };
+
+              /* macro used to declare and init a local device attribute */
+              #define DEVICE_ATTR(_name, _mode, _show, _store) \
+              struct device_attribute dev_attr_##_name = \
+                      __ATTR(_name, _mode, _show, _store)
+
+            add sysfs file
+              device_create_file()
+
+            remove sysfs file
+              device_remove_file()
 
     
