@@ -2722,4 +2722,111 @@ Linux Device Model :
             remove sysfs file
               device_remove_file()
 
+        Device Drivers
+          device model tracks all of the drivers known to the system.
+          the main reason is
+            to enable the driver core to match up drivers with new devices.
+
+          struct device_driver
+            the structure used to represent a device driver.
+            /**
+             * usually,we mentioned driver is easily to associate it with
+             * the actual code of driver program.
+             * but for kernel,its actual code is not different to the kernel
+             * code,but we need a special thing to identifies these resources
+             * that driver program provides.
+             * so it is the device_driver descriptor.
+             */
+
+            some members and methods
+              ->name
+                - points to the name of this driver
+
+              ->bus
+                - points to the bus_type on which this driver registered
+
+              ->mod_name
+                - points to the name of module provides this driver
+
+              ->groups
+                - points to an array of pointers of struct attribute_group
+                  /* const qualified
+                   * last element is NULL as end
+                   */
+
+              ->probe
+                - method called by bus for driver probe,when a new device is
+                  registered,the drivers on bus should be probed to determine
+                  whether it can handles this device
+
+              ->remove
+                - method used to remove device,hotplug or unload
+
+              ->shutdown
+                - method used to shut device down,power state changed
+
+          driver attribute
+            in 2.6.34.1,driver descriptor is no longer contains the structure
+            driver_attribute,instead,the bus contains the default driver
+            attributes,and a driver also can joins to the attribute group.
+
+            struct driver_attribute {
+                    struct attribute attr;
+                    ssize_t (*show)(struct device_driver *driver, char *buf);
+                    ssize_t (*store)(struct device_driver *driver, const char *buf,
+                                     size_t count);
+            };
+
+            /* macro to declare and initialize a local driver_attribute object */
+            #define DRIVER_ATTR(_name, _mode, _show, _store)
+
+          registeration/unregisteration
+            /* register driver on specified bus ->bus */
+            driver_register()
+
+            /* unregister driver from specified bus ->bus */
+            driver_unregister()
+
+          /**
+           * creation of driver's sysfs files will be done by bus core,
+           * the routine bus_add_driver() would iterates its ->drv_attrs,
+           * and for each attribute invoke driver_create_file() on it.
+           * # default driver attributes.
+           *   if our driver has more attributes,we can invoke this
+           *   routine in our module code.
+           */
+          add sysfs files
+            driver_create_file()
+
+          remove sysfs_files
+            driver_remove_file()
+
+          ! similar to device descriptor,the device_driver descriptor usually
+            is embedded into the actual driver descriptor for particular device.
+            such as pci_driver structure,it is the driver descriptor for PCI
+            bus.
+
+          ! the owner of driver's attributes usually is the module provides
+            this driver.
+            /**
+             * the container of device_driver does not need to holds a pointer
+             * to struct module,we can use device_driver->module directly.
+             */
+            e.g.
+              /sys/bus/pci/nvme
+                           |
+                           +--> 0000:04:00.0    /* symlink to bus */
+                           |
+                           +--> bind
+                           |
+                           +--> module          /* symlink to module -- nvme */
+                           |
+                           +--> new_id
+                           |
+                           +--> remove_id
+                           |
+                           +--> uevent
+                           |
+                           +--> unbind
+
     

@@ -26385,6 +26385,7 @@ Chapter 13 : I/O Architecture and Device Drivers
              * @suspend:       suspend device,power state change
              * @resume:        resume device,power state change
              * @groups:        array of attribute groups this device drive belongs to
+             *                 # the end is NULL pointer
              * @pm:            Power Management Operations
              * @p:             driver private data <drivers/base/base.h>
              *                   struct kobject kobj
@@ -26432,7 +26433,7 @@ Chapter 13 : I/O Architecture and Device Drivers
             brief description for driver_register() :
               at the beginning,do BUG checking,it is a BUG if @drv->bus->p is NULL.
               checks methods @probe @remove @shutdown for @drv and @drv->bus,printk
-              KERN_WARNING if either method is implemented both in @drv and @drv->bus,
+              KERN_WARNING if the same method is implemented both in @drv and @drv->bus,
               tell user that have to update driver to use methods implemented in @drv->bus_type
               as instead.
               next,attempt use @drv->name to find out another such device driver on the bus,
