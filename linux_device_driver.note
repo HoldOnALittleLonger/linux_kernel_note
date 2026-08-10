@@ -85,11 +85,17 @@ Char Devices :
         struct cdev
           character device descriptor in kernel space.
     
-          allocating and initializing: cdev_alloc()
-          only initializing: cdev_init()
-          add to @chrdevs: cdev_add()
-          remove from @chrdevs and deallocate: cdev_del()
-          query: cdev_index() /* use inode query cdev in Kobject Mapping Domain */
+          allocating and initializing
+            cdev_alloc()
+          only initializing
+            cdev_init()
+          add to @chrdevs
+            cdev_add() /* no kobject_add() invoked,driver takes charge of it */
+          remove from @chrdevs and deallocate
+            cdev_del()
+          query
+            cdev_index() /* use inode query cdev in Kobject Mapping Domain */
+    
           ! the @count parameter for cdev_add() is used to tell kernel the
             number of device numbers that should be associated with the
             device.(range of minor numbers)
@@ -2828,5 +2834,210 @@ Linux Device Model :
                            +--> uevent
                            |
                            +--> unbind
+
+        Class
+          a class is a higher-level view of a device that abstracts out low-level
+          implementation details.
+          class allow userspace to work with devices based on what they do,rather
+          than how they are connected or how they work.
+
+          the sysfs directory
+            /sys/class
+
+            ! except "block" devices,all devices can be found under
+              the directory.such as /sys/class/input,/sys/class/tty,etc.
+              "block" devices can be found under /sys/block for historical
+              reasons,but "bdi" can be found under /sys/class/bdi .
+
+          class_simple interface
+            designed to make it as easy as possible to add new classes to the
+            system,usually,is to expose attributes containing device numbers to
+            enable the automatic creation of device nodes.
+
+          full class interface
+            the "class" descriptor and the accompany components.
+
+          !! IN 2.6.34.1,SIMPLE CLASS INTERFACE BEEN REMOVED.
+
+          class descriptor
+            <linux/device.h>
+              /**
+               * class - device class descriptor
+               * @name:  name of this class
+               * @owner: module who owns this class
+               * @class_attrs:
+               *         class_attribute array,the last element's @attr->name
+               *         is NULL
+               * @dev_attrs:
+               *         default device attributes for this class,the last
+               *         element's @attr->name is NULL
+               * @dev_kobj:
+               *         kobject of this class
+               *         # if un-specified,__class_register() will set this
+               *           member to @sysfs_dev_char_kobj as default behavior
+               * @dev_uevent:
+               *         method to adds class specified stuff to uevent env,
+               *         function dev_uevent() calls to this method if
+               *         necessary
+               * @devnode:
+               *         method called by device_get_devnode() to get
+               *         the device's specific name,if @dev->type is
+               *         NULL or type->devnode is not implemented,
+               *         device_get_devnode() will checks the device's
+               *         class and calls to this method if has a class
+               *         and implemented this method
+               * @class_release:
+               *         method to release this class
+               * @dev_release:
+               *         method may called by device_release() to release
+               *         the device,if the device's @type is NULL or
+               *         release() is not implemented
+               * @suspend:
+               *         method called by __device_suspend() as the first step
+               *         of device suspend control path
+               * @resume:
+               *         method called by device_resume() as the last
+               *         step of device resume control path
+               * @pm:    class specified power management operations,
+               *         both methods above is the "legacy class" mode,
+               *         if @pm is specified,the power core will prefers to @pm
+               *         rather than @suspend and @resume
+               * @p:     class private data,points to an object is type of
+               *         struct class_private,such structure is defined in
+               *         <drivers/base/base.h>
+               */
+              struct class {
+                      const char *name;
+                      struct module *owner;
+                      struct class_attribute *class_attrs;
+                      struct device_attribute *dev_attrs;
+                      struct kobject *dev_kobj;
+
+                      int (*dev_uevent)(struct device *dev, struct kobj_uevent_env *env);
+                      char *(*devnode)(struct device *dev, mode_t *mode);
+
+                      void (*class_release)(struct class *class);
+                      void (*dev_release)(struct device *dev);
+
+                      int (*suspend)(struct device *dev, pm_message_t state);
+                      int (*resume)(struct device *dev);
+
+                      const struct dev_pm_ops *pm;
+
+                      struct class_private *p;
+              };
+
+          /* top-level class kset */
+          <drivers/base/class.c>
+            static struct kset *class_kset;
+            /* corresponds to /sys/class */
+
+          create class
+            /* <linux/device.h> */
+
+            /* calls to __class_create() with a lock_class_key object
+             * which has static storage-linkage
+             */
+            #define class_create(owner, name)
+
+            __class_create()
+
+          destroy class
+            class_destroy()
+
+          get/put
+            there is no public interfaces to get/put a class descriptor.
+            but there is some static functions defined in <drivers/base/class.c>,
+            class_get() and class_put(),both method operates on the kset
+            ->p->class_subsys(the class_private's member).
+
+          registeration/unregisteration
+            class_register()
+            class_unregister()
+
+            ! registeration will crease a new dentry under /sys/class,if
+              the class is not @block_cls.
+              unregisteration will remove the dentry created previously.
+
+            ! the class actually is represented by a kset in sysfs,and
+              all classes are registered under the top-level class
+              /sys/class -- a kset .
+
+          class attribute
+            descriptor is struct class_attribute,defined in <linux/device.h>.
+            just a wrapper of struct attribute,like the device_attribute
+            wrapper.
+
+            macro CLASS_ATTR(_name, _mode, _show, _store) is used to
+            declare and initialize a local class_attribute object.
+
+            simple class attribute
+              just a static string,and the descriptor is
+                struct class_attribute_string {
+                        struct class_attribute attr;
+                        char *str;
+                };
+
+              function show_class_attr_string() is used to fill the simple
+              class attribute string into a buffer.
+              /* ssize_t show_class_attr_string(struct class *class,
+               *                                struct class_attribute *attr,
+               *                                char *buf);
+               * # get class_attribute_string from @attr,and copy
+               *   the static string.
+               */
+    
+          add sysfs files
+            class_create_file()
+
+            ! e.g.
+                /sys/class/input <= class
+    
+                class_create_file() <= class->p->class_subsys.kobj
+                create file under /sys/class/input -- kobj->sd
+
+                /sys/class/input/event0 /* usually a symlink */
+
+          remove sysfs files
+            class_remove_file()
+
+          class interface
+            the interface provides a set special actions should to be done
+            when the device_add()/device_del() is called for a device that
+            belongs to a particular class.
+            actually,device_add() will iterates the class's interfaces that
+            device belongs to,and invoke @add_dev() method if it been
+            implemented.
+            ! then the class the device belongs to can take a place to
+              do something under the particular situations.
+    
+            <linux/device.h>
+              /**
+               * class_interface - the interface for a device class to manipulate
+               *                   devices belong to the class
+               * @node:            a list node of the list which collects all
+               *                   registered class interfaces to the specified
+               *                   class,this member is linked into
+               *                   cls->p->class_interfaces
+               *                   # where @cls usually is equal to ->class
+               * @class:           the class this class_interface belongs to
+               * @add_dev:         method adds a device to the class
+               * @remove_dev:      method removes a device from the class
+               */
+              struct class_interface {
+                      struct list_head node;
+                      struct class *class;
+
+                      int (*add_dev)(struct device *, struct class_interface *);
+                      void (*remove_dev)(struct device *, struct class_interface *);
+              };
+
+          interface registeration/unregisteration
+            class_interface_register()
+            class_interface_unregister()
+
+            /* registeration will class_get() the class,
+             * unregisteration will class_put() the class.
+             */
 
     

@@ -27431,6 +27431,8 @@ Chapter 13 : I/O Architecture and Device Drivers
            *   function kobj_map() with arguments @cdev_map, @dev, @count, NULL,
            *   @exact_match, @exact_lock, @p
            * # @cdev_map the global character device kobject mapping domain
+           * ! cdev_add() does not invoke kobject_add() to adds the kobject into
+           *   device model,the driver must does this manually.
            */
           int cdev_add(struct cdev *p, dev_t dev, unsigned count);
 
