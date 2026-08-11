@@ -3040,4 +3040,215 @@ Linux Device Model :
              * unregisteration will class_put() the class.
              */
 
+        The general steps for a device adding
+          design device descriptor ->
+          device_register() -> device_initialize()
+                               device_add() -> /* device_private_init()
+                                                * dev_set_name()
+                                                * # may called by device_add()
+                                                */
+                                               setup_parent()
+                                               kobject_add()
+                                               device_create_file() /* uevent_attr */
+                                               device_create_file() /* devt_attr */
+                                               device_create_sys_dev_entry()
+                                               devtmpfs_create_node()
+                                               device_add_class_symlinks()
+                                               device_add_attrs(@dev)
+                                               bus_add_device() -> device_add_attrs(@bus, @dev)
+                                                                   sysfs_create_link() /* bus->p->devices_kset->kobj
+                                                                                        * =>
+                                                                                        * dev->kobj
+                                                                                        * name: dev_name(dev)
+                                                                                        */
+                                                                   sysfs_create_link() /* dev->kobj
+                                                                                        * =>
+                                                                                        * dev->bus->p->subsys.kobj
+                                                                                        * name: subsystem
+                                                                                        */
+                                                                   make_deprecated_bus_links()
+                                                                   klist_add_tail() /* dev->p->knode_bus
+                                                                                     * =>
+                                                                                     * tail_of(
+                                                                                     *   bus->p->klist_devices
+                                                                                     * )
+                                                                                     */
+                                               dpm_sysfs_add()
+                                               device_pm_add()
+                                               kobject_uevent() /* KOBJ_ADD */
+                                               bus_probe_device() -> device_bind_driver() || bus_for_each_drv()
+                                                                                             -> __device_attach()
+                                                                                                   |
+                                                                                                   |--> if bus->match() returned
+                                                                                                   |    TRUE
+                                                                                                   V 
+                                                                                                   driver_probe_device()
+                                                                                                     -> really_probe() -> dev->bus->probe() ||
+                                                                                                                          drv->probe()
+                                                                                                                          driver_bound()
+                                               /* dev->class->p->class_interfaces
+                                                *   class_intf->add_dev()
+                                                */
+
+          !! THE REAL PROBE IS EXECUTED LATER THAN bus_add_device(),BECAUSE
+             THAT FUNCTION JUST ADD THE DEVICE INTO sysfs,ESTABLISHES
+             RELATIONSHIP BETWEEN THE BUS AND THE DEVICE IN LINUX DEVICE MODEL.
+
+          /* suppose it is PCI bus */
+
+          pci bus register
+            the bus descriptor for pci is "struct pci_bus".
+            invoke bus_register() to registers @pci_bus_type with the system,
+            in the init function pci_driver_init().
+
+            @pci_bus_type {
+                    .name = "pci",
+                    .match = pci_bus_match,
+                    .uevent = pci_uevent,
+                    .probe = pci_device_probe,
+                    .remove = pci_device_remove,
+                    .shutdown = pci_device_shutdown,
+                    .dev_attrs = pci_dev_attrs,
+                    .bus_attrs = pci_bus_attrs,
+                    .pm = PCI_PM_OPS_PTR,
+            };
+
+            @pci_bus_type->bus_attrs {
+                    __ATTR(rescan, (S_IWUSR | S_IWGRP), NULL, bus_rescan_store),
+                    NULL ATTR,
+            };
+
+            @pci_bus_type->dev_attrs {
+                    readonly "resource",
+                    readonly "vendor",
+                    readonly "device",
+                    readonly "subsystem_vendor",
+                    readonly "subsystem_device",
+                    readonly "class",
+                    readonly "irq",
+                    readonly "local_cpus",
+                    readonly "local_cpulist",
+                    readonly "modalias",
+                    readonly "numa_node",
+                    readonly "dma_mask_bits",
+                    readonly "consistent_dma_mask_bits",
+                    rw "enable" 0600 is_enabled_show(), is_enabled_store(),
+                    rw "broken_parity_status" S_IRUGO|S_IWUSR
+                       broken_parity_status_show(), broken_parity_status_store(),
+                    rw "msi_bus" 0644 msi_bus_show() msi_bus_store(),
+                    rw "remove" S_IWUSR|S_IWGRP NULL remove_store(),
+                    rw "rescan" S_IWUSR|S_IWGRP NULL dev_rescan_store(),
+                    NULL ATTR                
+            };
+
+          add a device onto pci bus
+            the device descriptor on pci bus is "struct pci_dev".
+            routine pci_device_add() is used to add a pci device to pci bus.
+              void pci_device_add(struct pci_dev *dev, struct pci_bus *bus);
+            this routine does not invoke device_add(),it just initialize
+            some fields of pci device descriptor,and add it to the list
+            pci_dev->bus->devices -- the discovered devices list.
+            the routine of pci calls to device_add() is pci_bus_add_device(),
+            which receives a pci_dev descriptor,and invoke device_add() on
+            @dev->dev,create /proc dentry and sysfs dentry for this pci
+            device.
+            bus's probe method or driver's probe method would be called to
+            determines whether there is a driver it can handles this device.
+
+            function pci_device_probe() is called,then helper __pci_device_probe()
+            then is called.
+              if dev's driver is NULL AND pci_driver implemented probe() method
+              then
+                pci_match_device() is called try to match the pci_driver with
+                the pci_dev .
+                if there is a matching -- represented by a pci_device_id object,
+                call to pci_call_probe(),thus pci_driver's probe() method is
+                called.
+
+            ! if we want to add a pci device to the bus at higher-level,we can
+              invoke device_register() on the internal device descriptor of
+              the pci_dev object.
+            ! pci_bus_type->match is called by driver_match_device(),and which
+              is called on device_attach() control path.
+              there is a routine named pci_match_device(),it returns an object
+              is type of struct pci_device_id *,which is relied by both
+              pci_bus_match() and __pci_device_probe().
+
+          remove a device from pci bus
+            function pci_device_remove() will be called on device_del() control
+            path -- entrypoint is device_unregister() ==> bus_remove_device()
+            ==> device_release_driver() ==> __device_release_driver().
+            /* calls to one of bus->remove() or driver->remove() */
+            if the device's pci_driver is not NULL,driver's remove() method is
+            called,and finally pci_dev_put() is called to decrease the pci_dev
+            object's refcount(may executes cleanup).
+
+          register a driver on pci bus
+            the wrapper pci_driver of struct device_driver is defined in the
+            header <linux/pci.h>.
+
+            struct pci_driver {
+                    /* used for bus driver list */
+                    struct list_head node;
+
+                    /* pci driver name */
+                    char *name;
+
+                    /* id table records supported pci device */
+                    const struct pci_device_id *id_table;
+
+                    /* methods */
+                    int (*probe)(struct pci_dev *dev, const struct pci_device_id *id);
+                    void (*remove)(struct pci_dev *dev);
+                    int (*suspend)(struct pci_dev *dev, pm_message_t state);
+                    int (*suspend_late)(struct pci_dev *dev, pm_message_t state);
+                    int (*resume_early)(struct pci_dev *dev);
+                    int (*resume)(struct pci_dev *dev);
+                    void (*shutdown)(struct pci_dev *dev);
+
+                    struct pci_error_handlers *err_handler;
+
+                    /* Linux Device Model device driver */
+                    struct device_driver driver;
+    
+                    struct pci_dynids dynids;                
+            };
+
+            we register the driver through driver_register() on the internal
+            device_driver descriptor of the pci_driver.
+
+          unregister the driver from pci bus
+            we can do it via driver_unregister() on the internal device_driver
+            descriptor of the pci_driver object.
+            bus_remove_driver() will be called,in which function driver_detach()
+            is called on the device_driver descriptor.
+            on the control path,__device_release_driver() is called,and fall
+            into bus's remove() method or the driver's remove() method.
+            /* of course,some sysfs files needed to be remove,too,and
+             * some lists needed to be adjusted,etc.
+             */
+
+            ! the driver is removed from the list
+                drv->p->knode_bus
+                /* @p is type of struct driver_private *
+                 * the object will be created and initialized
+                 * by the bus_add_driver() function.
+                 * thus drv->bus->p must been initialized before
+                 * call to driver_register().
+                 */ 
+              the list collects all registered drivers on this bus.
+
+          !! WE CAN KNOW THE PCI BUS BASED ON LINUX DEVICE MODEL,AND
+             THROUGH THE LINUX DEVICE MODEL,WE CAN GET INTO THE RIGHT
+             CONTROL PATH OF PCI BUS -- THROUGH THE CALLBACKS.
+             PCI BUS SUBSYSTEM DOES NOT NEED TO HANDLES sysfs BY ITSELF,
+             IT CAN ENTIRELY RELIES ON LINUX DEVICE MODEL COMPONENTS,
+             AND THE REAL ACTION WOULD BE TAKEN ON A PCI BUS ATTRIBUTE
+             IS DEPENDS ON THE show() AND store() IMPLEMENTATIONS PROVIDED
+             BY PCI BUS SUBSYSTEM.
+
+            
+          
+            
+
     
