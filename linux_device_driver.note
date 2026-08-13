@@ -2998,6 +2998,13 @@ Linux Device Model :
 
                 /sys/class/input/event0 /* usually a symlink */
 
+                # the @sd of the kobject of class's class_subsys that is a
+                  kset object,is initialized on the sysfs_create_dir()
+                  control path,which is called by a static function create_dir()
+                  defined in <lib/kobject.c>,the entrypoint is kset_register().
+                  function sysfs_new_dirent() is called in sysfs component
+                  to makeup a new sysfs directory dentry.
+
           remove sysfs files
             class_remove_file()
 
@@ -3145,8 +3152,9 @@ Linux Device Model :
             the device descriptor on pci bus is "struct pci_dev".
             routine pci_device_add() is used to add a pci device to pci bus.
               void pci_device_add(struct pci_dev *dev, struct pci_bus *bus);
-            this routine does not invoke device_add(),it just initialize
-            some fields of pci device descriptor,and add it to the list
+            this routine does not invoke device_add(),but it does some prepare
+            works such as device_initialize() the internal device descriptor,
+            and some pci bus specific initializations,then add it to the list
             pci_dev->bus->devices -- the discovered devices list.
             the routine of pci calls to device_add() is pci_bus_add_device(),
             which receives a pci_dev descriptor,and invoke device_add() on
@@ -3154,6 +3162,17 @@ Linux Device Model :
             device.
             bus's probe method or driver's probe method would be called to
             determines whether there is a driver it can handles this device.
+
+            ! if we want to add a single pci device,the order is
+                1> call to pci_device_add() on pci_dev descriptor.
+                   /* prepare works */
+                2> call to pci_bus_add_device() on pci_dev descriptor.
+                   /* really device_add() */
+              if we want to add several pci devices,we can invoke
+              pci_device_add() several times on the different pci_dev's,
+              then call to pci_bus_add_devices(),the function will iterates
+              the dicovered devices list,invoke device_add() for each
+              pci device on the list that has not been added.
 
             function pci_device_probe() is called,then helper __pci_device_probe()
             then is called.
@@ -3183,6 +3202,23 @@ Linux Device Model :
             called,and finally pci_dev_put() is called to decrease the pci_dev
             object's refcount(may executes cleanup).
 
+            ! instead call to device_unregister() on the internal device
+              descriptor,we should call to pci_remove_bus_device().
+              it will calls to pci_stop_bus_device() and pci_destroy_dev()
+              on the pci_dev.
+              in pci_stop_dev() -- called by pci_stop_bus_device(),the
+              function device_unregister() is called,so we can enter the
+              road described above.
+              the pci_destroy_dev() can help us to destroy the pci_dev
+              descriptor.
+                /* it acquires @pci_bus_sem temporarily,delete the dev
+                 * from the list of bus collects pci devices.
+                 * invoke pci_free_resources() to free resources,
+                 * finally invoke pci_dev_put() to decrease the refcount
+                 * of this pci_dev.
+                 * # pci_dev_put() calls to put_device().
+                 */
+    
           register a driver on pci bus
             the wrapper pci_driver of struct device_driver is defined in the
             header <linux/pci.h>.
@@ -3214,16 +3250,28 @@ Linux Device Model :
                     struct pci_dynids dynids;                
             };
 
-            we register the driver through driver_register() on the internal
-            device_driver descriptor of the pci_driver.
+            we register the pci driver through pci_register_driver() macro,it
+            calls to the helper __pci_reigster_driver().
+            the helper will setup pci_driver descriptor,and invoke the
+            driver_register() on @driver the internal member of pci_driver
+            to register it with the system.
+            at the last,__pci_register_driver() calls to pci_create_newid_file()
+            and pci_create_removeid_file(),those two function will calls
+            driver_create_file() routine if pci_driver->probe is not NULL.
 
           unregister the driver from pci bus
-            we can do it via driver_unregister() on the internal device_driver
-            descriptor of the pci_driver object.
-            bus_remove_driver() will be called,in which function driver_detach()
-            is called on the device_driver descriptor.
-            on the control path,__device_release_driver() is called,and fall
+            corresponds to the pci_register_driver(),pci_unregister_driver()
+            can be used to unregister a pci driver from pci bus.
+            that function will removes the removeid file and newid file,then
+            invoke to driver_unregister().
+            on the driver_unregister() control path,bus_remove_driver()
+            will be called,in which function driver_detach() is called on
+            the device_driver descriptor.
+            in driver_detach(),__device_release_driver() is called,and fall
             into bus's remove() method or the driver's remove() method.
+            after driver_unregister() returned,pci_free_dynids() is called
+            on the pci_driver to free the pci dynamic id resource associated
+            with this pci driver.
             /* of course,some sysfs files needed to be remove,too,and
              * some lists needed to be adjusted,etc.
              */
@@ -3247,6 +3295,154 @@ Linux Device Model :
              IS DEPENDS ON THE show() AND store() IMPLEMENTATIONS PROVIDED
              BY PCI BUS SUBSYSTEM.
 
+        about hotplug
+          the earlier distributions contains a script named "hotplug" placed
+          under "/sbin/",it would be executed by kernel when a hotplug event
+          happened,in process context.
+          now,almost all distributions flied with udevd is installed,and
+          the notification is send to userspace through kobject uevent.
+
+
+        firmware
+          firmware is a specific type of software permanently or
+          semi-permanently embeded directly into a hardware device's
+          memory.
+          it usually is a segment of program code embedded in hardware
+          device that enables them and their features to function
+          properly,it provides low-level control of hardware device.
+          for a simply hardware device,FM may perform all control,
+          but for a more complex hardware device,FM may provide
+          only relatively low-level control as well as hardware
+          abstraction to higher-level software such as an
+          operating system.
+
+          ! FM is not contained in device driver,such as this form
+              static char dev_fm[] = {0xf2, 0x33, 0xb4, ... };
+            this will bloats the driver,and hard to upgrade FM,except those,
+            license problem may happens.
+            drivers containing wired-in FM are unlikely to be accepted
+            into the mainline kernel or distributors.
+
+          kernel firmware interface
+            the proper solution is get FM from userspace when it is needed,
+            download into hardware device in kernel space.
+            but we can not open a file contains FM in kernel space.
+
+            <linux/firmware.h>
+              /**
+               * firmware - firmware image descriptor
+               * @size:     size of @data
+               * @data:     program code
+               */
+              struct firmware {
+                      size_t size;
+                      const u8 *data;
+              };
+
+              /**
+               * request_firmware - install firmware to device
+               * @fw:               a pointer points to a pointer points
+               *                    to firmware descriptor,*@fw would be
+               *                    set to a memory addres start at where
+               *                    the builtin firmware is stored by the
+               *                    helper _request_firmware()
+               * @name:             name of firmware
+               * @device:           device descriptor
+               * return:            0 OR error code
+               * # EXPORT_SYMBOL
+               * # can only be called in user context -- process context
+               * # bultin firmware should be placed in section ".builtin_fw",
+               *   start address represented by @__start_builtin_fw and
+               *   @__end_builtin_rw is the end address -- [) range
+               * # *@fw contains a pointer allocated through kzalloc(),in
+               *   the memory area,firmware image is stored
+               */
+              int request_firmware(const struct firmware **fw, const char *name,
+                                   struct device *device);
+
+              /**
+               * request_firmware_nowait - request firmware in the context where
+               *                           sleep is not allowed
+               * @module:                  module requesting the firmware
+               * @uevent:                  sends uevent to copy the firmware image
+               *                           if this flag is non-zero else the
+               *                           firmware copy must be done manually
+               * @name:                    name of firmware file
+               * @device:                  device for which firmware is being loaded
+               * @gfp:                     allocation flags
+               * @context:                 will be passed over to @cont,and @fw
+               *                           may be NULL if firmware request fails
+               * @cont:                    function will be called asynchronously
+               *                           when the firmware request is over
+               * return:                   0 OR error code
+               * # EXPORT_SYMBOL
+               * # asynchronous version,for user contexts where is not possible to
+               *   sleep for long time,cant be called in atomic contexts
+               */
+              int request_firmware_nowait(struct module *module, int uevent,
+                                          const char *name, struct device *device,
+                                          gfp_t gfp, void *context,
+                                          void (*cont)(const struct firmware *fw, void *context));
+
+              /**
+               * release_firmware - release the firmware returned from
+               *                    request_firmware*()
+               * @fw:               the pointer returned in *@fw of
+               *                    request_firmware
+               * # EXPORT_SYMBOL
+               * # after we download the firmware to hardware device,
+               *   should call to this routine to release it
+               */
+              void release_firmware(const struct firmware *fw);
+
+          work mechanism
+            when request_firmware*() is called,a new directory with the device's
+            name which is being load firmware would be created under
+              /sys/class/firmware
+            in the sysfs directory,some attribute files are created
+              loading
+                userspace process set this attribute to 1 when it is
+                loading the firmware.
+                after it completed,reset to 0.
+                -1 means aborts the firmware loading process.
+                /**
+                 * loading => 1
+                 * write firmware image into data
+                 * loading => 0
+                 *
+                 * loading => 1
+                 * write firmware image into data
+                 * Oops!
+                 * loading => -1 # abort
+                 */
+              data
+                a binary sysfs file used to receives the firmware data,
+                userspace process writes the firmware into this file,
+                and kernel can receives it through store() method.
+                /* the method provided by kernel,not the driver */
+              device
+                a symlink to the device's sysfs entry under
+                  /sys/devices/
+
+            the sysfs file /sys/class/firmware/timeout contains a timeout value,
+            if the firmware request is not serviced within @timeout seconds,
+            kernel will gives up to the request_firmware(),and returns a
+            failure status to driver.
+
+            who write the firmware image data to the "data" attribute ?
+            : usually,is the userspace hotplug handler.
+              when request_firmware() is called,and builtin firmware has
+              no the corresponding firmware image,kernel temporarily
+              creates a fw dev,it holds those attributes,and has the same
+              kobject name as the device,under /sys/class/firmware/ .
+              then invoke kobject_uevent() on the fw dev with KOBJ_ADD,
+              and wait the userspace hotplug handler send the image
+              through "data" attribute.
+              /* on the newer distribution,udevd handles this request.
+               * after it detected the uevent,it will tries to find out
+               * such firmware image file on the system,and transfers
+               * its content to kernel through "data" attribute.
+               */
             
           
             
