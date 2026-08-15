@@ -3443,8 +3443,150 @@ Linux Device Model :
                * such firmware image file on the system,and transfers
                * its content to kernel through "data" attribute.
                */
-            
-          
-            
 
+PCI Drivers :            
+        PCI Bus
+          PCI Bus is Peripheral Component Interconnect Bus,introduced by
+          PCISIG(PCI Special Interest Group).
+          Conventional parallel PCI runs at 32 or 64 bits and speeds up
+          to 133 MB/s.
+                  CPU------+ +-------RAM        \
+                           | |                   | host address domain
+                           | |                   |
+                      PCI host bridge           /   \
+                            |                        |                     
+                            |                        | PCI adress domain
+                 -----------+----------------        |
+                    |       |         |              |
+                  Graphics PCI bus    LAN            |
+                  adapter  bridge     adapter        |
+                            |                        |
+                            |        bus 1           |
+                  ----------+----------------        |
+                        |                            |
+                    SCSI HBA                         |
+                        |                            |
+                       ...                           |
+                                                    /
+          the PCI architecture was designed as a replacement for the
+          ISA standard,with three main goals
+            1> get better performance when transferring data between
+               the computer and its peripherals.
+            2> as platform independent as possible.
+            3> simplify adding and removing peripherals to the system.
+
+          clock of PCI bus runs at 25 to 33 MHz,and 66 MHz and even
+          133 MHz implementations have recently been deployed as well.
+          it equipped a 32-bit data bus,and a 64-bit extension has been
+          included in the specification.
     
+          PCI support autodetection of interface boards,and its devices
+          are jumperless,configured automatically at boot time.
+          device driver must be able to access configuration information
+          in the device,in order to complete initialization.
+          this happens without the need to perform any probing.
+
+        PCI Addressing
+          each PCI peripheral is identified by
+            a bus number        # 8 bits
+            a device number     # this two      \
+            a function number   # total 8 bits  /
+          PCI specification permits a single system to host up to 256
+          buses.
+
+          ! Linux supports PCI domains,each PCI domain can host up to
+            256 buses,and each bus hosts up to 32 devices,and each
+            device can be a multifunction board with a maximum of
+            eight functions.
+            -- 256 * (32 * 8) == 65536
+               each function can be identified at hardware level by a
+               16-bit address,or key.
+
+          bridge
+            a special-purpose PCI peripheral whose task is joining several
+            buses.
+            for the PC architecture which hosts more than one PCI buses,those
+            buses can be connected via the bridge.
+
+          address format
+            +--> domain number(16 bits)
+            |    +--> bus number(8 bits)
+            |    |  +--> device number(5 bits)
+            |    |  |  +--> function number(3 bits)
+            |    |  |  |
+            0000:00:01.0
+
+            for a personal PC,there usually only one PCI domain exists,the
+            domain number start from "0000".
+            if we ignores the domain number,the address format is seem like
+            this
+              00:01.0
+            right 16 bits.
+
+          three address spaces
+            1> memory location
+            2> I/O ports
+            3> configuration registers
+
+            address-space-1 and address-space-2 are shared by all the
+            devices on the same PCI bus.
+            address-space-3 exploits "geographical addressing",configuration
+            queries address only one slot at a time.
+
+            Geographical Addressing
+              this kind of addressing links physical or digital data to
+              specific real-world locations.it merges address verification,
+              geocoding,and unique location IDs.
+
+            address-space-1 and address-space-2 can be accessed via inb,readb,
+            etc.
+            address-space-3 can only be accessed via specific kernel functions.
+            every PCI slot has 4 interrupt pins,and each device function can use
+            one of them,the task routes the pins to CPU is the responsibility
+            of the computer platform and is implemented outside of the PCI bus.
+            -- PCI specification requires interrupt lines to be shareable.
+
+            I/O space in PCI bus uses a 32-bit address bus,leading to 4GB of
+            I/O ports.
+            the memory space can be accessed with either 32-bit or 64-bit
+            addresses.
+
+            ! addresses are supposed to be unique to one device,the same addresses
+              to two devices will making it impossible to access either one.
+              because auto configuration,if driver does not touch some special
+              registers,this problem would not happens.
+
+            memory and I/O address region offered by the interface board can be
+            remapped by means of configuration transactions.
+            hence,firmware can initializes PCI hardware at system boot,mapping each
+            region to a different address to avoid collisions.the mapping information
+            is able to be acquired through configuration space.
+
+            configuration space consists of 256 bytes for each device function,
+            /* PCI Express devices have 4 kB of configuration space for
+             * each function.
+             */
+            "layout of configuration registers" is _standardized_.
+            unique function ID is holds in 4 bytes in the configuration space.
+            driver can identify its device by looking for the function ID in the
+            configuration space.
+                    +--> configuration space
+                    |
+                    [ ...| device function K | device function L | ... ]
+                         |<----------------->|
+                           |
+                           +--> [=========================] <= 256 bytes
+                                          |----|
+                                           |
+                                           +--> unique function ID
+
+            ! unique function ID can be found in <linux/pci_ids.h>,or in
+              pci.ids of package pciutils.
+              # /usr/share/hwdata/pci.ids
+
+            ! device board is geographically addressed to retrieve its
+              configuration registers.
+        
+              
+                            
+                            
