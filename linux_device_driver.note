@@ -3586,6 +3586,176 @@ PCI Drivers :
 
             ! device board is geographically addressed to retrieve its
               configuration registers.
+
+        Boot Time
+          EC -> Power On -> PCI Device power up -> PCI-aware firmware initialize
+          -> firmware performs configuration transactions
+
+          configuration transactions performed with every PCI peripheral,by the
+          firmware itself,or by the kernel.for each PCI peripheral,allocate a
+          safe place for each address region it offers,the memory and I/O regions
+          are mapped into the processor's address space.
+          /* drivers now can access to the PCI device,and is able to adjust
+           * the default mapping,but it never needs to do that.
+           */
+
+          binary file /sys/bus/pci/devices/*/config contains raw PCI config
+          information that readed from the device.
+          /* file /proc/bus/pci/<bus-number>/<device-number>.<function-number>
+           * also contains the config information.
+           */
+
+        Configuration Registers and Initialization
+          all PCI devices feature at least a 256 bytes address space.    
+          the first 64-bytes are standardized,the rest are device dependent.
+
+          /*        first 64-bytes        */
+
+          [0x00, 0x01]        Vendor ID
+          [0x02, 0x03]        Device ID
+          [0x04, 0x05]        Command Register
+          [0x06, 0x07]        Status Register
+          [0x08]              Revision ID
+          [0x09, 0x0b]        Class Code
+          [0x0c]              Cache Line
+          [0x0d]              Latency Timer
+          [0x0e]              Header Type
+          [0x0f]              BIST
+
+          [0x10, 0x13]        Base Address 0
+          [0x14, 0x17]        Base Address 1
+          [0x18, 0x1b]        Base Address 2
+          [0x1c, 0x1f]        Base Address 3
+          [0x20, 0x23]        Base Address 4
+          [0x24, 0x27]        Base Address 5
+          [0x28, 0x2b]        CardBus CIS pointer
+          [0x2c, 0x2d]        Subsystem Vendor ID
+          [0x2e, 0x2f]        Subsystem Device ID
+
+          [0x30, 0x33]        Expansion ROM Base Address
+          [0x34, 0x3b]        Reversed
+          [0x3c]              IRQ Line
+          [0x3d]              IRQ Pin
+          [0x3e]              Min_Gnt
+          [0x3f]              Max_Lat
+
+          Vendor ID
+          - 16-bit register identifies a hardware manufacturer.
+            READONLY
+
+          Device ID
+          - 16-bit register,value selected by manufacturer,usually
+            paired with Vendor ID to make a unique 32-bit identifier(signature)
+            for a hardware device.
+            READONLY
+
+          Class Code
+          - 24-bit register,top-8-bits identify the "base class"(or group),
+            middle-8-bits identify "subclass",the low-8-bits identify
+            "programming interface".
+            e.g.
+              02 00 00 => Network Controller Group
+                            Ethernet Controller
+            READONLY
+
+          Subsystem Vendor ID
+          Subsystem Device ID
+          - these two fields can be used for further identification of a device.
+            if the chip is a generic interface chip to a local(onboard) bus,it 
+            is often used in several completely different roles,and the driver
+            must identify the actual device it is talking with.
+
+          The required registers are
+            Vendor ID, Device ID, Command Register, Status Register,
+            Revision ID, Header Type
+
+            ! every PCI device must contain meaningful values in the
+              required registers.
+
+          The optional registers are
+            except required registers and Reversed region,the remains
+            are optional.
+
+            ! the contents of optional registers depend on the actual
+              capabilities of the peripheral.
+              the optional fields are not used unless the contents
+              of the required fields indicate that they are valid.
+
+          !! PCI REGISTERS ARE ALWAYS LITTLE-ENDIAN.
+             ! routines in <asm/byteorder.h> are useful to byteorder
+               conversion.
+
+        pci_device_id
+          this structure is used to define a list of the different types
+          of PCI devices that a driver supports.
+
+          <linux/mod_devicetable.h>
+    
+            #define PCI_NAY_ID (~0)
+
+            typedef unsigned long kernel_ulong_t;
+    
+            /**
+             * pci_device_id - PCI device identifier
+             * @vendor:        Vendor ID
+             * @device:        Device ID
+             * @subvendor:     Subsystem Vendor ID
+             * @subdevice:     Subsystem Device ID
+             * @class:         Class Code -- [class, subclass, prog-if] triple
+             *                 for this device
+             * @class_mask:    Class Code mask for this device
+             *                 # @class and @class_mask allows the driver to
+             *                   specify that it supports a type of PCI class
+             *                   device
+             * @driver_data:   data private to the driver
+             * # driver can make a list of identifiers to describes what types
+             *   of PCI devices it supports
+             * # if driver can handles any vendor or device ID,@vendor and
+             *   @device should set to PCI_ANY_ID.
+             *   @subvendor and @subdevice as the same without loss of
+             *   generality.
+             */            
+            struct pci_device_id {
+                    __u32 vendor, device;
+                    __u32 subvendor, subdevice;
+                    __u32 class, class_mask;
+                    kernel_ulong_t driver_data;
+            };
+
+          <linux/pci.h>
+            /* initialization helper */
+    
+            #define PCI_DEVICE(vend, dev) \
+                    .vendor = (vend), .device = (dev), \
+                    .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
+
+            #define PCI_DEVICE_CLASS(dev_class, dev_class_mask) \
+                    .class = (dev_class), .class_mask = (dev_class_maks), \
+                    .vendor = PCI_ANY_ID, .device = PCI_ANY_ID, \
+                    .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
+
+            /**
+             * e.g.
+             *   const struct pci_device_id pci_dev_idtable[] = {
+             *           {
+             *                   PCI_DEVICE(the_vendor, the_device),
+             *                   .driver_data = &local_dev_info,
+             *           },
+             *           {
+             *                   PCI_DEVICE_CLASS(the_class, the_class_mask),
+             *                   .driver_data = 0,
+             *           },
+             *           /* ... */
+             *           { } /* zero-filled end,equal to the initializer {0} */
+             *   };
+             *
+             *   this array make up a list of devices ids that supported by
+             *   the driver,and it is also used to tell userspace which device
+             *   this specific driver supports.
+             */
+        
+
+
         
               
                             
