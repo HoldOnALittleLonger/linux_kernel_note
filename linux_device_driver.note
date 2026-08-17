@@ -2827,7 +2827,7 @@ Linux Device Model :
                            |
                            +--> module          /* symlink to module -- nvme */
                            |
-                           +--> new_id
+                           +--> new_id          /* manually bind new device */
                            |
                            +--> remove_id
                            |
@@ -3184,6 +3184,8 @@ Linux Device Model :
                 call to pci_call_probe(),thus pci_driver's probe() method is
                 called.
 
+            ! pci_device_probe() is called in really_probe() by driver core.
+
             ! if we want to add a pci device to the bus at higher-level,we can
               invoke device_register() on the internal device descriptor of
               the pci_dev object.
@@ -3230,16 +3232,44 @@ Linux Device Model :
                     /* pci driver name */
                     char *name;
 
-                    /* id table records supported pci device */
+                    /* id table records supported pci devices */
                     const struct pci_device_id *id_table;
 
                     /* methods */
+
+                    /**
+                     * called when a pci_dev is connected to the PCI bus and
+                     * the pci core thinks the device can be handled by this
+                     * pci driver -- matched,pci_match_device().
+                     * return 0 means the driver want to claim this device,or
+                     * error code if the driver wont.
+                     * # called if bus's probe method is not implemented,
+                     *   otherwise,the driver core prefers to bus's probe method,
+                     *   in really_probe().
+                     */                    
                     int (*probe)(struct pci_dev *dev, const struct pci_device_id *id);
+
+                    /**
+                     * called when the pci_dev is bing removed from the system,or
+                     * when the PCI driver is being unloaded from the kernel.
+                     */
                     void (*remove)(struct pci_dev *dev);
+
+                    /**
+                     * called when the pci_dev is being suspended,the suspend
+                     * state is passe in @state.
+                     * # optional method
+                     */
                     int (*suspend)(struct pci_dev *dev, pm_message_t state);
                     int (*suspend_late)(struct pci_dev *dev, pm_message_t state);
+
+                    /**
+                     * called when the pci_dev is bing resumed.
+                     * # optional method
+                     */
                     int (*resume_early)(struct pci_dev *dev);
                     int (*resume)(struct pci_dev *dev);
+
                     void (*shutdown)(struct pci_dev *dev);
 
                     struct pci_error_handlers *err_handler;
@@ -3753,6 +3783,163 @@ PCI Drivers :
              *   the driver,and it is also used to tell userspace which device
              *   this specific driver supports.
              */
+
+        macro MODULE_DEVICE_TABLE(@gtype, @name)
+          this macro is used to export device ids to userspace,when new device
+          is connected,hotplug helper can load the correct driver module for
+          the device through those informations.
+
+          <linux/module.h>
+            #define MODULE_GENERIC_TABLE(gtype, name) \
+            extern const struct gtype##_id __mod_##gtype##_table \
+            __attribute__((unused, alias(__stringify(name))))
+            /**
+             * unused: compiler should not raise a warning because
+             *         it may not used
+             * alias:  make an alias for the symbol
+             */
+
+            #define MODULE_DEVICE_TABLE(type, name) \
+                    MODULE_GENERIC_TABLE(type##_device, name)
+
+          e.g.
+            MODULE_DEVICE_TABLE(pci, wdtpci_pci_tbl);
+            =>
+            MODULE_GENERIC_TABLE(pci_device, wdtpci_pci_tbl);
+            =>
+            extern const struct pci_device_id __mod_pci_device_table
+            __attribute__((unused, alias(__stringify(wdtpci_pci_tbl))));
+
+          at kernel building phase,depmod will searches all modules for
+          the symbol "__mod_pci_device_table",if found,it pulls the data
+          out of the module and adds it to the file "modules.*map",then
+          hotplug helper can retrieves the informations.
+
+          ! __stringify() is a macro defined in kernel,used to convert
+            the symbol to a string.
+            <linux/stringify.h>
+              #define __stringify_1(x...) #x
+              #define __stringify(x...) __stringify_1(x)
+
+          ! MODULE_GENERIC_TABLE() been removed in newer kernel,and
+            MODULE_DEVICE_TABLE() has been refined.
+              /* 6.19.6 */
+    
+              #define MODULE_DEVICE_TABLE(type, name) \
+              static typeof(name) __mod_device_table(type, name) \
+              __attribute__((unused, alias(__stringify(name))))
+
+              #define __mod_device_table(type, name) \
+                      __PASTE(__mod_device_table__, \
+                      __PASTE(kmod_, \
+                      __PASTE(__KBUILD_MODNAME, \
+                      __PASTE(__, \
+                      __PASTE(type, \
+                      __PASTE(__, name))))))
+
+              e.g.
+                MODULE_DEVICE_TABLE(pci, wdtpci_pci_tbl);
+                =>
+                static struct pci_device_id *__mod_device_table(pci, wdtpci_pci_tbl)
+                __attribute__((unused, alias("wdtpci_pci_tbl")))
+                =>
+                static struct pci_device_id *__mod_device_table__kmod_KBUILD_MODNAME__pci__wdtpci_pci_tbl;
+
+                # KBUILD_MODNAME can be determined on the module's building phase.
+
+        Registering a PCI driver
+          pci_driver strcuture
+            the structure must be created by the driver program,and used to
+            identify this pci driver program.
+            # -- section: "register a driver on pci bus"
+
+            the minimal initialization to pci_driver
+              @name, @id_table, @probe, @remove
+
+          registeration/unregisteration
+            /* impl: <drivers/pci/pci-driver.c>
+             * return 0 if succeed,otherwise returns error code.
+             * # relies on kernel driver core.
+             */
+            pci_register_driver()
+            pci_unregister_driver()
+
+        Old-Style PCI Probing
+          pci driver walk-through the list of all PCI devices in the system,
+          to find out a specific PCI device.
+          but the related ability been removed,because that may crash kernel
+          if pci driver modify the PCI devices lists while a device was being
+          removed at the same time.
+          in 2.6.34.1,pci_get_device() is existing for search a PCI device
+          by vendor/device id.
+
+          <drivers/pci/search.c>
+            /**
+             * pci_get_device - pci device searching
+             * @vendor:         vendor id
+             * @device:         device id
+             * @from:           where to start searching,
+             *                  NULL means start a new searching,
+             *                  otherwise,it should be the previous
+             *                  pci_dev descriptor returned by
+             *                  this function
+             *                  # we can set @from to iterate
+             *                    each pci_dev has the same signature
+             * return:          pci_dev descriptor OR NULL
+             * !! CANT CALLED FROM INTERRUPT CONTEXT
+             * # just a wrapper call to pci_get_subsys(),
+             *   subvendor id and subdevice id are PCI_ANY_ID.
+             * # pci_get_subsys() will allocates an object si type of
+             *   struct pci_device_id,use the parameters to fill it,
+             *   and pass it to pci_get_dev_by_id().
+             *   function pci_get_dev_by_id() relies on routine
+             *   bus_find_device().
+             *   !! pci_get_subsys() CANT CALLED FROM INTERRUPT CONTEXT.
+             * # bus_find_device() is defined in <drivers/base/bus.c>,
+             *   it receives bus type,device descriptor, void pointer to data,
+             *   and a callback named "match".
+             *   it will initialize a klist_iter object from the bus type's
+             *   klist_devices,and use a loop to iterates each device,
+             *   call @match on the device with the data,get_device()
+             *   on the device if @match returned TRUE.
+             *   ! the @match passed by pci_get_dev_by_id() is
+             *       match_pci_dev_by_id()
+             *     it just converts the device descriptor to pci_dev,
+             *     data to pci_device_id pointer,calls to helper
+             *     pci_match_one_device(),the helper will returns
+             *     a pointer to the pci_device_id if matched,or
+             *     NULL if there is no such pci device.
+             *   ! pci_dev has no additional refcounter,thus it share the
+             *     kobject's kref of device descriptor.
+             *     after driver no longer needs the found pci_dev,must
+             *     call pci_dev_put() on it to decrease refcount.
+             */
+            struct pci_dev *pci_get_device(unsigned int vendor,
+                                           unsigned int device,
+                                           struct pci_dev *from);
+
+            /**
+             * pci_get_slot - locate PCI device for a given PCI slot
+             * @bus:          PCI bus to search
+             * @devfn:        encodes number of PCI slot in which the
+             *                desired PCI device resides and the logical
+             *                device number within that slot in case of
+             *                multi-function devices
+             *                # slot/function number
+             * return:        pci_dev descriptor OR NULL
+             * !! CANT CALLED FROM INTERRUPT CONTEXT.
+             * # this function will down_read() @pci_bus_sem semaphore,
+             *   and release it later.
+             *   iterates list @bus->devices,for each element,call
+             *   pci_dev_b() macro to convert the list node to the 
+             *   container pci_dev(member is named @bus_list in pci_dev),
+             *   then test if this pci_dev's devfn is equal to @devfn.
+             *   if found,will increase this pci_dev's refcount.
+             */
+            struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int devfn);
+        
+              
+            
         
 
 
