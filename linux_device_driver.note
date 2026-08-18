@@ -1153,7 +1153,7 @@ Communicating with Hardware :
           allocation
             struct resource *request_region(@start, @n, @name)
             # @start => resource start position(memory address)
-                        type is resource_size_t <= phys_addr-t
+                        type is resource_size_t <= phys_addr_t
               @n     => number of memory units
               @name  => name of the resource,for our device
             # request a resource region of this system.
@@ -3925,7 +3925,18 @@ PCI Drivers :
              *                desired PCI device resides and the logical
              *                device number within that slot in case of
              *                multi-function devices
-             *                # slot/function number
+             *                # PCI interface treats multi-function devices
+             *                  as independent devices,that is for a function
+             *                  of the main PCI device,it is considered as an
+             *                  independent PCI device,use slot/function
+             *                  to address them on the main PCI device
+             *                # slot/function number -- 8 bits
+             *                  macro PCI_DEVFN(slot, func) is defined
+             *                  in <linux/pci.h>,and is expanded to
+             *                    (((slot) & 0x1f) << 3) | ((func) & 0x07)
+             *                  7:3 <= slot, 2:0 <= function
+             *                  ** bit7 -- bit3
+             *                     bit2 -- bit0
              * return:        pci_dev descriptor OR NULL
              * !! CANT CALLED FROM INTERRUPT CONTEXT.
              * # this function will down_read() @pci_bus_sem semaphore,
@@ -3937,9 +3948,136 @@ PCI Drivers :
              *   if found,will increase this pci_dev's refcount.
              */
             struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int devfn);
-        
-              
+    
+        Enabling the PCI Device
+          PCI driver needs to invoke pci_enable_device() function in its probe
+          method,in order to access to this PCI device's I/O region or
+          interrupt later.
+
+          <drivers/pci/pci.c>
+            /**
+             * pci_enable_device - initialize device before it is used by a
+             *                     driver
+             * @dev:               pci device descriptor
+             * return:             0 OR error code
+             * # ask low-level code to enable I/O and memory,wake up device
+             *   if it was suspended
+             * # just a wrapper of __pci_enable_device_flags(),the flags
+             *   is IORESOURCE_MEM | IORESOURCE_IO -- we want I/O Memory
+             *   and I/O Port
+             *   ** may assign IRQ Line for this device,the line number
+             *      will be stored into @dev->irq.
+             */
+            int pci_enable_device(struct pci_dev *dev);
+
+            /**
+             * __pci_enable_device_flags - helper that enable pci device with
+             *                             specified resource flags
+             * @dev:                       pci device descriptor
+             * @flags:                     resource flags for behavior control
+             * return:                     0 OR error code
+             * # the main work is handed to do_pci_enable_device() function
+             * # this function first tests @dev->enable_cnt member,it adds 1
+             *   to the member atomically,if the result greater than 1,that
+             *   means it been enabled,just return 0 to caller.
+             *   make use of a for loop,iterates the device's @resource array,
+             *   range is idx 0 to DEVICE_COUNT_RESOURCE,this macro is defined
+             *   in <linux/pci.h>,as the end of PCI resource type enumerators.
+             *   if there is an element in the array whose @flags member has
+             *   enabled @flags,then record the index in a local @bar variable,
+             *   it is a bitmask type of int.
+             *   after loop stopped,invoke do_pci_enable_device(),pass it
+             *   @dev and @bar -- bitmask.
+             *   if any error happend,we must decrease @enable_cnt by 1.
+             */
+            static int __pci_enable_device_flags(struct pci_dev *dev,
+                                                 resource_size_t flags);
+
+            /**
+             * do_pci_enable_device - really do pci device enable
+             * @dev:                  pci device descriptor
+             * @bars:                 PCI resource type bitmask
+             * return:                0 OR error code
+             * # first,invoke pci_set_power_state() to set @dev's
+             *   power state to PCI_D0 -- fully-on.
+             *   next,invoke pcibios_enable_device(),pass it the
+             *   descriptor and bitmask.
+             *   finally invoke pci_fixup_device(),the request is
+             *   @pci_fixup_enable,pci_do_fixups() will invokes
+             *   the corresponding pci fixup firmware hooks.this requires
+             *   the objects of type struct pci_fixup in given range,
+             *   have the same vendor id and device id,or the fixup
+             *   can be applied to every PCI device.
+             *   ** any one step failed,return to caller with error code
+             *      immediately.
+             *
+             * # on pci_set_power_state() control path,because power state
+             *   is D0,pci_platform_power_transition() will be called.
+             *   if platform's power manager can manages this pci device,
+             *   platform_pci_set_power_state() is called;otherwise,
+             *   return -ENODEV,but if @dev->pm_cap is NULL -- has no
+             *   Power Management Capability,need to set member @current_state
+             *   to PCI_D0.
+             *
+             * # pcibios_enable_device() is an architecture-dependent function,
+             *   on x86,it is defined in <arch/x86/pci/common.c>.
+             *   this function first try to enable the required resources,
+             *   if succeed,next,test whether this device's MSI is not enabled,
+             *   if it is the case,invoke pcibios_enable_irq() to enable
+             *   PCI device interrupt.
+             *   ! MSI => Message Signaled Interrupt
+             *     for this kind of interrupt,peripheral will sends an interrupt
+             *     to CPU by write data to a special memory address,rather than
+             *     using traditional physical wire pins.
+             */
+            static int do_pci_enable_device(struct pci_dev *dev, int bars);
+
+        Accessing the Configuration Space
+          to access configuration space,CPU must write and read registers in the
+          PCI controller,but the exact implementation is vendor dependent.
+          linux provides some common routines to do this.
+          /**
+           * when driver needs to access to configuration space of PCI device,
+           * that involved with 8-bit,16-bit,or 32-bit data transfers.
+           */
+
+          <linux/pci.h>
+            /* wrappers for pci_bus_read_config_*() functions,
+             * read data from @where in configuration space into @val
+             */
+            static inline int pci_read_config_byte(struct pci_dev *dev, int where,
+                                                   u8 *val);
+                                          /* _word u16
+                                           * _dword u32
+                                           * # word and dword version.
+                                           */
+
+            /* wrappers for pci_bus_write_config_*() functions,
+             * write data from @val into @where in configuration space
+             */
+            static inline int pci_write_config_byte(struct pci_dev *dev, int where,
+                                                    u8 val);
+                                           /* _word u16
+                                            * _dword u32
+                                            * # word and dword version
+                                            */
+
+            ! pci_bus_read/write_*() functions receives four parameters
+                @p1 => dev->bus : struct pci_bus *
+                @p2 => dev->devfn : unsigned int
+                @p3 => where
+                @p4 => data / data location
+
+              in header <linux/pci_regs.h>,some constant macros are defined,
+              used to represent registers' positions in configuration space.
+              /* the first-64 bytes */
+              e.g. PCI_VENDOR_ID => 0x00, PCI_DEVICE_ID => 0x02
+                
+
             
+
+    
+                
         
 
 
