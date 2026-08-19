@@ -25525,9 +25525,10 @@ Chapter 13 : I/O Architecture and Device Drivers
               /**
                * resource - peripheral device resource tree node
                * @start:    start of resource range
-               *            # @start it is not the I/O port number,
+               *            # @start,it is not the I/O port number,
                *              it is the starting address of memory area
-               *              where mapped some device I/O ports
+               *              where mapped some device I/O ports or
+               *              I/O memory
                * @end:      end of resource range
                * @name:     description of owner of the resource
                * @flags:    various flags

@@ -4072,6 +4072,152 @@ PCI Drivers :
               used to represent registers' positions in configuration space.
               /* the first-64 bytes */
               e.g. PCI_VENDOR_ID => 0x00, PCI_DEVICE_ID => 0x02
+
+        Accessing the I/O and Memory Spaces
+          a PCI device implements up to six I/O address regions,each region
+          consists of either memory or I/O locations,and most devices implement
+          their I/O registers in memory regions,these registers should not be
+          cached by CPU.
+          PCI device can sets "memory-is-prefetchable" bit in its configuration
+          register,that means the I/O register implemented as a memory region
+          can be cached by CPU,then optimization can takes place;but the
+          non-prefetchable memory access,has side-effect,just as with I/O Ports.
+
+          ! peripheral maps its control registers to a memory address range
+            declares that range as nonprefetchable.
+
+          in the six Base Address registers,we can get the size and current
+          location of regions -- I/O address space that is memory-mapped or
+          port-mapped.
+          /* PCI_BASE_ADDRESS_0 -- PCI_BASE_ADDRESS_5
+           * for 32-bit address bus,use one register.
+           * for 64-bit address bus,combine two consecutive registers,
+           * low bits first,high bits second.
+           *
+           * PCI device is able to offers both 32-bit regions and 64-bit
+           * regions.
+           * e.g. [0] [1] [2, 3] [4, 5]
+           */
+
+          ! the PCI device's I/O regions have been integrated into the
+            generic resource management,we can know the region's location
+            and size through the resource descriptors.
+              pci_dev->resource[DEVICE_COUNT_RESOURCE]
+              /* I/O and memory regions + expansion ROMs */
+
+          <linux/pci.h>
+            /**
+             * the following enumerators defined the kinds of elements
+             * in pci_dev->resource[].
+             */
+            enum {
+                    PCI_STD_RESOURCES,
+                    PCI_STD_RESOURCE_END = 5,
+
+                    PCI_ROM_RESOURCE,
+
+            #ifdef CONFIG_PCI_IOV
+                    PCI_IOV_RESOURCES,
+                    PCI_IOV_RESOURCE_END = PCI_IOV_RESOURCES +
+                                           PCI_SRIOV_NUM_BARS - 1,
+                    /**
+                     * <linux/pci_regs.h> :
+                     *   PCI_SRIOV_NUM_BARS => 6
+                     */
+            #endif
+
+            #define PCI_BRIDGE_RESOURCE_NUM 4
+
+                    PCI_BRIDGE_RESOURCES,
+                    PCI_BRIDGE_RESOURCE_END = PCI_BRIDGE_RESOURCES +
+                                              PCI_BRIDGE_RESOURCE_NUM - 1,
+
+                    PCI_NUM_RESOURCES,
+
+                    DEVICE_COUNT_RESOURCE,                    
+            };
+
+            /* macros to retrieve start address,end address,and region flags */
+            #define pci_resource_start(dev, bar) ((dev)->resource[(bar)].start)
+            #define pci_resource_end(dev, bar) ((dev)->resource[(bar)].end)
+            #define pci_resource_flags(dev, bar) ((dev)->resource[(bar)].flags)
+
+            /* macro to retrieve region length */
+            #define pci_resource_len(dev, bar)
+            /**
+             * start == 0 AND end end == start
+             * => len = 0
+             * else
+             * => end - start + 1 # idx start from 0
+             */
+
+          <linux/ioport.h>
+            /* I/O port */
+            #define IORESOURCE_IO 0x00000100
+
+            /* select one of those two types */
+
+            /* I/O memory */
+            #define IORESOURCE_MEM 0x00000200
+
+            /* no side effects */
+            #define IORESOURCE_PREFETCH 0x00002000
+
+            /* write protect if set */
+            #define IORESOURCE_READONLY 0x00004000
+
+        PCI Interrupts
+          by the time linux boots,the computer's firmware has already assigned a
+          unique interrupt number to the device,and the driver just needs to use
+          it.
+          the IRQ Line number is stored in configuration register 60 --
+          PCI_INTERRUPT_LINE <= 0x3c in the first 64-byte of configuration space.
+          1 byte length,support to as many as 256 interrupt lines,but the actual
+          limit depends on the CPU.
+          if the PCI device does not support interrupts,the register 0x3d --
+          PCI_INTERRUPT_PIN is set to 0,otherwise,is nonzero.
+          ! PCI_INTERRUPT_PIN is read-only to device driver.
+          /* usually,we design the driver program alongside hardware manual,
+           * so we can know the device does support interrupts or not
+           * support interrupts at the beginning,check 0x3d register is not
+           * necessary.
+           */
+
+          PCI connector has 4 intr pins,peripheral boards can use any or
+          all of the intr pins.each pin is individually routed to the
+          motherboard's interrupt controller,so interrupts can be shared
+          without any electrical problems.
+          next,interrupt controller responsible for mapping the interrupt
+          wires to the processor's hardware,this platform-dependent operation
+          is left to the controller in order to achieve platform independence
+          in the bus itself.
+
+          ! a PCI connector is a physical slot(PCI slot) on a computer
+            motherboard.
+            a device board(expansion card) is a circuit board that plugs
+            into the physical slot.
+              PCI slot :
+                PCIe x1
+                PCIe x4
+                PCIe x8
+                PCIe x16
+
+              device board :
+                graphics card
+                network adapter
+                ...
+    
+          a device board can host up to 8 devices,each device uses a single
+          interrupt pin and reports it in its own configuration register -- 0x3d,
+          different devices on the same device board can use different
+          interrupt pins or share the same one.
+    
+          the value in PCI_INTERRUPT_LINE is determined by firmware at the
+          boot phase,it set the register according to how the interrupt pin
+          is routed for its PCI slot -- only firmware knows how the
+          motherboard routes the different interrupt pins to the processor.
+          
+
                 
 
             
