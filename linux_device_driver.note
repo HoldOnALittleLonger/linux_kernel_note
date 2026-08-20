@@ -4217,17 +4217,53 @@ PCI Drivers :
           is routed for its PCI slot -- only firmware knows how the
           motherboard routes the different interrupt pins to the processor.
           
+        Hardware Abstractions
+          we still use the idiom pointer-to-impl to describes hardware operations
+          on a pci device,to achieve hardware abstraction.
+          there is a structure named "pci_ops" which describes low-level
+          architecture-dependent routines,and a member named "ops" is contained
+          in the structure "pci_bus".
+          /* pci_dev->bus and pci_dev->subordinate are pointers to pci_bus
+           * objects.
+           */
+          except the operations relevant to configuration space accessing,the
+          others are re-mapped to memory or can be accessed by CPU via port I/O.
 
-                
+          <linux/pci.h>
+            struct pci_ops {
+                    int (*read)(struct pci_bus *bus, unsigned int devfn,
+                                int where, int size, u32 *val);
+                    int (*read)(struct pci_bus *bus, unsigned int devfn,
+                                int where, int size, u32 val);
+            };
 
-            
+            /* pci_bus_read_config_*() and pci_bus_write_config_*() are
+             * depends on these two methods,and defined in
+             * <drivers/pci/access.c>.
+             * when call method,the core will acquired @pci_lock and
+             * disable local interrupt,release and restore later after
+             * method returned.
+             */
 
+          ! on x86 platform,an object named @pci_root_ops is defined in
+            <pci/common.c>,it is a wrapper for callings to function
+            raw_pci_read() and raw_pci_write().
+            those raw-methods will invoke to the corresponding method
+            in @raw_pci_ops.
+            both read and write methods are require a pci domain number
+            where the domain this pci bus residing,and a pci bus number
+            that identifies this pci bus in the domain,as additional
+            parameter-0 and parameter-1,respectively.
+            pci domain number can be retrieved through pci_domain_nr(@bus),
+            and pci bus number is stored in the pci_bus->number member.
+            /* pci_bus object is created at system boot phase,each one
+             * corresponds to a detected pci bus.
+             */
+            # usually redirected to pci_conf1_read() or pci_conf1_write(),
+              they are defined in <arch/x86/pci/direct.c>,and both functions
+              are invoke outl() to write-out the result computed from
+                PCI_CONF1_ADDRESS(@bus, @devfn, @reg)
+              to I/O Port 0xCF8,then operates on the I/O Port computed
+              from base port 0xCFC adds offset get from @reg.
     
-                
-        
-
-
-        
-              
-                            
-                            
+            
