@@ -4265,5 +4265,81 @@ PCI Drivers :
                 PCI_CONF1_ADDRESS(@bus, @devfn, @reg)
               to I/O Port 0xCF8,then operates on the I/O Port computed
               from base port 0xCFC adds offset get from @reg.
+              /* 0xCF8 is a register stores operation destination,
+               * and data window's base port is 0xCFC.
+               * after setup the destination,we can write data to the
+               * target register or read data from it.
+               */
+
+        ISA
+          easier than PCI bus with a poor performance,and extensibility lower
+          than PCI.
+          ISA is tightly bound to the PC achitecture,limitions such as 80286
+          processor;has no geographical addressing.
+
+          ISA hardware resources
+            an ISA device can be equipped with I/O ports,memory areas,and
+            interrupt lines.
+            some old hardware only decodes 10 bits address line,thus the I/O
+            ports limited to 1024;some device use the high address lines to
+            select between different device registers.
+    
+            an ISA device can only use the memory range between 640 kB and
+            1 MB,and between 15 MB and 16 MB for I/O register and device control.
+            but range [640kB, 1MB] is used by PC bios,by VGA-compatible video boards,
+            and by various other devices,leaving little space avaiable for new
+            ISA devices.
+            range [15MB, 16MB] is not directly supported by linux.
+
+            about IRQ,a limited number of interrupt lines is routed to the ISA
+            bus,and they are shared by all the interface boards.
+            however,the original ISA specification does not allow interrupt
+            sharing across devices,just most device boards allow it.
+
+          ISA programming
+            the only facilities can use are the registers of I/O ports,and
+            IRQ lines.
+            driver can probe I/O ports and IRQ line for the ISA device.
+            /* in linux 2.6.34.1,routines such as isa_readb(),isa_writeb()
+             * been removed,instead,use inb() or outb().
+             */
+
+          Plug-and-Play Specification(PnP)
+            PnP devices implement relocatable I/O regions,the PC's BIOS
+            is responsible for the relocation.
+            the goal of PnP is to obtain the same flexibility found in
+            PCI devices without changing the underlying electrical interface
+            -- the ISA bus.
+            the specs define a set of device-independent configuration registers
+            and a way to geographically address the interface boards.
+
+            ISA Geographical Addressing
+              assign a small integer called CSN -- card select number,to each
+              PnP peripheral in the computer.each PnP device features a unique
+              serial identifier,64 bits wide,that is hardwired into the
+              peripheral board.
+              CSN can be assigned safely only at boot time,which requires the
+              BIOS to be PnP aware.
+
+        /* PC-class single-board computer bus architectures
+         *   PC/104 => ISA
+         *   PC/104+ => PCI
+         * Other PC Buses
+         *   MCA -- Micro Channel Architecture
+         *   EISA -- Extended ISA
+         *   VLB -- VESA Local Bus,extension of ISA
+         *   SBus -- used in older SPARC-based workstations
+         *   NuBus -- used in older Macro computers,M68k faimily of CPUs
+         * External Buses
+         *   USB
+         *   FireWire
+         *   IEEE 1284
+         *   ...
+         */
+
+            
+    
+
+
     
             
