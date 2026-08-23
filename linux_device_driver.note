@@ -4337,6 +4337,326 @@ PCI Drivers :
          *   ...
          */
 
+USB Drivers :
+        USB bus is a connection between a host computer and a number of
+        peripheral devices.
+        originally created for replace buses such as parallel,serial,etc.
+        provides a single bus type that all devices could connect to.
+        /* USB bus polls each USB device to ask whether it has data need to
+         * send.
+         * before host controller asked,the USB device can not send its data.
+         * USB device can request a fixed bandwidth for its data transfers.
+         */
+
+        ! USB bus acts merely as a communication channel between peripherals
+          and host.
+
+        USB protocol specifications define a set of standards that any device
+        of a specific type can follow.
+        the different types are called classes
+          storage devices
+          keyboards
+          mice
+          joysticks
+          network devices
+          modems
+          ...
+        special driver for the device follow the standard is not necessary.
+        /* common driver features */
+        but,if the device belongs to other classes,then a vendor-specific
+        driver is needed by the specific device.
+        /* such as video devices,USB-to-serial devices. */
+
+        ! USB has hotplug capability.
+
+        USB driver types that supported by linux
+          1> drivers on a host system
+             - control the USB devices that are plugged into the host system.
+          2> drivers on a device
+             - control how that single device looks to the host computer as a
+               USB device.
+
+        figure
+                                User
+                                 ^
+                                 |
+                                 |
+                [ VFS | Block | Net | Char | TTY | ... ]
+                                 |
+                         USB Device Drivers
+                                 |
+                              USB Core
+                                 |
+                         USB Host Controller
+                                 |
+                                 |
+                                 V
+                             Hardware
+
+        USB Device Basics
+          ! kernel USB core handles complexity of USB device for us.
+
+          Endpoints
+            endpoint represents a simplex communication channel between
+            USB entities.
+            a endpoint can only carry data in one direction,from host
+            computer to USB device -- OUT endpoint,or from the USB device
+            to host computer -- IN endpoint.
+                                                     +--> bound to interface
+                    USB Device {                     |
+                            Config {                 |
+                                    Interface { <-----------[USB Driver]
+                                            Endpoint
+                                            Endpoint
+                                            Endpoint
+                                            ...
+                                    }
+
+                                    Interface { <-----------[USB Driver]
+                                            Endpoint
+                                            Endpoint
+                                            Endpoint
+                                            ...
+                                    }
+                                    ...
+                            }
+                    }
+            endpoint types
+              CONTROL
+                allow access to different parts of the USB device.
+                commonly used for configuring the device,retrieving information
+                about the device,sending commands to the device,retrieving
+                status reports about the device.
+                ! every USB device has a CONTROL endpoint called "endpoint 0",
+                  that is used by USB core to configure the device at insertion
+                  time.
+                  USB protocol reserves bandwidth for this endpoint.
+
+              INTERRUPT
+                transfer small amounts of data at a fixed rate every time the
+                USB host asks the device for data.
+                can be used to transfer small amounts of data,such USB keyboards
+                and mice,or send data to USB device to control the device.
+                ! USB protocol reserves bandwidth for this endpoint.
+                
+
+              BULK
+                transfer large amounts of data.
+                common for devices that need to transfer any data that must
+                get through with no data loss.
+                BULK packet may be splited to several smaller BULK packets by bus
+                if there is not enough room for the whole BULK packet.
+                /* multiple transfers */
+                ! USB protocol does not reserve bandwidth for this endpoint.
+
+              ISOCHRONOUS
+                transfer large amounts of data,but may happens data loss,require
+                the USB device can handles data lost,and rely more on keeping a
+                constant stream of data flowing.
+                ! USB protocol does not reserve bandwidth for this endpoint.
+
+              ! CONTROL,BULK => asynchronous data transferring.
+                INTERRUPT,ISOCHRONOUS => periodic data transferring,wait for
+                                         USB bus poll.
+
+            in-kernel descriptors
+              <linux/usb/ch9.h>
+                /**
+                 * usb_endpoint_descriptor - common endpoint descriptor
+                 * @bLength:                 size of data transferring,
+                 *                           usually is USB_DT_ENDPOINT_SIZE
+                 *                           # USB_DT_ENDPOINT_SIZE => 7
+                 *                             USB_DT_ENDPOINT_AUDIO_SIZE 9
+                 * @bDescriptorType:         type of this descriptor,usually
+                 *                           is USB_DT_ENDPOINT -- 0x05
+                 * @bEndpointAddress:        USB address of the specific
+                 *                           endpoint,also includes the direction
+                 *                           of this endpoint
+                 *                             USB_DIR_OUT -- 0
+                 *                             USB_DIR_IN  -- 0x80
+                 *                           # host computer view point
+                 * @bmAttributes:            bmAttribute,type of endpoint,
+                 *                           available values are defined in
+                 *                           the same header
+                 *                           # USB_ENDPOINT_XFER_CONTROL -- 0
+                 *                             USB_ENDPOINT_XFER_ISOC    -- 1
+                 *                             USB_ENDPOINT_XFER_BULK    -- 2
+                 *                             USB_ENDPOINT_XFER_INT     -- 3
+                 * @wMaxPacketSize:          max packet size can be handled by
+                 *                           the endpoint at once in native
+                 *                           byteorder
+                 *                           # driver can sends data chunk larger
+                 *                             than this value,USB core will
+                 *                             split it up to multiple transfers
+                 *                             with @wMaxPacketSize chunk
+                 * @bInterval:               poll interval for INTERRUPT endpoint
+                 *                           # milliseconds
+                 * @bRefresh:                # for audio extension
+                 * @bSynchAddress:           # for audio extension
+                 */
+                struct usb_endpoint_descriptor {
+                        __u8 bLength;
+                        __u8 bDescriptorType;
+                        __u8 bEndpointAddress;
+                        __u8 bmAttributes;
+                        __le16 wMaxPacketSize;
+                        __u8 bInterval;
+                        __u8 bRefresh;
+                        __u8 bSynchAddress;
+                } __attribute__((packed));
+
+              <drivers/usb/endpoint.c>
+                /* ep_device - endpoint device for adds the endpoint
+                 *             into Linux Device Model
+                 */ 
+                struct ep_device {
+                        struct usb_endpoint_descriptor *desc;
+                        struct usb_device *udev;
+                        struct device dev;
+                };
+    
+              <linux/usb.h>
+                /**
+                 * usb_host_ss_ep_comp - valid for SuperSpeed devices only
+                 * @desc:                endpoint companion descriptor,
+                 *                       wMaxPacketSize in native byteorder
+                 * @extra:               descriptors following this endpoint
+                 *                       companion descriptor
+                 * @extralen:            how many bytes of "extra" are valid
+                 */
+                struct usb_host_ss_ep_comp {
+                        struct usb_ss_ep_comp_descriptor desc;
+                        unsigned char *extra;
+                        int extralen;
+                };
+    
+                /**
+                 * usb_host_endpoint - host-side endpoint descriptor and queue
+                 * @desc:              endpoint descriptor,wMaxPacketSize in native
+                 *                     byteorder
+                 * @urb_list:          urbs queued to this endpoint,maintained by
+                 *                     usbcore
+                 * @hcpriv:            for use by HCD,typically holds hardware dma
+                 *                     queue head(QH) with one or more transfer
+                 *                     descriptors(TDs) per urb
+                 * @ep_dev:            ep_device for sysfs
+                 * @ss_ep_comp:        companion descriptor information for
+                 *                     this endpoint
+                 * @extra:             descriptors following this endpoint in the
+                 *                     configuration
+                 * @extralen:          how many bytes of "extra" are valid
+                 * @enabled:           URBs may be submitted to this endpoint
+                 * # USB requests are always queued to a given endpoint,identified
+                 *   by a descriptor within an active interface in a given USB
+                 *   configuration.
+                 */
+                struct usb_host_endpoint {
+                        struct usb_endpoint_descriptor desc;
+                        struct list_head urb_list;
+                        void *hcpriv;
+                        struct ep_device *ep_dev;
+                        struct usb_host_ss_ep_comp *ss_ep_comp;
+                        unsigned char *extra;
+                        int extralen;
+                        int enabled;
+                };
+
+          Interfaces
+            USB endpoints are bundled up into "interface".USB interfaces handle
+            only one type of a USB logical connection,such as a mouse,a keyboard,
+            etc. (classes)
+            ! some USB devices may consist of multiple USB interfaces.
+              e.g.
+                USB Speaker stands two USB Interfaces
+                  1> keyboard for button
+                  2> audio stream
+            each USB driver controls an USB interface,for the USB Speaker example,
+            linux needs two different USB drivers for the device.
+
+            USB interface alternate settings
+              corresponds to the different situations,the setting of current USB
+              interface may changes,and later to be restored to the former setting.
+
+            in-kernel descriptor
+              <linux/usb.h>
+                /**
+                 * usb_host_interface - USB interface's alternate setting
+                 * @desc:               interface descriptor
+                 *                      # this structure is defined in header
+                 *                          <usb/ch9.h>
+                 *                        it also has members
+                 *                          @bLength
+                 *                          @bDescriptorType
+                 *                        same as endpoint descriptor,
+                 *                        and has multiple interface-related members.
+                 * @endpoint:           endpoints of this interface,number of
+                 *                      elements is indicated by @desc.bNumEndpoint
+                 *                      # no order requirement
+                 * @string:             iInterface string if present
+                 * @extra:              extra descriptors
+                 * @extralen:           valid bytes of @extra
+                 */
+                struct usb_host_interface {
+                        struct usb_interface_descriptor desc;
+                        struct usb_host_endpoint *endpoint;
+                        char *string;
+                        unsigned char *extra;
+                        int extralen;
+                };
+    
+                /**
+                 * usb_interface - usb interface descriptor,this descriptor wil
+                 *                 be delivered to USB driver by USB core,then
+                 *                 USB driver in charge of controlling through
+                 *                 this descriptor
+                 * @altsetting:    array of interface structures,one for each
+                 *                 alternate setting that my be selected,and
+                 *                 each one includes a set of endpoint configurations.
+                 *                 # no order requirement
+                 * @cur_altsetting:
+                 *                 pointer to currently selected alternate setting
+                 * @num_altsetting:
+                 *                 number of elements in @altsetting
+                 * @intf_assoc:    interface association descriptor
+                 * @minor:         minor number assigned to this interface,
+                 *                 if this interface is bound to a driver that uses
+                 *                 the USB major number.
+                 *                 otherwise,unused.
+                 *                 # driver needs to set this member in probe method,
+                 *                   after it has been assigned a minor number from
+                 *                   the USB core by calling usb_register_dev()
+                 *                   ! valid only after a successful call to
+                 *                     usb_register_dev().
+                 * @condition:     binding state of the interface
+                 *                   USB_INTERFACE_UNBOUND = 0
+                 *                   USB_INTERFACE_BINDING
+                 *                   USB_INTERFACE_BOUND
+                 *                   USB_INTERFACE_UNBINDING
+                 * @dev:           driver model's view of this device
+                 * @usb_dev:       if an interface is bound to the USB major,
+                 *                 this will points to the sysfs representation for
+                 *                 that device
+                 * @pm_usage_cnt:  PM usage counter
+                 * @reset_ws:      used for scheduling resets from atomic_context
+                 */
+                struct usb_interface {
+                        struct usb_host_interface *altsetting;
+                        struct usb_host_interface *cur_altsetting;
+                        unsigned num_altsetting;
+                        struct usb_interface_assoc_descriptor *intf_assoc;
+                        int minor;
+                        enum usb_interface_condition condition;
+
+                        /* some bit-fields */
+                        ...
+
+                        struct device dev;
+                        struct device *usb_dev;
+                        atomic_t pm_usage_cnt;
+                        struct work_struct reset_ws;
+                };
+                    
+
             
     
 
