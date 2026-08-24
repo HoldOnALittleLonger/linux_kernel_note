@@ -3803,6 +3803,12 @@ PCI Drivers :
                     MODULE_GENERIC_TABLE(type##_device, name)
 
           e.g.
+            /**
+             * There @wdtpci_pci_tbl is a pre-defined variable
+             * and it is type of struct pci_device_id[] .
+             * And which is defined in <drivers/watchdog/wdt_pci.c>,
+             * has static linkage.
+             */
             MODULE_DEVICE_TABLE(pci, wdtpci_pci_tbl);
             =>
             MODULE_GENERIC_TABLE(pci_device, wdtpci_pci_tbl);
@@ -4655,11 +4661,102 @@ USB Drivers :
                         atomic_t pm_usage_cnt;
                         struct work_struct reset_ws;
                 };
-                    
 
-            
-    
+                /* convert USB interface to USB device
+                 * from the detail we can knows,the device descriptor
+                 * for the interface,is a child of that USB device,
+                 * provides this device descriptor because we need
+                 * to add this interface into Linux Device Model
+                 */
+                #define interface_to_usbdev(intf) \
+                        container_of(intf->dev.parent, struct usb_device, dev)
 
+          Configurations
+            USB interfaces are themselves bundled up into configurations.
+            a USB device can have multiple configurations,and might switch
+            between them in order to change the state of the device.
+            a single configuration can only be enabled at the same time.
 
-    
-            
+            in-kernel descriptor
+              <linux/usb.h>
+                /**
+                 * usb_host_config - represents a USB device's configuration
+                 * @desc:            configuration descriptor
+                 * @string:          iConfiguration string,if present
+                 *                   #^ USB Specification
+                 * @intf_assoc:      array of interface association descriptors
+                 *                   in this configuration
+                 * @interface:       interfaces associated with this configuration
+                 *                   # no order requirement
+                 * @intf_cache:      interface information cache that available
+                 *                   even when this configuration is not activating
+                 * @extra:           extra descriptors
+                 * @extra:           valid size of memory in bytes of @extra
+                 * # @desc.bNumInterfaces stores number of currently associated
+                 *   interfaces corresponds to @interface.
+                 *   the structure usb_config_descriptor is defined in header
+                 *     <linux/usb/ch9.h>
+                 *   it is an abstraction from USB Specification.
+                 * # the objects are type of usb_interface_cache in @intf_cache
+                 *   exist for the entire life of the device
+                 * # the number of available configurations of the device is
+                 *   stored in "bNumConfigurations" of usb_device_descriptor
+                 *   structure
+                 */
+                struct usb_host_config {
+                        struct usb_config_descriptor desc;
+                        char *string;
+                        struct usb_interface_assoc_descriptor *intf_assoc[USB_MAXIADS];
+                        struct usb_interface *interface[USB_MAXINTERFACES];
+                        struct usb_interface_cache *intf_cache[USB_MAXINTERFACES];
+                        unsigned char *extra;
+                        int extralen;
+                };
+
+          Relationship
+            USB Device ----+
+                           |
+                           +----> Configuration 0
+                           |      |
+                           |      +----> Interface 0
+                           |      |      |
+                           |      |      +----> Altersetting
+                           |      |      |      |
+                           |      |      |      +----> Altset 0
+                           |      |      |      |
+                           |      |      |      +----> Altset 1
+                           |      |      |      |
+                           |      |      |     ...
+                           |      |      |
+                           |      |      +----> Endpoint
+                           |      |             |
+                           |      |             +----> Endpoint 0
+                           |      |             |
+                           |      |             +----> Endpoint 1
+                           |      |             |
+                           |      |            ... 
+                           |      |
+                           |      +----> Interface 1
+                           |      |      |
+                           |      |      +----> Altersetting
+                           |      |      |      |
+                           |      |      |      +----> Altset 0
+                           |      |      |      |
+                           |      |      |      +----> Altset 1
+                           |      |      |      |
+                           |      |      |     ...
+                           |      |      |
+                           |      |      +----> Endpoint
+                           |      |             |
+                           |      |             +----> Endpoint 0
+                           |      |             |
+                           |      |             +----> Endpoint 1
+                           |      |             |
+                           |      |            ...     
+                           |      |
+                           |     ...
+                           |
+                           +----> Configuration 1
+                           |      |
+                           |     ...
+                          ...
