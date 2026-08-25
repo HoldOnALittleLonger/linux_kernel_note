@@ -4760,3 +4760,96 @@ USB Drivers :
                            |      |
                            |     ...
                           ...
+
+        USB and Sysfs
+          a USB device in sysfs,consists of a usb_device and multiple
+          usb_interface(s),each interface is treated as a individual device.
+    
+          /* usb_device has struct device inner,and same as usb_interface. */
+          /* 1 => USB Bus Number -- root_hub's number
+           * 7 => USB Port -- hub port
+           */
+          /sys/bus/usb/devices/1-7
+                               |
+                              ...
+                               |
+                               +--> devnum /* Device Number */
+                               |
+                               +--> idProduct /* Product ID */
+                               |
+                               +--> idVendor /* Vendor ID */
+                               |
+                               +--> bConfigurationValue
+                               |    /* Current Configuration Number,
+                               |     * we can write a new value into
+                               |     * it to change configuration.
+                               |     */
+                              ...
+                               |
+                               +--> 1-7:1.0 /* Interface 0 */
+                               |     |
+                               |     +--> bInterfaceNumber
+                               |     |
+                               |     +--> bNumEndpoints
+                               |     |
+                               |    ...
+                               |
+                               +--> 1-7:1.1 /* Interface 1 */
+                                    |
+                                   ...
+
+          USB Controller is a bridge between PCI bus and USB bus.
+          it residing on PCI bus,0000:00:14.0.
+                         +-- kobject             +-- kobject
+                         |                       |   USB Bus 1
+                         V                       V   
+            /sys/devices/pci0000:00/0000:00:14.0/usb1/1-7
+                 #^kset             #^kobject         #^kobject
+                                      USB Controller
+
+          driver bound to this device at
+            /sys/bus/usb/drivers/usb
+          in the directory,the device managed by this usb driver are
+          represented as symlinks to the device kobject.
+
+          the first device on the USB bus is a root hub,which residing
+          on port 01 of the USB bus with device ID 01.
+          we can consider it is a part from USB Controller,used to
+          connects PCI Bus and USB Buses.
+
+                            +--> pci0000:00:14.0 <= USB Controller
+                            |
+                  *************************** pci0000:00
+                            ^
+                            |
+                   +--------+
+                   | 
+                  [+========================] usb1
+                   |
+                  [+========================] usb2
+                   |
+                   +--> root_hub(s)
+
+                  0000:00:14.0/usb1/bDeviceClass <= 09 <= USB_CLASS_HUB
+
+          each USB root_hub will be assigned a unique number by usb core,
+          there is no limit on the number of root_hub(s).
+          each USB device on the bus takes the number of the root hub as
+          the first number in its name -- '1' of 1-7.
+          /* the root_hub also is used to represents the USB Bus */
+          thus the naming style is
+            @root_hub_number-@hub_port:@config.@interface
+
+            # 1-7:1.0
+              1-7/bDeviceClass <= 00 <= USB_CLASS_PER_INTERFACE
+              1-7:1.0/bInterfaceClass <= 03 <= USB_CLASS_HID
+
+          ! sysfs only show the detail of current configuration of the USB
+            device,the details of configurations may contained by this
+            USB device would not shown.(as well as the include endpoints)    
+
+    
+
+                  
+
+                  
