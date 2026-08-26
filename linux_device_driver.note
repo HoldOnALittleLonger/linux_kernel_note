@@ -4542,9 +4542,10 @@ USB Drivers :
                  *                     byteorder
                  * @urb_list:          urbs queued to this endpoint,maintained by
                  *                     usbcore
-                 * @hcpriv:            for use by HCD,typically holds hardware dma
-                 *                     queue head(QH) with one or more transfer
-                 *                     descriptors(TDs) per urb
+                 * @hcpriv:            for use by HCD -- Host Controller Driver,
+                 *                     typically holds hardware dma queue head(QH)
+                 *                     with one or more transfer descriptors(TDs)
+                 *                     per urb
                  * @ep_dev:            ep_device for sysfs
                  * @ss_ep_comp:        companion descriptor information for
                  *                     this endpoint
@@ -4846,7 +4847,216 @@ USB Drivers :
 
           ! sysfs only show the detail of current configuration of the USB
             device,the details of configurations may contained by this
-            USB device would not shown.(as well as the include endpoints)    
+            USB device would not shown.(as well as the include endpoints)
+
+        USB Urbs
+          USB Request Block -- urb,it is used by USB code communicates with
+          all USB devices.
+
+          <linux/usb.h>
+            /**
+             * urb - USB Request Block
+             * @kref:
+             *       URB refcounter
+             * @hcpriv:
+             *       host controller private data
+             * @use_count:
+             *       concurrent submissions counter
+             * @reject:
+             *       submissions will fail
+             * @unlinked:
+             *       unlink error code
+             *
+             * @urb_list:
+             *       current owner list
+             * @anchor_list:
+             *       membership in the list of an anchor
+             * @anchor:
+             *       pointer to anchor URBs to a common mooring
+             * @dev: the USB device
+             * @ep:  host endpoint
+             * @pipe:
+             *       holds endpoint number,direction,type,and more
+             *       # value can be created through
+             *           usb_[snd | rcv]@TYPE@pipe(dev, endpoint)
+             *           snd => send
+             *           rcv => receive
+             *
+             *           TYPE: ctrl, bulk, int, iso
+             *                 CONTROL, BULK, INTERRUPT, ISOCHRONOUS
+             * @status:
+             *       read in non-iso completion functions to get the
+             *       status of the particular request
+             * @transfer_flags
+             *       flags affect how URB submission,unlinking,
+             *       ,or operations are handled
+             * @transfer_buffer:
+             *       identifies the buffer to/from which the I/O
+             *       request will be performed unless URB_NO_TRANSFER_DMA_MAP
+             *       is set
+             *       # if do not use buffer,should ensure no garbage lied on it
+             *       # if use buffer,it must be suitable for DMA
+             * @transfer_dma:
+             *       if URB_NO_TRANSFER_DMA_MAP is set in flags,the device
+             *       driver needs to provide the DMA address,in this case,
+             *       host controller driver should use in preference to the
+             *       @transfer_buffer
+             * @sg:  scatter gather buffer list
+             * @num_sgs:
+             *       number of sgs
+             * @transfer_buffer_length:
+             *       @transfer_buffer length
+             *       # == 0 => neither @transfer_buffer nor @transfer_dma is used
+             * @actual_length:
+             *       tell how many bytes were transfered
+             * @setup_packet:
+             *       only used for control transfers,points to eight bytes of
+             *       setup data
+             * @setup_dma:
+             *       for control transfers with URB_NO_SETUP_DMA_MAP set,in this
+             *       case,device driver needs to provide DMA address for the
+             *       setup packet
+             * @start_frame:
+             *       returns the initial frame for isochronous transfers
+             * @number_of_packets:
+             *       lists the number of ISO transfer buffers
+             * @interval:
+             *       polling interval for interrupt or isochronous transfers
+             * @error_count:
+             *       returns the number of ISO transfers that reported errors
+             * @context:
+             *       for use in completion functions,blob data
+             * @complete:
+             *       completion handler
+             * @iso_frame_desc:
+             *       used to provide arrays of ISO transfer buffers and
+             *       to collect the transfer status for each buffer
+             *       # multiple ISO transfers in a URB,or collects the
+             *         status of each individual transfer
+             */
+            struct urb {
+                    /* private: */
+                    struct kref kref;
+                    void *hcpriv;
+                    atomic_t use_count;
+                    atomic_t reject;
+                    int unlinked;
+
+                    /* public: */
+                    struct list_head urb_list;
+                    struct list_head anchor_list;
+                    struct usb_anchor *anchor;
+                    struct usb_device *dev;
+                    struct usb_host_endpoint *ep;
+                    unsigned int pipe;
+                    int status;
+                    unsigned int transfer_flags;
+                    void *transfer_buffer;
+                    dma_addr_t transfer_dma;
+                    struct usb_sg_request *sg;
+                    int num_sgs;
+                    u32 transfer_buffer_length;
+                    u32 actual_length;
+                    unsigned char *setup_packet;
+                    dma_addr_t setup_dma;
+                    int start_frame;
+                    int number_of_packets;
+                    int interval;
+
+                    int error_count;
+                    void *context;
+                    usb_complete_t complete;
+                    struct usb_iso_packet_descriptor iso_frame_desc[0];
+            };
+
+            /* the following are flags in @transfer_flags,
+             * each can be combined with others.
+             */
+
+            /* report short reads as errors */
+            URB_SHORT_NOT_OK 0x0001
+
+            /* ISOCHRONOUS only,urb->start_frame */
+            URB_ISO_ASAP 0x0002
+
+            /* make use @transfer_dma */
+            URB_NO_TRANSFER_DMA_MAP 0x0004
+
+            /* make use @setup_dma */
+            URB_NO_SETUP_DMA_MAP 0x0008
+
+            /* UHCI-specific */
+            URB_NO_FSBR 0x0020
+
+            /* Finish bulk OUT with short packet */
+            URB_ZERO_PACKET 0x0040
+
+            /* HINT: no non-error interrupt needed */
+            URB_NO_INTERRUPT 0x0080
+
+            /* free transfer buffer with the URB */
+            URB_FREE_BUFFER 0x0100
+
+            /* flags used internally by usb core and HCDs */
+                                                    #^Host Controller Driver
+
+            /* transfer from device to host */
+            URB_DIR_IN 0x0200
+
+            /* transfer from host to device */
+            URB_DIR_OUT 0
+
+            /* direction mask */
+            URB_DIR_MASK URB_DIR_IN
+
+            /* non-scatter-gather mapping */
+            URB_DMA_MAP_SINGLE 0x00010000
+
+            /* HCD-unsupported S-G */
+            URB_DMA_MAP_PAGE 0x00020000
+
+            /* HCD-supported S-G */
+            URB_DMA_MAP_SG 0x00040000
+
+            /* HCD-local-memory mapping */
+            URB_DMA_LOCAL 0x00080000
+
+            /* setup packet DMA mapped */
+            URB_SETUP_MAP_SINGLE 0x00100000
+
+            /* HCD-local setup packet */
+            URB_SETUP_MAP_LOCAL 0x00200000
+
+            /* S-G entries were combined */
+            URB_SETUP_SG_COMBINED 0x00400000
+
+          urb on USB endpoint follows asynchronous manner.device driver
+          may allocates many urbs for a single endpoint,or reuse a urb
+          on multiple endpoints.
+          every endpoint in the device can handle a queue of urbs.
+                  driver create URB
+                          |
+                  assign ep for the URB
+                          |
+                  submit to USB core
+                          |
+                  submit to USB host controller
+                          |
+                  USB host controller make a transfer
+                          |
+                  Device ack and handle
+                          |
+                  URB completed
+                          |
+                  USB host controller notifies driver
+
+          URB supports cancel,by driver or by USB core if device removed.
+          URB may automatically destroyed when last user of URB leave.
+
+          ! USB core supports no URB communication,but that may has a
+            slower transferring speed.
+          
+            
 
     
 
