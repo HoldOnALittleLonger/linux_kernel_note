@@ -2531,7 +2531,7 @@ Chapter 3 : Processes
 
           /** initialize local wait_queue_t object.
            *  ->private := current
-           *  ->func := autoremove_wake_func
+           *  ->func := autoremove_wake_function
            */
           #define init_wait(wait)
 
@@ -2673,7 +2673,7 @@ Chapter 3 : Processes
                     DEFINE_WAIT(__wait);                                         \
                                                                                  \
                     for (;;) {                                                   \
-                            prepare_to_wait (wq, &__wait, TASK_UNINTERRUPTIBLE); \
+                            prepare_to_wait(wq, &__wait, TASK_UNINTERRUPTIBLE);  \
                             if (condition)                                       \
                                     break;                                       \
                             schedule();                                          \
@@ -2683,11 +2683,11 @@ Chapter 3 : Processes
           
 
           /*  wait_event - "current" waiting for @condition gets TRUE.
-           *  @wq : the wait queue head pointer.
-           *  @condition : the condition is a C expression.
-           *  #  "current" will enter TASK_UNINTERRUPTIBLE state.
-           *     @condition will be checked each time @wq is woken up.
-           *  #  function wake_up() is used to wake a wait_queue up.
+           *  @wq:         the wait queue head pointer.
+           *  @condition:  the condition is a C expression.
+           *  # "current" will enter TASK_UNINTERRUPTIBLE state.
+           *    @condition will be checked each time @wq is woken up.
+           *  # function wake_up() is used to wake a wait_queue up.
            */          
           #define wait_event(wq, condition)     \
           do {                                  \

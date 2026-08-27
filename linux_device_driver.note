@@ -4882,7 +4882,7 @@ USB Drivers :
              *           snd => send
              *           rcv => receive
              *
-             *           TYPE: ctrl, bulk, int, iso
+             *           TYPE: ctrl, bulk, int, isoc
              *                 CONTROL, BULK, INTERRUPT, ISOCHRONOUS
              * @status:
              *       read in non-iso completion functions to get the
@@ -4922,17 +4922,24 @@ USB Drivers :
              *       lists the number of ISO transfer buffers
              * @interval:
              *       polling interval for interrupt or isochronous transfers
+             *       # for full speed and low speed USB device,unit is milliseconds.
+             *         for highspeed and superspeed USB device,unit is 1/8 milliseconds
+             *         ! frame => millisecond
+             *           microframe => 1/8 millisecond
              * @error_count:
              *       returns the number of ISO transfers that reported errors
              * @context:
              *       for use in completion functions,blob data
              * @complete:
              *       completion handler
+             *       # typedef void (*usb_complete_t)(struct urb *);
              * @iso_frame_desc:
              *       used to provide arrays of ISO transfer buffers and
              *       to collect the transfer status for each buffer
              *       # multiple ISO transfers in a URB,or collects the
              *         status of each individual transfer
+             * # USB device driver should never access the private fields
+             *   until @complete is called.
              */
             struct urb {
                     /* private: */
@@ -5055,11 +5062,235 @@ USB Drivers :
 
           ! USB core supports no URB communication,but that may has a
             slower transferring speed.
+
+        Create/Destroy URB
+          URB must never be created staticlly in a driver or within another
+          structure,because that will break refcounter maintained by USB core.
+
+          <linux/usb.h>
+            /**
+             * usb_alloc_urb - create a new urb for a USB driver to use
+             * @iso_packets:   number of ISO packets for this urb
+             * @mem_flags:     GFP flags
+             * return:         pointer to the urb OR NULL
+             * # EXPORT_SYMBOL_GPL
+             * # this function just invokes kmalloc() to allocate urb descriptor,
+             *   and the struct usb_iso_packet_descriptor objects that number
+             *   depends on @iso_packets.
+             *   if succeed to allocate urb,invoke usb_init_urb() to initialize
+             *   it.
+             * # about usb_init_urb(),it just fill all fields to _zero_,and
+             *   initialize ->kref and ->anchor_list members.
+             *   ** kref_init() to set internal refcounter to 1
+             */
+            struct urb *usb_alloc_urb(int iso_packets, gfp_t mem_flags);
+
+            /* just kref_put() ->kref member of @urb.
+             * the destructor passed to kref_put() is function
+             * urb_destroy()
+             * # EXPORT_SYMBOL_GPL
+             */
+            void usb_free_urb(struct urb *urb);
+
+            /**
+             * urb_destroy - callback to kref for destroy a urb
+             * @kref:        the ->kref of urb
+             * # this function is defined in <drivers/usb/core/urb.c>,
+             *   with static linkage
+             * # if URB_FREE_BUFFER is specified in flags,then kfree()
+             *   ->transfer_buffer before kfree() the urb
+             */
+            static void urb_destroy(struct kref *kref);
+
+        Fill a URB
+          kernel provides several helpers to help driver fill the URB depends
+          its type,but some values should be provided by the caller.
+
+          <linux/usb.h>
+            /**
+             * usb_fill_int_urb - fill an INTERRUPT URB
+             * @urb:              urb descriptor
+             * @dev:              the target USB device
+             * @pipe:             the endpoint information
+             * @transfer_buffer:  pointer to transfer buffer
+             * @buffer_length:    ->transfer_buffer_length
+             * @complete_fn:      callback when the URB completed
+             * @context:          blob data for @complete_fn
+             * @interval:         polling interval for INTERRUPT endpoint
+             * # this function use parameters to setup @urb's fields.
+             *   if @dev->speed is USB_SPEED_HIGH or is USB_SPEED_SUPER,
+             *   the ->interval is set to the result from
+             *     1 << (@interval - 1)
+             *     ** highspeed and superspeed microframes interval
+             *   otherwise,remains no changed.
+             *   ->start_frame is set to -1 default.
+             */
+            static inline void usb_fill_int_urb(struct urb *urb, struct usb_device *dev,
+                                                unsigned int pipe, void *transfer_buffer,
+                                                int buffer_length, usb_complete_t complete_fn,
+                                                void *context, int interval);
+
+            /* for BULK URB,no polling interval
+             * @start_frame unchanged.
+             */
+            static inline void usb_fill_bulk_urb(struct urb *urb, struct usb_device *dev,
+                                                 unsigned int pipe, void *transfer_buffer,
+                                                 int buffer_length, usb_complete_t complete_fn,
+                                                 void *context);
+
+            /* for CONTROL URB,requires setup_packet.
+             * @start_frame unchanged.
+             */
+            static inline void usb_fill_control_urb(struct urb *urb, struct usb-device *dev,
+                                                    unsigned int pipe, unsigned char *setup_packet,
+                                                    void *transfer_buffer, int buffer_length,
+                                                    usb_complete_t complete_fn, void *context);
+
+            !! THE THREE FUNCTIONS LISTED ABOVE ALMOST ONLY MODIFY THE FIELDS THAT CORRESPONDING
+               TO PARAMETERS,EXCEPT INTERRUPT URB's @start_frame IS DEFAULT TO -1.
+            !! THERE IS NO ISOCHRONOUS URB HELPER PROVIDED BY KERNEL,THE DRIVER NEEDS TO FILL
+               SUCH URB BY ITSELF.
+                 e.g.
+                   struct urb *iso_urb = usb_alloc_urb(4, GFP_KERNEL);
+                   if (!iso_urb)
+                           return -ENOMEM;
+
+                   iso_urb->dev = THE_USB_DEVICE;
+                   iso_urb->context = THE_CONTEXT;
+                   iso_urb->pipe = usb_sndisocpipe(THE_USB_DEVICE, THE_CONTEXT->endpoint);
+                   iso_urb->interval = 1;
+                   iso_urb->transfer_flags = URB_ISO_ASAP;
+                   ...
+                   for (u8 i = 0; i < 4; ++i) {
+                           iso_urb->iso_frame_desc[i].offset = i;
+                           iso_urb->iso_frame_desc[i].length = 1;
+                   }
+
+        Submitting URBs
+          the interface handle submitting urbs provided by USB core is
+          usb_submit_urb().
+
+          <drivers/usb/core/urb.c>
+            /**
+             * usb_submit_urb - submit a urb to USB core
+             * @urb:            descriptor
+             * @mem_flags:      GFP flags can be used in kmalloc()
+             * return:          0 OR error code
+             * # the completion of URB is asynchronously,and the
+             *   logic is described by urb->complete,there are
+             *   three types of completion
+             *     success, error, unlink
+             *   when the completion function is called,control of
+             *   the URB is returned to the device driver.
+             * # URBs may be submitted in interrupt context,through
+             *   this function,because it is asynchronous path.
+             *   if we submitting URB in the interrupt context,
+             *   @mem_flags cant contains the flags that may cause
+             *   sleeping.
+             *     GFP_ATOMIC in
+             *       URB completion handler
+             *       interrupt
+             *       bottom half
+             *       tasklet
+             *       timer
+             *       holding a lock(spinlock, rwlock, except semaphore)
+             *       current->state != TASK_RUNNING(probably changed by driver itself)
+             *     GFP_NOIO in
+             *       block I/O path
+             *       error handling of storage devices
+             *     GFP_NOFS (un-implemented)
+             *     GFP_KERNEL in
+             *       all other cases
+             * # for INTERRUPT and ISOCHRONOUS urb,->interval is
+             *   modified to reflect the actual transfer period
+             *   used,if submission successed.
+             *   for ISOCHRONOUS urb,->start_frame is modified to
+             *   reflect when the URB's transfers were scheduled to
+             *   start.
+             */
+            int usb_submit_urb(struct urb *urb, gfp_t mem_flags);
+
+            ! after USB core has done some special handling to the URB,it
+              submit this URB to HCD code,through usb_hcd_submit_urb().
+              # will be enqueued into the urb queue of that particular
+                endpoint.
+
+            ! usb_bulk_msg() and usb_control_msg() are synchronous communication.
+              usb_control_msg() is more often used in non-interrupt context.
+
+            device driver created URB (control of URB held by device driver)
+                    |
+                    V
+              call usb_submit_urb() (control of URB held by USB core)
+                    |
+                    V
+              call usb_hcd_submit_urb() (control of URB held by HCD code,belongs
+                    |                    USB core)
+                    |
+                    V
+              URB completed,completion handler called (control of URB returned to
+                                                       device driver)
+
+        Completing URBs
+          the case a URB can be finished
+            1> transfering succeed(to device OR from device)
+            2> error happend,error code is stored in ->status
+            3> URB was "unlinked" from the URB core
+                 > device driver called usb_unlink_urb() / usb_kill_urb()
+                   # request USB core cancel this submitted URB
+                 > USB device is removed from the system and a URB had
+                   been submittd to it
+          when the URB completed,the completion handler will be called once.
+
+          ! usually,the completion handler will be executed in a bottom half
+            mechanism,such tasklet.
+            and that is scheded by HCD code,not USB core.
+            for example,the HCD c67x00,it will kicks the tasklet at the following
+            cases
+              > ->enqueue() is called
+              > endpoint disabled
+              > IRQ Service Routine
+
+        Cancel URB
+          USB core provides two routines to cancel a been submitted URB.
+
+          <drivers/usb/core/urb.c>
+            /**
+             * usb_kill_urb - cancel a transfer request and wait for it to
+             *                finish
+             * @urb:          descriptor
+             * # EXPORT_SYMBOL_GPL
+             * # NULL @urb,->dev,->ep will cause this routine returns
+             *   immediately.(->ep should be set by USB core)
+             * # this function invokes usb_hcd_unlink_urb() to unlink the
+             *   URB from the queue,and set ->status to -ENOENT.
+             *   then call to wait_event() to wait on @usb_kill_urb_queue,
+             *   until @urb->use_count becomes _zero_ -- control giveback
+             * # this routine increase ->reject before it unlink urb,and
+             *   decrease ->reject after wait finished.
+             */
+            void usb_kill_urb(struct urb *urb);
+
+            /**
+             * usb_unlink_urb - similar to usb_kill_urb() but does not wait
+             *                  for ->use_count becomes _zero_
+             * @urb:            descriptor
+             * return:          -EINVAL => NULL @urb
+             *                  -ENODEV => NULL @urb->dev
+             *                  -EIDRM  => NULL @urb->ep
+             *                  otherwise,returns the value what the function
+             *                  usb_hcd_unlink_urb() returned
+             * # EXPORT_SYMBOL_GPL
+             * # this function request usb_hcd_unlink_urb() to set ->status
+             *   to -ECONNRESET.
+             */
+            int usb_unlink_urb(struct urb *urb);
+
+            ! @usb_kill_urb_queue is defined in <drivers/usb/hcd.c>.
+              when usb_kill_urb() is called,the wait completion handler
+              is the autoremove_wake_function(),which will calls to
+              default_wake_function().
+              the entrypoint of this calling path is wake_up() family
+              routines.
+              
           
-            
-
-    
-
-                  
-
-                  
