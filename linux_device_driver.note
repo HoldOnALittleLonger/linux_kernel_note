@@ -3276,7 +3276,17 @@ Linux Device Model :
 
                     /* Linux Device Model device driver */
                     struct device_driver driver;
-    
+
+                    /**
+                     * dynids is used for dynamically add/remove device id
+                     * when the driver is running(loaded).
+                     * @id_table is pre-defined,if our driver can handles
+                     * a new connected PCI device,we can store its id into
+                     * this driver by write ID into sysfs attribute @new_id.
+                     * then pci_add_dynid() is called,and driver_attach()
+                     * will be called again to probe PCI devices.
+                     * # dynamically extensibility.
+                     */
                     struct pci_dynids dynids;                
             };
 
@@ -5293,4 +5303,305 @@ USB Drivers :
               the entrypoint of this calling path is wake_up() family
               routines.
               
+        USB Device Driver
+          struct usb_device_id
+            /* header: <linux/mod_devicetable.h> */
+            structure provides a list of different types of USB devices that
+            the driver supports.
+              ->match_flags : __u16
+                bit mask controlling of the other fields are used to match
+                against new devices.
+                  USB_DEVICE_ID_MATCH_VENDOR 0x0001
+                                    *_PRODUCT 0x0002
+                                    *_DEV_LO 0x0004
+                                    *_DEV_HI 0x0008
+                                    *_DEV_CLASS 0x0010
+                                    *_DEV_SUBCLASS 0x0020
+                                    *_DEV_PRODUCT 0x0040
+                                    *_INT_CLASS 0x0080
+                                    *_INT_SUBCLASS 0x0100
+                                    *_INT_PROTOCOL 0x0200
+    
+              ->idVendor : __u16
+                USB Vendor ID
+    
+              ->idProduct : __u16
+                USB Product ID
+    
+              ->bcdDevice_lo : __u16
+                low end of range of vendor-assigned product version numbers
+    
+              ->bcdDevice_hi : __u16
+                high end of version number range,the range of product versions is
+                inclusive
+              /* higher [bcdDevice_hi, bcdDevice_lo] lower => total 32 bits
+               * BCD format => binary coded decimal
+               * for exmaple, hi = 0x0024, lo = 0x2310
+               * [hi, lo] => 0x00242310
+               * binary => 00000000,00100100,00100011,00010000
+               * decimal => 242310 (not hex value)
+               * ** packed BCD
+               */
+    
+              ->bDeviceClass : __u8
+                class of device
+    
+              ->bDeviceSubClass : __u8
+                subclass of device
+    
+              ->bDeviceProtocol : __u8
+                protocol of device
+    
+              ->bInterfaceClass : __u8
+                class of interface
+    
+              ->bInterfaceSubClass : __u8
+                subclass of interface
+    
+              ->bInterfaceProtocol : __u8
+                protocol of interface
+    
+              ->driver_info : kernel_ulong_t
+                holds information used by driver,usually is a pointer
+                to a descriptor understood by the driver,or perhaps
+                device flags
+
+            this structure usually is initialized by USB_DEVICE_*() macros,not
+            initialized directly.the macros are defined in <linux/usb.h>.
+              USB_DEVICE(vend, prod)
+                ->match_flags = USB_DEVICE_ID_MATCH_DEVICE
+                ->idVendor = vend
+                ->idProduct = prod
+              USB_DEVICE_VER(vend, prod, lo, hi)
+                                                   /* *_MATCH_DEV_LO | *_MATCH_DEV_HI */
+                                /* *_MATCH_DEVICE | *_MATCH_DEV_RANGE */
+                ->match_flags = USB_DEVICE_ID_MATCH_DEVICE_AND_VERSION
+                                  /* *_MATCH_VENDOR |
+                                   * *_MATCH_PRODUCT
+                                   */
+                ->idVendor = vend
+                ->idProduct = prod
+                ->bcdDevice_lo = lo
+                ->bcdDevice_hi = hi
+              USB_DEVICE_INTERFACE_PROTOCOL(vend, prod, pr)
+                ->match_flags = USB_DEVICE_ID_MATCH_DEVICE |
+                                USB_DEVICE_ID_MATCH_INT_PROTOCOL
+                ->idVendor = vend
+                ->idProduct = prod
+                ->bInterfaceProtocol = pr
+              USB_DEVICE_INFO(cl, sc, pr)
+                ->match_flags = USB_DEVICE_ID_MATCH_DEV_INFO
+                ->bDeviceClass = cl
+                ->bDeviceSubClass = sc
+                ->bDeviceProtocol = pr
+              USB_INTERFACE_INFO(cl, sc, pr)
+                ->match_flags = USB_DEVICE_ID_MATCH_INT_INFO
+                ->bInterfaceClass = cl
+                ->bInterfaceSubClass = sc
+                ->bInterfaceProtocol = pr
+              USB_DEVICE_AND_INTERFACE_INFO(vend, prod, cl, sc, pr)
+                ->match_flags = USB_DEVICE_ID_MATCH_INT_INFO |
+                                USB_DEVICE_ID_MATCH_DEVICE
+                ->idVendor = vend
+                ->idProduct = prod
+                ->bInterfaceClass = cl
+                ->bInterfaceSubClass = sc
+                ->bInterfaceProtocol = pr
+    
+              e.g.
+                struct usb_device_id the_device = {
+                        USB_DEVICE(046a, 01bb),
+                };
+
+            when we creating a device id table for the driver,we need to use
+            NULL end in that array -- last element filled with _zero_.
+            besides,need to use macro MODULE_DEVICE_TABLE(usb, @table_name) to
+            expose the id table to userspace.
+            /* like the PCI table */
+
+          struct usb_driver
+            usb interface driver descriptor,defined in header <linux/usb.h>.
+
+            /**
+             * usb_driver - identifies USB interface driver
+             * @name:       name of this driver
+             * @probe:      called by bus to probe interface
+             *              # may sleep
+             * @disconnect: method for the interface is no longer accessile
+             *              # device removed or module unloaded
+             *              # may sleep
+             * @ioctl:      used for drivers that want to talk to userspace
+             *              through the "usbfs" filesystem -- under procfs
+             * @suspend:    for device is going to be suspended by the system
+             * @resume:     for device is being resumed by the system
+             * @reset_resume:
+             *              for suspended device has been reset instead of
+             *              being resumed
+             * @pre_reset:  called before reset
+             * @post_reset: called after reset
+             *              # both called by usb_reset_device()
+             * @id_table:   id table to support hotplugging
+             *              # if this member is not set,@probe would never get
+             *                called by USB core
+             * @dynids:     list of dynamically added device ids for this driver
+             *              # like the pci driver
+             * @drvwrap:    driver wrapper,->for_devices should be _zero_
+             * @no_dynamic_id:
+             *              1 => USB core will not allow dynamic ids to be added
+             *                   to this driver to preventing the sysfs file from
+             *                   being created
+             *                   # dynamic id used for manually binding
+             * @supports_autosuspend:
+             *              0 => USB core will not allow autosuspend for interfaces
+             *                   bound to this driver
+             * @soft_unbind:
+             *              1 => USB core will not kill URBs and disable endpoints
+             *                   before calling the driver's @disconnect
+             * ! @name,@probe,@disconnect,@id_table are mandatory,others are optional.
+             */
+            struct usb_driver {
+                    const char *name;
+    
+                    int (*probe)(struct usb_interface *intf,
+                                 const struct usb_device_id *id);
+                    void (*disconnect)(struct usb_interface *intf);
+                    int (*ioctl)(struct usb_interface *intf, unsigned int code,
+                                 void *buf);
+                    int (*suspend)(struct usb_interface *intf, pm_message_t message);
+                    int (*resume)(struct usb_interface *intf);
+                    int (*reset_resume)(struct usb_interface *intf);
+                    int (*pre_reset)(struct usb_interface *intf);
+                    int (*post_reset)(struct usb_interface *intf);
+
+                    const struct usb_device_id *id_table;
+                    struct usb_dynids dynids;
+                    struct usbdrv_wrap drvwrap;
+                    unsigned int no_dynamic_id:1;
+                    unsigned int supports_autosuspend:1;
+                    unsigned int soft_unbound:1;
+            };
+
+            to_usb_driver(d) => retrieve usb_driver descriptor from @d.
+
+            !! struct usb_driver IDENTIFIES THE INTERFACE DRIVER,LINUX DEVICE MODLE
+               TREATS THE USB INTERFACE AS AN INDIVIDUAL DEVICE,AND DRIVER WILL
+               BE BOUND TO A INTERFACE.
+
+            dynamic usb ids
+              struct usb_dynids {
+                      spinlock_t lock;
+                      struct list_head list;  <-----+
+              };                                    |
+                                                    |
+              struct usb_dynid {                    |
+                      struct list_head node;  ------+ connected to
+                      struct usb_device_id id;
+              };
+
+          struct usb_device_driver
+            usb device driver descriptor,defined in header <linux/usb.h>.
+              ->name : const char *
+                driver name
+
+              ->drvwrap : struct usbdrv_wrap
+                the wrapper for driver-model,in which a member named @driver
+                is type of struct device_driver;and another member named
+                @for_devices is type of int,if its value is non-zero,that
+                means this wrapper is used for device drivers,_zero_ means
+                for interface drivers
+
+              ->supports_autosuspend : unsigned int:1
+                0 means USB core will not allow autosuspend for devices bound
+                to this driver
+
+              ->probe : int(*)(struct usb_device *udev)
+                method for device probe,called by bus
+
+              ->disconnect : void(*)(struct usb_device *udev)
+                method for when the device is no longer accessible,usually is
+                because the device is disconnected,or driver module unloaded
+
+              ->suspend : int(*)(struct usb_device *udev, pm_message_t message)
+                method for suspend USB device
+
+              ->resume : int(*)(struct usb_device *udev, pm_message_t message)
+                method for resume USB device from suspend state
+
+            macro to_usb_device_driver(d),can helps us to convert a device_driver
+            descriptor to usb_device_driver descriptor -- through container_of()
+            agains @drvwrap.driver .
+
+            !! struct usb_device_driver IDENTIFIES USB DEVICE DRIVER,NOT THE
+               INTERFACE DRIVER,IT SHOULD TAKE CARE OF THE WHOLE USB DEVICE,
+               THE WORK ABOUT AN INTERFACE SHOULD BE HANDED OVER TO THE
+               struct usb_driver.
+
+          registeration/unregisteration
+            USB core provides procedures to register/unregister USB device
+            driver and USB interface driver,all of them are defined in
+            <drivers/usb/core/driver.c>.
+
+            <drivers/usb/core/driver.c>
+              /* USB device driver */
+              /**
+               * usb_register_device_driver - register a USB device driver to
+               *                              USB core
+               * @new_udriver:                usb device driver descriptor
+               * @owner:                      usually is THIS_MODULE
+               * return:                      0 OR error code
+               * # EXPORT_SYMBOL_GPL
+               * # this routine will
+               *     1> setup ->drvwrap's members,include inner of the
+               *        device_driver object;->for_devices is set to 1.
+               *          ->bus = &usb_bus_type
+               *          ->probe = usb_probe_device
+               *          ->remove = usb_unbind_device
+               *          ->name = @new_udriver->name
+               *          ->owner = @owner
+               *     2> call the driver core's API driver_register() on the
+               *        device_driver object,to add this driver into
+               *        Linux Device Model
+               *     3> if we succeed to register new driver,will invoke
+               *        usbfs_update_special(),this function will update
+               *        i_atime,i_mtime,i_ctime of the dentry @devices_usbfs_dentry
+               *        # this dentry has bound a fops descriptor,when we read
+               *          from the file,read method will iterates each usb bus
+               *          and dump them to get USB devices informations
+               */
+              int usb_register_device_driver(struct usb_device_driver *new_udriver,
+                                             struct module *owner);
+
+              /* driver_unregister() and update usbfs again
+               * # EXPORT_SYMBOL_GPL
+               */
+              void usb_deregister_device_driver(struct usb_device_driver *udriver);
+                                                
+              /* USB interface driver */
+              /**
+               * usb_register_driver - register a USB interface driver
+               * @new_driver:          interface driver descriptor
+               * @owner:               usually is THIS_MODULE
+               * @mod_name:            name of module
+               * return:               0 OR error code
+               * # EXPORT_SYMBOL_GPL
+               * # this routine is very similar to usb_register_device_driver(),
+               *   except
+               *     1> ->for_devices set to 0
+               *        ->driver.probe set to usb_probe_interface()
+               *        ->driver.remove set to usb_unbind_interface()
+               *        ->driver.mod_name set to @mod_name
+               *     2> if driver_register() succeed,after usbfs_update_special()
+               *         returned,function usb_create_newid_file() is called on
+               *         @new_driver,to creates @new_id attribute in sysfs;
+               *         function usb_create_removeid_file() is called on
+               *         @new_driver,to creates @remove_id attribute in sysfs.
+               */
+              int usb_register_driver(struct usb_driver *new_driver,
+                                      struct module *owner, const char *mod_name);
+
+              /* remove created attributes,usb_free_dynids(),and call to
+               * driver_unregister(),update usbfs through usbfs_update_special()
+               * # EXPORT_SYMBOL_GPL
+               */
+              void usb_deregister(struct usb_driver *driver);
           

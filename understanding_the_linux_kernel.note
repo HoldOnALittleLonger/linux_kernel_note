@@ -26819,7 +26819,7 @@ Chapter 13 : I/O Architecture and Device Drivers
 
           function driver_register() is used to register a device driver,when a device driver is
           being registered,the kernel checks whether the unsupported hardware device could be
-          possibly handled by the driver.this is relies on @match method of bus object and @prove
+          possibly handled by the driver.this is relies on @match method of bus object and @probe
           method of the device_driver object.if it is,kernel will bind the device with the driver
           through driver_bound(),this is happened after succeed on probe.
           /**
