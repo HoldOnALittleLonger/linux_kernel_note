@@ -5500,6 +5500,7 @@ USB Drivers :
 
           struct usb_device_driver
             usb device driver descriptor,defined in header <linux/usb.h>.
+            focus on physical hardware interaction.
               ->name : const char *
                 driver name
 
@@ -5520,6 +5521,7 @@ USB Drivers :
               ->disconnect : void(*)(struct usb_device *udev)
                 method for when the device is no longer accessible,usually is
                 because the device is disconnected,or driver module unloaded
+                # cleanup resource
 
               ->suspend : int(*)(struct usb_device *udev, pm_message_t message)
                 method for suspend USB device
@@ -5536,7 +5538,7 @@ USB Drivers :
                THE WORK ABOUT AN INTERFACE SHOULD BE HANDED OVER TO THE
                struct usb_driver.
 
-          registeration/unregisteration
+          registeration/unregisteration USB driver
             USB core provides procedures to register/unregister USB device
             driver and USB interface driver,all of them are defined in
             <drivers/usb/core/driver.c>.
@@ -5604,4 +5606,145 @@ USB Drivers :
                * # EXPORT_SYMBOL_GPL
                */
               void usb_deregister(struct usb_driver *driver);
+
+        helpers for USB interface
+          /* header: <linux/usb.h> */
+
+          /**
+           * set @intf->dev->p->driver_data to @data
+           * the structure has name "device_private" is defined in
+           * <drivers/base/base.h>,it has a member named @driver_data
+           * is type of void * .
+           */
+          static inline void usb_set_intfdata(struct usb_interface *intf, void *data);
+
+          /* get @intf->dev->p->driver_data */
+          static inline void *usb_get_intfdata(struct usb_interface *intf);
+
+          /* get this interface */
+          struct usb_interface *usb_get_intf(struct usb_interface *intf);
+
+          /* put this interface,if kref becomes _zero_,auto cleanup */
+          void usb_put_intf(struct usb_interface *intf);
+
+          ! driver usually needs to save some necessary informations about the
+            USB interface and access them later,so it needs to save such data
+            into the private data of device descriptor.
+            because,most driver will initialize the device when it is opened
+            at the first time,and cleanup it when the last user leave,so
+            open() method provided by driver usually invoke usb_get_intfdata()
+            to get the endpoint's infomations.
+            # disconnect() method usually needs to get private data,too.
+
+          /**
+           * this routine will creates a local object is type of
+           *   struct find_interface_arg
+           * set its .minor member to @minor,and set its .drv member to
+           * @drv->drvwrap.driver .
+           * # it has only these two members.
+           * then invoke bus_find_device() on @usb_bus_type,callback is
+           * __find_interface(),argument is the local object's address.
+           * if found such device,convert it to usb_interface descriptor
+           * through to_usb_interface().
+           * # __find_interface(*@dev, *@data)
+           *     is_usb_interface() to test whether the device passed by
+           *     bus routine is a usb device
+           *     if the device's driver is equal to the device_driver of @drv,
+           *     return TRUE if minor is the same,FALSE otherwise.
+           */
+          extern struct usb_interface *usb_find_interface(struct usb_driver *drv,
+                                                          int minor);
+
+        registeration/unregisteration USB device
+          if a USB driver is associated with the specified subsystem such as
+          input,tty,video,etc.
+          we can just register the USB driver that takes care of USB
+          interfaces,the interaction between userspace with the particular
+          USB device is handed over to the common device driver.
+
+          when we must handle the USB device interaction with userspace by
+          ourselves,we can call usb_register_dev() in driver's probe() method,
+          call usb_deregister_dev() in driver's disconnect() method to cleanup
+          resources.
+          # this is the traditional char device interact with userspace.
+
+          <linux/usb.h>
+            /**
+             * usb_class_driver - USB driver for drivers want to use a
+             *                    major number
+             * @name:             name of this driver
+             * @devnode:          method to provide a naming hint for a
+             *                    possible device node to create
+             * @fops:             file operations
+             * @minor_base:       start of the minor range for this driver
+             */
+            struct usb_class_driver {
+                    char *name;
+                    char *(devnode)(struct device *dev, mode_t *mode);
+                    const struct file_operations *fops;
+                    int minor_base;
+            };
+
+          <drivers/usb/core/file.c>
+            /**
+             * usb_register_dev - register a USB device
+             * @intf:             pointer to the usb_interface that is being
+             *                    registered
+             * @class_driver:     pointer to the usb_class_driver for this
+             *                    device
+             * return:            0 OR error code
+             * # EXPORT_SYMBOL_GPL
+             */
+            int usb_register_dev(struct usb_interface *intf,
+                                 struct usb_class_driver *class_driver);
+
+            description for usb_register_dev() :
+              if CONFIG_USB_DYNAMIC_MINOR is set,local object @minor_base is
+              set to _zero_,otherwise is @class_driver->minor_base.
+              @class_driver->fops cant be NULL.
+              use a for loop to iterates minor numbers in the range
+                [@minor_base, MAX_USB_MINORS -- 256)
+              to find a free slot in @usb_minors[],it is an array of
+              struct file_operations * ,@class_driver->fops would be stored
+              into the free slot we found.
+              if we found,invoke init_usb_class(),this routine will kmalloc()
+              a usb_class object which address is stored in static variable
+              @usb_class in the some source file;if @usb_class been allocated,
+              just kref_get() it as well.
+              /**
+               * static struct usb_class {
+               *         struct kref kref;
+               *         struct class *class;
+               * } *usb_class;
+               *
+               * # newly created class's name is "usb",owner is THIS_MODULE.
+               *   devnode() method of the class descriptor is usb_devnode().
+               */
+              next,we set @intf->minor to the minor number we found,use the
+              name get from @class_driver->name to invoke device_create(),
+              the major number is USB_MAJOR -- 180,the minor number is the
+              number we found,the returned device descriptor will be stored into
+              @intf->usb_dev.
+              /* name makeup is done through
+               *   snprintf(@name, sizeof(@name), @class_driver->name,
+               *            @minor - @minor_base);
+               * @name is a local object is type of char[20],
+               * @minor is the minor number we found.
+               * local pointer @temp will points to the final name string,
+               * it will skip all '/' in @name.
+               */
+              finally,return 0 if no error happend,otherwise error code.
+
+            /**
+             * usb_deregister_dev - UNDO usb_register_dev()
+             * @intf:               usb interface
+             * @class_driver:       usb class driver
+             * # EXPORT_SYMBOL_GPL
+             * # at the end of this function,destroy_usb_class() will be
+             *   called,it kref_put() @usb_class->kref.
+             */
+            void usb_deregister_dev(struct usb_interface *intf,
+                                    struct usb_class_driver *class_driver);
+               
+
           
