@@ -4943,6 +4943,12 @@ USB Drivers :
              * @complete:
              *       completion handler
              *       # typedef void (*usb_complete_t)(struct urb *);
+             *       # will running in an interrupt context,so it cant sleep or
+             *         acquires a lock
+             *       # we may need to submit a new URB in complete_fn,in this case
+             *         we must specify GFP_ATOMIC in memory allocator if memory
+             *         allocation becomes necessary
+             *       # called in usb_hcd_giveback_urb()
              * @iso_frame_desc:
              *       used to provide arrays of ISO transfer buffers and
              *       to collect the transfer status for each buffer
@@ -5260,6 +5266,8 @@ USB Drivers :
               > ->enqueue() is called
               > endpoint disabled
               > IRQ Service Routine
+            # and in irq or in bottom half,usb_hcd_giveback_urb() is called,
+              complete callback of the urb is called within this routine.
 
         Cancel URB
           USB core provides two routines to cancel a been submitted URB.
@@ -5745,6 +5753,231 @@ USB Drivers :
              */
             void usb_deregister_dev(struct usb_interface *intf,
                                     struct usb_class_driver *class_driver);
-               
 
-          
+        steps to prepare a URB and submit it -- use DMA
+                        userspace
+                            |
+                            |
+                            V
+                   requrest to intf driver
+                            |
+                            |
+                            |
+                            V
+                      driver start serve user                USB Core
+                            |                                   |
+                            |                                   |
+                            +--> usb_alloc_urb()                |
+                                 usb_buffer_alloc()             |
+                                 copy_from_user()               |
+                                 usb_fill_*_urb()               |
+                                 usb_submit_urb()               V
+                                                          received request
+                                                                |
+                                                                V
+                                                          does some checking
+                                                                |
+                                                                V
+                                                          usb_hcd_submit_urb() {
+                                                            hcd->driver->urb_enqueue()
+                                                            check result of urb_enqueue()
+                                                            return status to driver
+                                                          }
+
+        allocate/deallocate DMA buffer for URB
+          there are two helpers to handle DMA buffer for a URB,the DMA buffer
+          of the URB will be coherent DMA buffer.
+
+          <linux/usb.h>
+            /**
+             * usb_buffer_alloc - wrapper for usb_alloc_coherent(),used to allocate
+             *                    a coherent DMA buffer
+             * @dev:              for which usb device
+             * @size:             size of buffer
+             * @mem_flags:        gfp flags,if in interrupt context,should use
+             *                    GFP_ATOMIC
+             * @dma:              DMA handle
+             * return:            pointer to the DMA buffer OR NULL
+             * # usb_alloc_coherent() is defined in <drivers/usb/core/usb.c>,it
+             *   will calls to hcd_buffer_alloc(),and this function is defined
+             *   in <drivers/usb/core/buffer.c>.
+             *   there will be three cases about buffer allocation
+             *     1> using PIO,use kmalloc() instead DMA buffer
+             *     2> try to use DMA pool of the hcd->pool
+             *     3> if no suitable slot is found in 2>,call to
+             *        dma_alloc_coherent()
+             */
+            static inline void *usb_buffer_alloc(struct usb_device *dev, size_t size,
+                                                 gfp_t mem_flags, dma_addr_t *dma);
+
+            /**
+             * this function is used to deallocate the DMA buffer.
+             * wrapper for usb_free_coherent(),and which will calls to
+             * hcd_buffer_free().
+             * hcd_buffer_free() UNDO hcd_buffer_alloc(),through
+             *   1> kfree() for PIO
+             *   2> dma_pool_free() for hcd->pool
+             *   3> dma_free_coherent() for the last case
+             */ 
+            static inline void usb_buffer_free(struct usb_device *dev, size_t size,
+                                               void *addr, dma_addr_t dma);
+
+          ! intf driver usually calls to usb_buffer_alloc() with @dma points to
+            urb->transfer_dma,thus URB_NO_TRANSFER_DMA_MAP needs to be enabled
+            in urb flags.
+            in complete callback,the control of URB been givenback to driver,
+            so we can free the DMA buffer in it.(or reuse it to submit another
+            URB in complete callback,"streaming data to device")
+
+        USB transfers without URBs
+          if intf driver does not want to create DMA buffer,fill URB,submit it
+          and wait for USB core executes complete callback,it can use some
+          helpers provied by kernel to send simple data to USB device.
+
+          <drivers/usb/core/message.c>
+            /**
+             * usb_bulk_msg - send simple BULK data
+             * @usb_dev:      to which USB device
+             * @pipe:         interface informations
+             * @data:         data buffer
+             * @len:          data length
+             * @actual_length:
+             *                a location where to store actual length of
+             *                data done in the transferring
+             * @timeout:      timeout value
+             * return:        0 OR error code
+             * # EXPORT_SYMBOL_GPL
+             * # actually,this function will allocates a URB,the complete
+             *   callback is usb_api_blocking_completion(),after initialized
+             *   the URB,invoke usb_start_wait_urb().
+             * # the function usb_start_wait_urb() will invoke the wait helper
+             *   wait_for_completion_timeout().in the source file,a structure
+             *   named "api_context" is defined,in which a member is named
+             *   @done which is type of struct completion,we will wait on
+             *   it to completed,its status would be changed by the callback
+             *   usb_api_blocking_completion(),the URB's @context member
+             *   points to a local object is type of struct api_context.
+             * # context: !in_interrupt()
+             */
+            int usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe,
+                             void *data, int len, int *actual_length, int timeout);
+
+            ! usb_free_urb() is called in usb_start_wait_urb().
+
+            /**
+             * similar to usb_bulk_msg(),it will kmalloc() an object is type of
+             * struct usb_ctrlrequest,fill it with @request,@requesttype,@value,
+             * @index,@size,and calls to usb_internal_control_msg(),pass it
+             *   @dev, @pipe, the object address, @data, @size, @timeout
+             * function usb_internal_control_msg() also allocate a new URB,
+             * invoke usb_fill_control_urb() to fill it,and call to
+             * usb_start_wait_urb(),the complete callback still is
+             * usb_api_blocking_completion().
+             * after usb_internal_control_msg() returned,kfree() the allocated
+             * object.
+             * # EXPORT_SYMBOL_GPL
+             * # context: !in_interrupt()
+             */
+            int usb_control_msg(struct usb_device *dev, unsigned int pipe,
+                                __u8 request, __u8 requesttype, __u16 value,
+                                __u16 index, void *data, __u16 size, int timeout);
+
+            /* helper for INTERRUPT message.
+             * # EXPORT_SYMBOL_GPL
+             * # wrapper for usb_bulk_msg()
+             * # context: !in_interrupt()
+            int usb_interrupt_msg(struct usb_device *usb_dev, unsigned int pipe,
+                                  void *data, int len, int *actual_length,
+                                  int timeout);
+
+            !! THESE FUNCTION CANT BE CANCELED BY ANY OTHER FUNCTION,THE DRIVER
+               MUST MAKE SURE THAT "disconnect" METHOD KNOWS ENOUGH TO WAIT
+               FOR THE CALL TO COMPLETE BEFORE ALLOWING THE DRIVER TO BE
+               UNLOADED FROM MEMORY.
+
+        other helpers to retrieve device descriptors
+          <linux/usb.h>
+            /**
+             * usb_get_descriptor - retrieve any of device descriptor that are
+             *                      not already present in the existing
+             *                      struct usb_device and struct usb_interface
+             *                      structures
+             *                      (it is not struct device descriptor,it is
+             *                       the information about USB device such as
+             *                       audio descriptors or other class specific
+             *                       information)
+             * @dev:                the usb device,we retrieve descriptors
+             *                      from this device
+             * @desctype:           descriptor type,there are a lot of
+             *                      macro definitions in <linux/usb/ch9.h>
+             * @descindex:          number of the descriptor that should be
+             *                      retrieved from the device
+             * @buf:                location to copy the descriptor
+             * @size:               size of buffer
+             * return:              number of bytes read from the device,
+             *                      OR error code
+             * # EXPORT_SYMBOL_GPL
+             */
+            extern int usb_get_descriptor(struct usb_device *dev,
+                                          unsigned char desctype,
+                                          unsigned char descindex,
+                                          void *buf, int size);
+
+            desctypes :
+              USB_DT_DEVICE                0x01
+              USB_DT_CONFIG                0x02
+              USB_DT_STRING                0x03
+              USB_DT_INTERFACE             0x04
+              USB_DT_ENDPOINT              0x05
+              USB_DT_DEVICE_QUALIFIER      0x06
+              USB_DT_OTHER_SPEED_CONFIG    0x07
+              USB_DT_INTERFACE_POWER       0x08
+              USB_DT_OTG                   0x09
+              USB_DT_DEBUG                 0x0a
+              USB_DT_INTERFACE_ASSOCIATION 0x0b
+              USB_DT_SECURITY              0x0c
+              USB_DT_KEY                   0x0d
+              USB_DT_ENCRYPTION_TYPE       0x0e
+              USB_DT_BOS                   0x0f
+              USB_DT_DEVICE_CAPABILITY     0x10
+              USB_DT_WIRELESS_ENDPOINT_COMP 0x11
+              USB_DT_WIRE_ADAPTER          0x21
+              USB_DT_RPIPE                 0x22
+              USB_DT_CS_RADIO_CONTROL      0x23
+              USB_DT_SS_ENDPOINT_COMP      0x30
+    
+              USB_DT_CS_DEVICE             USB_TYPE_CLASS | USB_DT_DEVICE
+              USB_DT_CS_CONFIG             USB_TYPE_CLASS | USB_DT_CONFIG
+              USB_DT_CS_STRING             USB_TYPE_CLASS | USB_DT_STRING
+              USB_DT_CS_INTERFACE          USB_TYPE_CLASS | USB_DT_INTERFACE
+              USB_DT_CS_ENDPOINT           USB_TYPE_CLASS | USB_DT_ENDPOINT
+
+              USB_TYPE_CLASS (0x01 << 5)
+
+            !! THIS FUNCTION ACTUALLY CONSTRUCT A CONTROLL MESSAGE THROUGH
+               usb_control_msg(),THE @pipe IS CONSTRUCTED THROUGH THE
+               HELPER usb_rcvctrlpipe().
+               THE MAXIMUM TIMES OF RETRIES IS 3.
+
+            /* retrieves UTF-8 version of a string descriptor from a USB
+             * device.it calls to static linkage helper usb_get_string(),
+             * which is similar to usb_get_descriptor(),get information
+             * through CONTROL message.
+             * will returns number of bytes readed from device.
+             * # EXPORT_SYMBOL_GPL
+             * # usb_get_string() will returns a string descriptor in
+             *   UTF-16LE format,but usb_string() will converts the string
+             *   to UTF-8 format.
+             */
+            extern int usb_string(struct usb_device *dev, int index, char *buf,
+                                  size_t size);
+
+            /**
+             * issues a GET_STATUS call,the @type is USB_RECIO_*,for device,
+             * interface,or endpoint.
+             * also relies on usb_control_msg().
+             * # EXPORT_SYMBOL_GPL
+             * # @request to usb_control_msg() is USB_REQ_GET_STATUS.
+             */
+            extern int usb_get_status(struct usb_device *dev, int type,
+                                      int target, void *data);
