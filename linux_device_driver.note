@@ -3043,8 +3043,8 @@ Linux Device Model :
             class_interface_register()
             class_interface_unregister()
 
-            /* registeration will class_get() the class,
-             * unregisteration will class_put() the class.
+            /* registration will class_get() the class,
+             * unregistration will class_put() the class.
              */
 
         The general steps for a device adding
@@ -3872,7 +3872,7 @@ PCI Drivers :
             the minimal initialization to pci_driver
               @name, @id_table, @probe, @remove
 
-          registeration/unregisteration
+          registration/unregistration
             /* impl: <drivers/pci/pci-driver.c>
              * return 0 if succeed,otherwise returns error code.
              * # relies on kernel driver core.
@@ -5546,7 +5546,7 @@ USB Drivers :
                THE WORK ABOUT AN INTERFACE SHOULD BE HANDED OVER TO THE
                struct usb_driver.
 
-          registeration/unregisteration USB driver
+          registration/unregistration USB driver
             USB core provides procedures to register/unregister USB device
             driver and USB interface driver,all of them are defined in
             <drivers/usb/core/driver.c>.
@@ -5663,7 +5663,7 @@ USB Drivers :
           extern struct usb_interface *usb_find_interface(struct usb_driver *drv,
                                                           int minor);
 
-        registeration/unregisteration USB device
+        registration/unregistration USB device
           if a USB driver is associated with the specified subsystem such as
           input,tty,video,etc.
           we can just register the USB driver that takes care of USB
@@ -5981,3 +5981,104 @@ USB Drivers :
              */
             extern int usb_get_status(struct usb_device *dev, int type,
                                       int target, void *data);
+
+Block Drivers :
+        Block Device Registration/Unregistration
+          /* impl: <block/genhd.c> */
+          register_blkdev()
+            - register a block device
+    
+          unregister_blkdev()
+            - unregister a block device
+
+          ! block drivers must register their devices available to the kernel
+            at first.
+          ! both routines will manipulate an array with a static linkage is
+            type of struct blk_major_name[].
+            it is a system wide collection of block device's major numbers,
+            size is 255.
+          ! register_blkdev() just used to allocating a dynamic major number
+            if requested -- @major is _zero_,and creates an entry in
+            /proc/devices .
+
+        Disk Registration/Unregistreation
+          <linux/fs.h>
+          struct block_device_operations
+            - this structure describes the available operations on a block device.
+
+          <linux/genhd.h>
+          struct gendisk
+            - this structure describes a generic disk.
+              # ->fops is a constant pointer to an object is type of
+                struct block_device_operations
+              # ->part0 is the first partition of this disk,the remaining
+                paritions are collected in ->part_tbl,a pointer to
+                disk's partition table.
+                ! @part0(master disk) represents the whole disk,it corresponds
+                  to the disk such as "sda","sdb",etc.
+                  the part1 corresponds to disk such as "sda1","sdb1",and so on.
+                  ->part_tbl[0] points to @part0.
+
+            allocation
+              alloc_disk(@minors)
+              - call to alloc_disk_node(),allocate memory,expand partition
+                table ->part_tbl,setup ->part0,invoke device_initialize()
+                to init this disk device.
+                @minors is the minor numbers the disk should use.
+
+            deallocation
+              because gendisk used kref,method put_disk() will decrease the
+              refcounter of the kobject,and get_disk() will increase the
+              refcounter of the kobject.
+              function alloc_disk() will set ->part0.__dev.type to the
+              @disk_type that is defined in <block/genhd.c>.
+              when the refcounter becomes _zero_,device_release() is called by
+              kobject_cleanup() -- because device_initialize() sets the kobject's
+              ktype to @device_ktype,and device_release() is the release method
+              of that ktype.
+              when device_release() is called,becasue __dev.type is sets to
+              @disk_type,then the release method disk_release() is called.
+              function disk_release() will does the following
+                1> kfree disk->random
+                2> replace disk's partition table to NULL
+                3> free part stats of ->part0
+                4> kfree the disk -- the gendisk object
+
+            add
+              add_disk()
+              - block device driver calls to this function to let the disk is
+                available to the system.
+
+                !! BEFORE add_disk() RETURNS OR AFTER add_disk() RETURNED,KERNEL
+                   WILL READ THE FIRST FEW BLOCKS IN AN ATTEMPT TO FIND A
+                   PARTITION TABLE,SO,BEFORE DRIVER IS COMPLETELY INITIALIZED
+                   AND READY TO RESPOND TO REQUESTS ON THAT DISK,SHOULD NOT
+                   CALL add_disk().
+
+            delete
+              del_gendisk()
+              - delete a gendisk(not free its object).
+                this routine will invoke invalidate_partition() to each partitions
+                of this disk,include ->part0.
+                calls to blk_free_devt() to free the device number of this disk,
+                this should be allocated previously in add_disk().
+                set this disk's capacity to 0.
+                disable GENHD_FL_UP in its flags.
+                invoke unlink_gendisk(),it will removes sysfs link,unregister BDI
+                of this disk,unregister its request queue,invoke
+                blk_unregister_region() to remove the device number range in the
+                Kernel Mapping Domain @bdev_map.
+                next,set part stats of ->part0 to 0.
+                set ->part0.stamp to 0.
+                kobject_put() on ->part0.holder_dir,->slave_dir.
+                set ->driverfs_dev to NULL.
+                invoke device_del() on ->part0.__dev .
+
+                ! impl in <fs/partitions/check.c>.
+                !! THIS FUNCTION DOES NOT INVOKE put_disk(),THUS THE DEVICE'S
+                   REFCOUNTER IS REMAINS UNCHANGED,SO THAT THE OBJECT IS NOT
+                   RELEASED.
+                ! in 2.6.34.1,no del_disk() function,only del_gendisk() is
+                  defined.
+
+            

@@ -26191,7 +26191,15 @@ Chapter 13 : I/O Architecture and Device Drivers
              * @p:             device private data
              * @kobj:          kobject
              * @init_name:     initial name of the device
-             * @type:          device type
+             * @type:          type of device
+             *                   struct device_type {
+             *                           const char *name;
+             *                           const struct attribute_group **groups;
+             *                           int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
+             *                           char *(*devnode)(struct device *dev, mode_t *mode);
+             *                           void (*release)(struct device *dev);
+             *                           const struct dev_pm_ops *pm;
+             *                   };
              * @sem:           semaphore to synchronize calls to its driver
              * @bus:           type of bus that this device hosts on
              * @driver:        which driver has allocated this device
@@ -28186,10 +28194,10 @@ Chapter 14 : Block Device Drivers
         area living in some dedicated pages of RAM.
 
         +--> sda
-        | +--> sda1
-        | |       +--> sda2
-        | |       |
-        | |       |
+        |         +--> sda1
+        |         |       +--> sda2
+        |         |       |
+        |         |       |
         +---------------------------------------------+
         | part0 | part1 | part2 | part3 | part4 | ... | => logical block device,disk
         +---------------------------------------------+
@@ -28209,7 +28217,7 @@ Chapter 14 : Block Device Drivers
           +--> inavailable
                used for setup gendisk
                gendisk structure
-               gendisk.part_tbl->part[0]
+               gendisk.part_tbl->part[0] => &sda->part0
                        |         |
                        |         +--> *hd_struct[]
                        |
@@ -28319,10 +28327,17 @@ Chapter 14 : Block Device Drivers
              * block_device_operations - block device operations
              * @open:                    open the block device file
              * @release:                 closing the last reference to a block device file
-             * ...
+             * @locked_ioctl:            exclusive ioctl
+             * @ioctl:                   non-exclusive ioctl
+             * @compat_ioctl:            non-exclusive ioctl for compatibility
+             * @direct_access:           direct disk access,bypass readahead
              * @media_changed:           checking whether the removable media has been changed
              * @set_capacity:            set disk capacity
              * @revalidate_disk:         checking whether the block device holds valid data
+             * @getgeo:                  get hard disk geometry information
+             *                             disk head
+             *                             disk sector
+             *                             disk cylinder
              */
             struct block_device_operations {
                     int (*open)(struct block_device *, fmode_t);
@@ -28438,8 +28453,8 @@ Chapter 14 : Block Device Drivers
              *              important for expand disk partition table
              *
              *          # alloc_disk_node() just expand part table with @partno 0,it only
-             *            need to setup part[0] - the whole disk
-             *
+             *            need to setup part[0] - the whole disk        #^2nd parameter of routine
+             *                                                            disk_expand_part_tbl()
              *          set
              *            @disk->part_tbl->part[0]
              *            @disk->minors
@@ -29962,7 +29977,7 @@ Chapter 14 : Block Device Drivers
         unregister a block device.
 
         block device registering make use of a static array of pointer of structure blk_major_name
-        named @major_names,the size is BLKDEV_MAJOR_HASH_SIZE - 255.
+        named @major_names,the size is BLKDEV_MAJOR_HASH_SIZE -- 255.
         if @major is _zero_,then routine will attempts to find out a useable index in the array,
         and use the index as the major number.
         next,kmalloc() a struct blk_major_name object,use the major number and @name to initialize
