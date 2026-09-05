@@ -30101,22 +30101,36 @@ Chapter 14 : Block Device Drivers
               call to blk_queue_make_request() for set @make_request_fn to @__make_request,and
               set the remain members to their default values
                 include {
-                        @nr_request => BLKDEV_MAX_RQ - 128
-                        dma alignment 511
+                        @nr_request => BLKDEV_MAX_RQ -- 128
+                        dma alignment mask 511
                         set congestion threshold by call to blk_queue_congestion_threshold
-                        @nr_batching => BLK_BATCH_REQ - 32
+                        @nr_batching => BLK_BATCH_REQ -- 32
                         @unplug_thresh => 4
                         @unplug_delay => 1s OR 3ms
                         @unplug_timer function => blk_unplug_timeout
                         @unplug_timer data => this request queue
                         default limits
-                        maximum hardware sectors => BLK_SAFE_MAX_SECTORS - 255
+                        maximum hardware sectors => BLK_SAFE_MAX_SECTORS -- 255
                         {
                                 @max_hw_sectors of @limits
                                 @max_sectors of @limits
                         }
-                        bounce limit => BLK_BOUNCE_HIGH - (u64)blk_max_low_pfn << PAGE_SHIFT - 32 bit
-                }                                         -1ULL - 64 bit
+                        bounce limit => parameter @dma_mask := BLK_BOUNCE_HIGH
+    
+                                        BITS_PER_LONG == 64
+                                          request_queue->limits.bounce_pfn = max_low_pfn
+                                          # may set to BLK_BOUNCE_HIGH >> PAGE_SHIFT,
+                                            if (min(BLK_BOUNCE_HIGH, -1UL) >> PAGE_SHIFT)
+                                               >= BLK_BOUNCE_HIGH >> PAGE_SHIFT
+                                            ! using DMA
+                                            ! assume anything <= 4GB can be handled by IOMMU
+                                        else
+                                          request_queue->limits.bounce_pfn =
+                                            BLK_BOUNCE_HIGH >> PAGE_SHIFT
+
+                                        request_queue->bounce_gfp = GFP_NOIO
+                                                                    GFP_NOIO | GFP_DMA <= using DMA
+                }                                        
 
               call to elevator_init() with @name == NULL,this will let the request queue make
               use of the system default elevator

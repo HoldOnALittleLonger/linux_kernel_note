@@ -6081,4 +6081,26 @@ Block Drivers :
                 ! in 2.6.34.1,no del_disk() function,only del_gendisk() is
                   defined.
 
+        The general initialization steps
+          1> acquire major number through register_blkdev().
+          2> allocate and initialize request_queue through blk_init_queue().
+          3> allocate gendisk through alloc_disk().
+          4> initialize disk and set ->queue to the request_queue.
+          5> call set_capacity() to set capacity for the disk.
+          6> setup IRQ.(for in-memory disk,IRQ is not necessary)
+          7> register some resource regions.
+          8> call add_disk() to add this disk to system.
+
+          ! there is a good example in <drivers/block/hd.c>,the function
+            hd_init() described how a disk is initialized.
+
+        About hard disk's sector size
+          kernel treats the sector size is 512 bytes,if our device has a
+          different sector size,we must converts it corresponds to 512
+          bytes sector size.
+            set_capacity(the_disk, N_SECTORS * (HARD_DISK_SECTOR_SIZE / 512));
+          but kernel always use 512 bytes sectors,thus when we use a sector
+          number of our device,must translate it.
+            sect_n = sect_n * (HARD_DISK_SECTOR_SIZE / 512);
+
             
