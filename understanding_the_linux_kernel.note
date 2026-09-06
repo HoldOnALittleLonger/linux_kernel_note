@@ -9632,7 +9632,7 @@ Chapter 6 : Timing Measurements
             */
            extern void add_timer_on(struct timer_list *timer, int cpu);
 
-           /* add_timer - no CPU specified version,the dynamic timer may assigned to another CPU */
+           /* add_timer - no CPU specified version,the dynamic timer may assigned to any CPU */
            extern void add_timer(struct timer_list *timer);
 
            /**
@@ -28329,15 +28329,27 @@ Chapter 14 : Block Device Drivers
              * @release:                 closing the last reference to a block device file
              * @locked_ioctl:            exclusive ioctl
              * @ioctl:                   non-exclusive ioctl
+             *                           # in some cases,we can let the ioctl() method calls
+             *                             to getgeo() method to serve disk geometry query
+             *                             command
              * @compat_ioctl:            non-exclusive ioctl for compatibility
              * @direct_access:           direct disk access,bypass readahead
              * @media_changed:           checking whether the removable media has been changed
+             *                           # this checking usually is executed in open method
+             *                           # used to support removable disk
              * @set_capacity:            set disk capacity
              * @revalidate_disk:         checking whether the block device holds valid data
+             *                           # prepare the driver for operations on the new media,
+             *                             after call to this method,kernel attempts to reread
+             *                             the partition table and start over with the device
+             *                           # used to support removable disk
              * @getgeo:                  get hard disk geometry information
              *                             disk head
              *                             disk sector
              *                             disk cylinder
+             *                           # these information may needed by partition tools
+             * @owner:                   who provides these operations,usually is THIS_MODULE
+             *                           of the block driver module
              */
             struct block_device_operations {
                     int (*open)(struct block_device *, fmode_t);
@@ -28654,6 +28666,23 @@ Chapter 14 : Block Device Drivers
            *                 };
            * @request_fn:    method that implement the entry point for "strategy routine"
            *                 of device driver
+           *                 # typedef void (request_fn_proc)(struct request_queue *q);
+           *                   ** <linux/blkdev.h>
+           *                 # kernel will holds @queue_lock before calls to the request
+           *                   function,and release the lock later after the function
+           *                   accomplished.
+           *                   if @request_fn released the lock when it is running,
+           *                   then this function cant re-entry before it returns,and
+           *                   the data protected by the lock cant be accessed by
+           *                   this function from now until it acquires the lock again.
+           *                 # the invocation of the request function is usually entirely
+           *                   asynchronous with respect to the actions of any userspace
+           *                   process,we cant assume the kernel is running in the context
+           *                   of the process that initiated the current request,so
+           *                   we should not explicitly access userspace in the function.
+           *                   ** we can get the necessary information from the
+           *                      request_queue descriptor rather than read from
+           *                      userspace.
            * @make_request_fn:
            *                 method to create a new request
            * @prep_rq_fn:    method to build the commands to be sent to the hardware
@@ -28690,7 +28719,7 @@ Chapter 14 : Block Device Drivers
            *                 gfp flag for allocate bounce pages
            * @queue_flags:   queue flags
            * @__queue_lock:  protector for reentrancy,queue private
-           * @queue_lcok:    protect reentrancy
+           * @queue_lock:    protect reentrancy
            *                 # @__queue_lock should _never_ be used directly,it is queue private,
            *                   use @queue_lock instead
            * @kobj:          request queue kobject

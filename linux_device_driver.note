@@ -6004,7 +6004,7 @@ Block Drivers :
         Disk Registration/Unregistreation
           <linux/fs.h>
           struct block_device_operations
-            - this structure describes the available operations on a block device.
+            - this structure describes the operations available on a block device.
 
           <linux/genhd.h>
           struct gendisk
