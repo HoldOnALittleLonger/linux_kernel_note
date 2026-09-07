@@ -28019,7 +28019,7 @@ Chapter 14 : Block Device Drivers
            * @bi_phys_segments:
            *                number of segments in this bio after
            *                physical address coalescing is performed
-           * @bi_size:      residual I/O count
+           * @bi_size:      residual I/O count,in bytes
            * @bi_seg_front_size:
            *                first mergeable segments in this bio
            * @bi_seg_back_size:
@@ -28145,11 +28145,14 @@ Chapter 14 : Block Device Drivers
                    |                      |    |    +--> @i
                    |                      |    +--> @bio
                    |                      +--> @bvl => type is struct bio_vec *
+                   |
                    |               +--> &(bio->bi_iovec[@index])
                    |               |
                    +--> for (bvl = bio_iovec_idx((bio), (start_idx)), i = (start_idx);
                              i < (bio)->bi_vcnt;
                              bvl++, i++)
+
+          #define bio_iovec(bio) bio_iovec_idx((bio), (bio)->bi_idx)
           
           /* slab caches for bio vector
            * each slab cache will be initialized in init function biovec_init_slabs()
@@ -28513,7 +28516,7 @@ Chapter 14 : Block Device Drivers
           1> allocate new bio object
           2> set
                @bi_sector - the initial sector number of the data
-               @bi_size   - number of sectors covering the data
+               @bi_size   - number of data bytes that the sectors covering
                @bi_bdev   - address of the block device descriptor
                @bi_io_vec - initial address of an array of bio_vec data structures(segments)
                @bi_vcnt   - total number of segments in the bio
@@ -30390,7 +30393,7 @@ Chapter 14 : Block Device Drivers
             - complete a bidi request with queue lock held
 
             invoke blk_update_bidi_request() with received parameters to update request,return TRUE
-            if the function returned TRUE
+            if the function returned TRUE,that means there is a buffer is pending.
             otherwise,call to blk_finish_request(),and return FALSE - that error detected
 
           static bool blk_update_bidi_request(rq, error, nr_bytes, bidi_bytes) - update bidi request
@@ -30403,26 +30406,26 @@ Chapter 14 : Block Device Drivers
           bool blk_update_request(req, error, nr_bytes)
             - special helper function for request stacking drivers
 
-            ends I/O on a number of bytes attached to the request,but does not complete
-            the request structure even if the request does not have leftover
-            if the request has leftover,sets it up for the next range of segments
-            the routine returns TRUE if the request has more data
-            the routine returns FALSE if the request does not have any more data
-
-            this routine might call to req_bio_endio() on @req,if @nr_bytes is greater than
-            current bio's @bi_size or the last bio have not completed.
-            /**
-             * if @nr_bytes spanned several BIOs,but the last BIO remained some data have not
-             * completed,then req_bio_endio() will be called on that BIO which the number of
-             * completed bytes of it to update its fields for the remained segments
-             * of course,@nr_bytes will be updated during while-cycle iterating,if it is
-             * greater than current BIO,then req_bio_endio() should be called on current BIO
-             * to mark it that been completed
-             */
-            if more data have to be transfered,blk_recalc_rq_segments() is called for update
-            this request @req,update some its fields for remained segments
-
-            # EXPORT_SYMBOL            
+              ends I/O on a number of bytes attached to the request,but does not complete
+              the request structure even if the request does not have leftover
+              if the request has leftover,sets it up for the next range of segments
+              the routine returns TRUE if the request has more data
+              the routine returns FALSE if the request does not have any more data
+  
+              this routine might call to req_bio_endio() on @req,if @nr_bytes is greater than
+              current bio's @bi_size or the last bio have not completed.
+              /**
+               * if @nr_bytes spanned several BIOs,but the last BIO remained some data have not
+               * completed,then req_bio_endio() will be called on that BIO with the number of
+               * completed bytes of it to update its fields for the remained segments
+               * of course,@nr_bytes will be updated during while-cycle iterating,if it is
+               * greater than current BIO,then req_bio_endio() should be called on current BIO
+               * to mark it that been completed
+               */
+              if more data have to be transfered,blk_recalc_rq_segments() is called for update
+              this request @req,update some its fields for remained segments
+  
+              # EXPORT_SYMBOL            
 
     Opening a Block Device File :
       kernel opens a block device file every time that a filesystem is mounted over a disk or

@@ -6103,4 +6103,132 @@ Block Drivers :
           number of our device,must translate it.
             sect_n = sect_n * (HARD_DISK_SECTOR_SIZE / 512);
 
+        structure request
+          this structure represents a request in the request queue of a block
+          device driver.
+          function elv_next_request(@queue) can be used to retrieve the next
+          (incomplete) request.
+          /* defined in <linux/blkdev.h> */
+          ->cmd_type defines the type of this request,it maybe fs request,
+          scsi command,or generic block layer message,etc.
+
+        blk_end_request(*@rq, @error, @nr_bytes)
+          this function can be called by request_fn to end the serve to a
+          specified request,because it is not the type of request we have
+          expected,or there is another reason we should end it.
+          blk_finish_request() will be called on the control path,if there is
+          no buffer is pending.
+          /* @error:
+           *   0 => success
+           * < 0 => error
+           *
+           * @nr_bytes:
+           *   number of bytes to complete
+           */
+
+        Request Queues
+          represents by the structure request_queue,defined in <linux/blkdev.h>.
+
+          creation/deletion
+            blk_init_queue()
+            - receives a request_fn pointer and a pointer points to a spinlock
+              that usually is provided by the driver.
+              create and initialize the request_queue object,return its address
+              to caller.
+              /* we need to specify ->queue of gendisk object manually */
+
+            blk_cleanup_queue()
+            - calls to elevator_exit() to exit the I/O scheduler attached with,
+              if request_queue->elevator is not NULL.
+              invoke blk_put_queue() to put the reference couner of the queue.
+              /* request_queue->kobj */
+
+          queueing functions
+            /* need queue lock rq->queue_lock,set by blk_init_queue() */
+    
+            elv_next_request()
+            - return the next incomplete request of the request_queue.this
+              routine does not remove the request from that request_queue,
+              just returns the request descriptor.
+
+              ! in 2.6.34.1,only __elv_next_request() is exist,and it is an
+                interface for internal used by block subsystem,if we want
+                to get the next request,should invoke the blk_peek_request().
+                which function will activate the being return request,to
+                prevent it will be merged with others.
+
+            blk_dequeue_request()
+            - dequeue a request from the request_queue.
+
+            blk_requeue_request()
+            - put a request back on queue(previously dequeued).
+              this function deletes request's timer,clear its completion
+              state,invoke elv_requeue_request() to requeue it into the
+              request_queue.
+
+          queue control functions
+            blk_start_queue()
+            - remove unplug timer of the request queue,clear QUEUE_FLAG_STOPPED.
+              start a single device queue.
+
+            blk_stop_queue()
+            - remove unplug timer of the request queue,set QUEUE_FLAG_STOPPED.
+              stop a single device queue.
+
+            blk_start_request()
+            - start request processing on the driver.
+              this function will dequeue the specified request from queue,
+              invoke blk_add_timer() on the request to start timeout timer
+              for it.
+
+            blk_queue_bounce_limit()
+            - set bounce buffer limit for queue.
+              tells the kernel the highest physical address to which the
+              device can perform DMA.
+              /* usually,we can use the BLK_BOUNCE_HIGH.
+               * others:
+               *   BLK_BOUNCE_ISA => for ISA bus
+               *   BLK_BOUNCE_ANY => DMA on any address
+               */
+              ! if the request contains a reference to memory that above
+                the limit,a bounce buffer will be used for the operation.
+
+            blk_queue_max_segments()
+            - set request_queue->limits.max_segments to the new value.
+              /* max hw segments for a request */
+
+            blk_queue_max_hw_sectors()
+            - set max sectors for a request for the request_queue.
+              /* also set @max_sectors,it is the minimal between
+               * @max_hw_sectors -- parameter,and BLK_DEF_MAX_SECTORS.
+               */
+
+            blk_queue_max_segment_size()
+            - set max segment size for blk_rq_map_sg().
+              /* request_queue->limits.max_segment_size = @max_size */
+              ! blk_rq_map_sg() will map a request to scatterlist,returns
+                number of sg entries setup.
+                # this function will iterates each segment in the request,
+                  if current segment's size add current sg entry's length
+                  greater than the request_queue's max segment size,we
+                  will need to use a new sg entry(the next) to map current
+                  segment of this request.
+
+            blk_queue_segment_boundary()
+            - set boundary rules for segment merging.
+              /* request_queue->limits.seg_boundary_mask = @mask */
+              ! tell kernel about the boundary that the device cant
+                handle the request because it cross a particular
+                size memory boundary.
+                # default is 0xffffffff.
+    
+            blk_queue_dma_alignment()
+            - set DMA length and memory alignment.
+              /* request_queue->dma_alignment = @mask */
+              ! tell the kernel abount the memory alignment constraints
+                the device imposes on DMA transfers.
+                # default is 512 bytes.
+
+
+
             
