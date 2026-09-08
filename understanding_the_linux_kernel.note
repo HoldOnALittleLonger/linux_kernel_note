@@ -8114,7 +8114,8 @@ Chapter 5 : Kernel Synchronization
             /*  local_irq_enable - sti  */
             #define local_irq_enable()
 
-            /*  local_irq_save - save the older eflags state before disable local CPU interrupt
+            /*  local_irq_save - save the eflags state into @flags,then disable local
+             *                   CPU interrupt
              *  @flags:          unsigned long type variable(not pointer) used to save the older
              *                   eflags state.
              */
@@ -8122,7 +8123,7 @@ Chapter 5 : Kernel Synchronization
 
             /*  local_irq_restore - restore eflags
              *  @flags:             the eflags state previously saved by local_irq_save().
-             *  #  this function do not process "sti",it just call "popf" to restore eflags register.
+             *  #  this function do not executes "sti",it just call "popf" to restore eflags register.
              */
             #define local_irq_restore(flags)
 
@@ -28146,13 +28147,54 @@ Chapter 14 : Block Device Drivers
                    |                      |    +--> @bio
                    |                      +--> @bvl => type is struct bio_vec *
                    |
-                   |               +--> &(bio->bi_iovec[@index])
+                   |               +--> &(bio->bi_io_vec[@index])
                    |               |
                    +--> for (bvl = bio_iovec_idx((bio), (start_idx)), i = (start_idx);
                              i < (bio)->bi_vcnt;
                              bvl++, i++)
 
           #define bio_iovec(bio) bio_iovec_idx((bio), (bio)->bi_idx)
+
+          /* invoke kmap_atomic() to map page bio->bi_io_vec[idx].bv_page,and
+           * returns the address computed from the page offset ->bi_io_vec[idx].bv_offset
+           */
+          #define __bio_kmap_atomic(bio, idx, kmtype)
+
+          /* kunmap_atomic() the bv_page */
+          #defime __bio_kunmap_atomic(addr, kmtype)
+
+          /* page descriptor of current page in BIO */
+          #define bio_page(bio) bio_iovec((bio))->bv_page
+
+          /* current page's offset */
+          #define bio_offset(bio) bio_iovec((bio))->bv_offset
+
+          /* sectors this BIO spanned */
+          #define bio_sectors(bio) ((bio)->bi_size >> 9)
+
+          /* remaining segments in the BIO */
+          #define bio_segments(bio) ((bio)->bi_vcnt - (bio)->bi_idx)
+
+          /* return the mapped virtual address of current page of BIO
+           * that has been computed current page's offset
+           * return NULL if @bio->bi_vcnt is _zero_,or the page is resided
+           * on high-memory
+           * # page address relies on page_address() routine
+           * ! usually generic block layer would not pass high-memory buffers
+           *   to the driver,but blk_queue_bounce_limit() can changes this
+           *   behavior.
+           */
+          static inline void *bio_data(struct bio *bio);
+
+          /* kmap_atomic() current page of BIO with kmtype KM_BIO_SRC_IRQ,
+           * also disable local interrupt and stores the flags into *@flags,
+           * return the address been computed with the ->bv_offset.
+           * ! we specified use KM_BIO_SRC_IRQ atomic kmap,thus we can only
+           *   map one segment at the same time.
+           */
+          #define bio_kmap_irq(bio, flags) __bio_kmap_irq((bio), (bio)->bi_idx, (flags))
+          /* UNDO bio_kmap_irq() */
+          #define bio_kunmap_irq(buf, flags) __bio_kunmap_irq(buf, flags)
           
           /* slab caches for bio vector
            * each slab cache will be initialized in init function biovec_init_slabs()
@@ -29059,6 +29101,12 @@ Chapter 14 : Block Device Drivers
           REQ_FAILFAST_DEV              no driver retries of device errors
           REQ_FAILFAST_TRANSPORT        no driver retries of transport errors
           REQ_FAILFAST_DRIVER           no driver retries of driver errors
+                                        ** driver that received request that is
+                                           no-retry,should simply fail as quickly
+                                           as possible.
+                                           macro blk_noretry_request(*@rq) can be
+                                           used to test whether a request is
+                                           no-retry.
           /* first fours match BIO_RW*,important */
 
           REQ_DISCARD                   request to discard sectors
@@ -29066,8 +29114,15 @@ Chapter 14 : Block Device Drivers
           REQ_SOFTBARRIER               may not be passed by io scheduler
                                         request acts a barrier for the I/O scheduler
           REQ_HARDBARRIER               may not be passed by driver either
-                                        request acts a barrier for the I/O scheduler
-                                        and the device dirver
+                                        ! request acts a barrier for the I/O scheduler
+                                          and the device dirver
+                                          the next requests after this request must
+                                          to wait for this request is completed
+                                          ** data must actually reside and be persistent
+                                             on the physical media.
+                                             some drive has cache,driver must takes
+                                             care of the barrier request's handling
+                                             regard to the cache mechanism
           REQ_FUA                       forced unit access
           REQ_NOMERGE                   do not touch this for merging
           REQ_STARTED                   drive already may have started this one
@@ -29137,6 +29192,13 @@ Chapter 14 : Block Device Drivers
           #define rq_for_each_segment(bvl, _rq, _iter)  \
                   __rq_for_each_bio(_iter.bio, _rq)     \
                           bio_for_each_segment(bvl, _iter.bio, _iter.i)
+
+          ! @_iter is type of strcut req_iterator
+
+          struct req_iterator {
+                  int i;
+                  struct bio *bio;    
+          };
 
         Managing the allocation of request descriptors :
           a bottleneck for processes that want to add a new request into a request queue may
@@ -30277,6 +30339,24 @@ Chapter 14 : Block Device Drivers
 
         <block/blk-barrier.c>
           /**
+           * blk_queue_ordered - driver calls to this function to tell the
+           *                     Generic Block Layer does this queue support
+           *                     ordered writes
+           * @q:                 request_queue
+           * @ordered:           one of QUEUE_ORDERED_*
+           * @prepare_flush_nf:  rq setup helper for cache flush ordered writes
+           * return:             0 OR error code
+           * # EXPORT_SYMBOL
+           * # by call to this function,driver does not need to invoke wait_on_buffer()
+           * # this routine will sets
+           *     @q->ordered = @ordered
+           *     @q->next_ordered = ordered
+           *     @q->prepare_flush_fn = @prepare_flush_fn
+           */
+          int blk_queue_ordered(struct request_queue *q, unsigned ordered,
+                                prepare_flush_fn *prepare_flush_fn);
+    
+          /**
            * blk_do_ordered - do request ordering
            * @q:              request queue
            * @rqp:            selected request
@@ -30289,8 +30369,8 @@ Chapter 14 : Block Device Drivers
                  blk_fs_request(*@rqp) && blk_barrier_rq(*@rqp)
                  /* cmd_type == REQ_TYPE_FS - fs request */
                                           /* cmd_flags & REQ_HARDBARRIER - acts like a barrier */
-            2> if @q->ordseq is FALSE - request flushing is not started  - QUEUE_ORDERED_NONE
-               then we must start ordering.
+            2> if @q->ordseq is FALSE - request flushing is not started,ordered sequence is not
+               in progreess,then we must start ordering.
             3> checks @is_barrier is TRUE,if it is,then we can not sort this request,because
                fs request can not be ordered,and the position of barrier can not be changed.
             4> checks whether @q->next_ordered != QUEUE_ORDERED_NONE,if it is,then
@@ -30326,6 +30406,77 @@ Chapter 14 : Block Device Drivers
            * # to caller
            */
           int blk_rq_map_sg(struct request_queue *q, struct request *rq, struct scatterlist *sglist);
+
+          /**
+           * <asm-generic/scatterlist.h>
+           *   scatterlist - structure represents an entry for the DMA scatter-gather list
+           *   @sg_magic:    identifier for debug
+           *                 # SG_MAGIC => 0x87654321
+           *   @page_link:   path to next entry
+           *                 # 0x01 is set => @page_link contains a pointer to the next
+           *                                  sg table list,otherwise the next entry is
+           *                                  at @sg + 1
+           *                                  ** we can retrieve the next entry's address
+           *                                     through sg_chain_ptr() when 0x01 is
+           *                                     set
+           *                                     sg_is_chain(sg) ((sg)->page_link & 0x01)
+           *                                     sg_chain_ptr(sg) \
+           *                                       ((struct scatterlist *)((sg)->page_link & ~0x03))
+           *                   0x02 is set => this sg entry is the last element in a list
+           *                                  ** sg_is_last(sg) ((sg)->page_link & 0x02)
+           *   @offset:      offset to the page encoded into @page_link
+           *   @length:      length of data in the page
+           *   @dma_address: DMA address
+           *   @dma_length:  data length of DMA
+           *   struct scatterlist {
+           *   #ifdef CONFIG_DEBUG_SG
+           *           unsigned long sg_magic;
+           *   #endif
+           *           unsigned long page_link;
+           *           unsigned int offset;
+           *           unsigned int length;
+           *           dma_addr_t dma_address;
+           *           unsigned int dma_length;
+           *   };
+           *
+           *   helpers:
+           *     sg_assign_page(*@sg, *@page)
+           *       page_link = sg->page_link & 0x03;
+           *       sg->page_link = page_link | (unsigned long)page;
+           *
+           *     sg_set_page(*@sg, *@page, @len, @offset)
+           *       calls to sg_assign_page to set @page_link,
+           *       then set ->offset and ->length use @len and @offset.
+           *
+           *     sg_page(*@sg)
+           *       returns the page pointer,computed from
+           *         sg->page_link & ~0x03
+           *
+           *     sg_mark_end(*@sg)
+           *       set bit 1 in ->page_link
+           *       clear bit 0 in ->page_link
+           *
+           *     sg_last(*@sgl, @nents)
+           *       returns the last scatterlist in a list
+           *
+           *     sg_chain(*@prv, @prv_nents, *@sgl)
+           *       chains two scatterlist
+           *       @prv is an array of scatterlist objects,@prv_nents is
+           *       the size,this routine will use the scatterlist at idx
+           *       [@prv_nents - 1] to chain @sgl,set its ->page_link
+           *       points to the @sgl
+           *         @prv[@prv_nents - 1].page_link = ((unsigned long)@sgl | 0x01) & ~0x02
+           *       # also clears ->offset and ->length of [@prv_nents - 1]
+           *
+           *     sg_init_table(*@sgl, @nents)
+           *       fill the scatterlist array all with 0,
+           *       and invoke sg_mark_end() on the last element
+           *
+           *     for_each_sg(sglist, sg, nr, __i) \
+           *       for (__i = 0, sg = (sglist); __i < (nr); __i++, sg = sg_next(sg))
+           *       traverse each sg in the sgl,following the pointer to a new list if
+           *       necessary(if they are chained)
+           */
 
       general steps that strategy routine execute :
       /* example from do_cciss_request() <drivers/block/cciss.c> */

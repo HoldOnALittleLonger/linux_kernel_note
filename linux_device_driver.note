@@ -6229,6 +6229,21 @@ Block Drivers :
                 the device imposes on DMA transfers.
                 # default is 512 bytes.
 
+        The Anatomy of a Request    
+          kernel never combine read requests and write requests.
+          a request is implemented essentially a list of BIOs and some
+          housekeeping information to enable the driver to keep track of
+          its work.
+
+          struct bio
+            the ongoing block device I/O descriptor,it is base identifier to a
+            work to Generic Block Layer.
+            block I/O code will try to merges BIOs,and create a new one if
+            necessary.
+            BIO contains everything a block device driver needs to carry out
+            the request without reference to the userspace process that caused
+            that request to be initiated.
+            /* BIO is 512 bytes/secotr by default */
 
 
             
