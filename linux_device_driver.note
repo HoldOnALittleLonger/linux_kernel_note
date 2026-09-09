@@ -6245,5 +6245,165 @@ Block Drivers :
             that request to be initiated.
             /* BIO is 512 bytes/secotr by default */
 
+          request completion functions
+            function request->end_io(request->end_io_data) should be called by
+            the driver if the request been served.some driver is interrupt-driven,
+            so we can do completion in the bottom half.
+              e.g.
+                in the request_fn(),we construct the device request from request
+                structure,issue the device request to device controller.
+                when device finished work,it raises an interrupt,the driver's
+                interrupt handler record this,and start bottom half worker.
+                in the bottom half worker,we check the status of the request,
+                and calls to the completion.
+                /* call one function of blk_end_request(),blk_end_request_all(),
+                 * blk_end_request_curr(),blk_end_request_err().
+                 * function blk_update_request() is only for request stacking drivers.
+                 * ! "request stacking driver"
+                 *     it is an ordered sequence of software drivers that work
+                 *     together to handle a single input/output request.
+                 */
+
+            we can bypass the request_queue,to do this,we leave request_fn
+            unspecified,and setup makr_request_fn.Generic Block Layer will calls
+            to this function when there is a new BIO need to be queued.
+            /* usually come from submit_bio() */
+            our driver can handles the BIO directly in make_request_fn,or redirect
+            it to another device -- Logic Volume Manager usually redirect requests.
+            ! request_queue still exists,but we bypass it.
+            when the BIO is finished,we should invoke bio_endio() to report its
+            end status.
+
+          request with DMA
+            relies on blk_rq_map_sg() function,each entry in the scatterlist
+            corresponds to a segment,automatically merged and sorted,we can
+            use the scatterlist to issue hardware device DMA operation.
+            if device does not support scatter-gather DMA operation,our driver
+            must start a DMA transaction for each data transfer.
+
+          command pre-preparation
+            request_queue->prep_rq_fn() can be used to processes pre-preparation,
+            it is called in blk_peek_request().
+            driver usually processes request follows the steps
+              1> blk_peek_request()
+              2> blk_start_request()
+              3> serve it
+              4> blk_end_request_*() / blk_update_request() ... blk_finish_request()
+              5> start next work cycle for next request in request_queue
+
+            the return value of prep_rq_fn() is one of
+              BLKPREP_OK 0      /* serve it */
+              BLKPREP_KILL 1    /* fatal error, kill */
+              BLKPREP_DEFER 2   /* leave on queue */
+
+          tagged command queueing
+            hardware that can have multiple requests active at once usually supports
+            some form of "tagged command queueing"(TCQ).
+            it is simply the technique of attaching an integer "tag" to each request
+            so that when the driver completes once of them,it can tell the driver
+            which one.
+              <linux/bldev.h>
+                /**
+                 * blk_queue_tag - the request_queue tag info
+                 * @tag_index:     map of busy tags
+                 * @tag_map:       bit map of free/busy tags
+                 * @busy:          current depth
+                 * @max_depth:     what we will send to device
+                 * @real_max_depth:
+                 *                 what the array can hold
+                 * @refcnt:        map can be shared
+                 */
+                struct blk_queue_tag {
+                        struct request **tag_index;
+                        unsigned long *tag_map;
+                        int busy;
+                        int max_depth;
+                        int real_max_depth;
+                        atomic_t refcnt;
+                };
+    
+              <block/blk-tag.c>
+                /**
+                 * blk_queue_init_tags - initialize the queue tag info
+                 * @q:                   request_queue
+                 * @depth:               the maximum queue depth supported
+                 *                       by the device at any given time
+                 * @tags:                tag to use,an array with size
+                 *                       @depth
+                 * return:               0 OR error code
+                 * # EXPORT_SYMBOL
+                 * # requires queue lock is held
+                 * # if we pass NULL as @tags AND @q->queue_tags is NULL too,
+                 *   this function will calls to __blk_queue_init_tags() to
+                 *   allocate a new one automatically.
+                 *   if @q->queue_tags is not NULL,it will invoke
+                 *   blk_queue_resize_tags() to resize @q->queue_tags with
+                 *   the new @depth.
+                 *   otherwise,@tags->refcnt will be increased.
+                 *   finally,it reset @q->queue_tags to @tags,and set flag
+                 *   QUEUE_FLAG_QUEUED.
+                 * ! it is a BUG,if @tags is TRUE AND @q->queue_tags is TRUE
+                 *   AND @tags != @q->queue_tags.
+                 */
+                int blk_queue_init_tags(struct request_queue *q, int depth,
+                                        struct blk_queue_tag *tags);
+    
+            blk_queue_resize_tags() can be called by driver when it needs to
+            resize its tags.
+    
+            !! WE CAN SHARE TAGS BETWEEN DEVICES,TO DO THIS,WE JUST NEED
+               TO INVOKE blk_queue_init_tags() PASS IT THE CURRENT REQUEST
+               QUEUE,AND THE TAGS FROM OTHER REQUEST QUEUE,BUT NOTE THAT,
+               CURRENT REQUEST QUEUE'S @queue_tags MUST BE NULL.
+
+              <block/blk-tag.c>
+                /**
+                 * blk_queue_start_tag - find a free tag and assign it to the
+                 *                       request
+                 * @q:                   request queue
+                 * @rq:                  request
+                 * return:               0 => we found free tag and assigned it
+                 *                       1 => no free tag or useable tag now
+                 * # EXPORT_SYMBOL      
+                 * # requires queue lock is held.
+                 * # when we found free tag,@rq->cmd_flags will set REQ_QUEUED,
+                 *   and @rq->tag points to the tag,@q->queue_tags.tag_index[the tag idx]
+                 *   points to the @rq.
+                 *   next,function invoke blk_start_request() on @rq,invoke list_add()
+                 *   to add @rq->queuelist to @q->tag_busy_list,finally,return 0.
+                 *   ** blk_start_request() will dequeue the request from request queue.
+                 */
+                int blk_queue_start_tag(struct request_queue *q, struct request *rq);
+
+                /* end tag operations for a request.
+                 * remove @rq from ->tag_busy_list,disable REQ_QUEUED flag,reset
+                 * @rq->tag to -1.
+                 * set @q->queue_tags.tag_index[saved @rq->tag] to NULL.
+                 * clear the corresponding bit in @q->queue_tags.tag_map .
+                 * # EXPORT_SYMBOL
+                 * # requires queue lock is held.
+                 */
+                void blk_queue_end_tag(struct request_queue *q, struct request *rq);
+
+                /* try to find out a request that associated with the given tage,
+                 * returns NULl if unfound.
+                 * # EXPORT_SYMBOL
+                 * # no queue lock requirement
+                 */
+                struct request *blk_queue_find_tag(struct request_queue *q, int tag);
+
+                /* invalidate all pending tags.
+                 * for each entities on @q->tag_busy_list,invoke blk_requeue_request()
+                 * on current request to requeued it on the list ->queue_head.
+                 * # EXPORT_SYMBOL
+                 * # requires queue lock is held.
+                 */
+                void blk_queue_invalidate_tags(struct request_queue *q);
+
+              
+
+            
+    
+
 
             

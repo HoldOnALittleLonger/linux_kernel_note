@@ -28730,20 +28730,30 @@ Chapter 14 : Block Device Drivers
            *                      userspace.
            * @make_request_fn:
            *                 method to create a new request
+           *                 # typedef int (make_request_fn)(struct request_queue *q, struct bio *bio);
            * @prep_rq_fn:    method to build the commands to be sent to the hardware
            *                 device to process this request
+           *                 # typedef int (prep_rq_fn)(struct request_queue *, struct request *);
            * @unplug_fn:     method to unplug the block device
+           *                 # typedef void (unplug_fn)(struct request_queue *);
            * @merge_bvec_fn: method to return the number of bytes that can be inserted
            *                 into an existing bio when adding a new segment
+           *                 # typedef int (merge_bvec_fn)(struct request_queue *, struct bvec_merge_data *,
+           *                                               struct bio_vec *);
            * @prepare_flush_fn:
            *                 method to prepare flush rq
+           *                 # typedef void (prepare_flush_fn)(struct request_queue *, struct request *);
            * @softirq_done_fn:
            *                 method to be called after softirq for I/O scheduler is done
+           *                 # typedef void (softirq_done_fn)(struct request *);
            * @rq_timed_out_fn:
            *                 method to be called when request timeout
+           *                 # typedef enum blk_eh_timer_return (rq_timed_out_fn)(struct request *);
            * @dma_drain_needed:
            *                 method to be called when DMA drain needed
+           *                 # typedef int (dma_drain_needed_fn)(struct request *);
            * @lld_busy_fn:   method to export busy state,lower-level-driver busy function
+           *                 # typedef int (lld_busy_fn)(struct request_queeu *q);
            * @end_sector:    sector number of the tail request
            * @boundary_rq:   the request at queue tail
            *                 # @end_sector and @boundary_rq are used for dispatch queue sorting
@@ -28785,7 +28795,7 @@ Chapter 14 : Block Device Drivers
            * @dma_pad_mask:  DMA pad mask
            * @dma_alignment: DMA alignment
            * @queue_tags:    bitmap of free/busy tags,used for tagged requests
-           * @tag_busy_list: list of tage in busy
+           * @tag_busy_list: list of tag in busy
            * @nr_sorted:     number of sorted requests
            * @in_fligh:      queue in flight info
            * @rq_timeout:    request time out threshold
@@ -29030,6 +29040,7 @@ Chapter 14 : Block Device Drivers
            * @timeout: time out value in jiffies
            * @retries: used by SCSI Generic disk ioctl
            * @end_io:  request completion callback
+           *           # typedef void (rq_end_io_fn)(struct request *, int);
            * @end_io_data:
            *           callback routine data
            * @next_rq: the next request
