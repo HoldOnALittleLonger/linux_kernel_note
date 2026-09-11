@@ -6400,10 +6400,170 @@ Block Drivers :
                  */
                 void blk_queue_invalidate_tags(struct request_queue *q);
 
-              
+TTY Drivers :
+                                  user
+                                    ^
+                                    |
+                                    |
+                                    V               \
+                           +-------------------+    |
+                           | +----------+      |    |
+                           | | tty core |      |    |
+                           | +----------+      |    |
+                           |   +------------+  |    |
+                           |   | tty line   |  |    | kernel
+                           |   | discipline |  |    |
+                           |   | driver     |  |    |
+                           |   +------------+  |    |
+                           |   +------------+  |    |
+                           |   | tty driver |  |    |
+                           |   +------------+  |    |
+                           +-------------------+    |
+                                    ^              /
+                                    |
+                                    |
+                                    V
+                                hardware
+        tty:
+          teletypewriter that was originally associated with the physical or
+          virtual terminal connection to a Unix machine.
+          now is any serial port style device,as terminal connection could
+          also be created over such a connection.
 
-            
-    
+        tty core:
+          focus on providing an interface for terminal style devices to use.
+          it is responsible for controlling both the flow of data across a
+          tty device and the format of the data.
 
+        tty driver:
+          focus on handling the data to and from the hardware.
+          # three different types of tty drivers
+              console, serial port, pty
+          # we can check the tty drivers currently loaded into the kernel
+            by 'cat' /proc/tty/drivers .
+            under /proc/tty/driver directory,several individual files is
+            created by some of the tty drivers(if they implement that
+            functionality),the files contain some special information about the
+            hardware.
+        
+        tty line discipline:
+          it can be virtually "plugged" into any tty device,format the data
+          received from user or the hardware,in a specific manner.
+          # can modify the data over it.
+          # invisible to tty driver.
+          # formatting usually takes the form of a protocol conversion,
+            such as PPP or bluetooth.
 
-            
+        all tty devices can be found under the path '/sys/class/tty',the
+        dentries are symlinks to /sys/devices/virtual/tty/tty*,or the
+        serial port devices
+          /sys/devices/platform/serial*/serial*:*/serial*:*.*/tty/ttyS*
+        ttyS0 means serial port 0,tty0 usually is a virtual device created
+        by kernel.
+
+        tty driver descriptor and tty operations
+          <linux/tty_driver.h>
+            /**
+             * tty_driver - the structure represents tty driver
+             * @magic:      magic number
+             * @kref:       refcounter
+             * @cdev:       char device descriptor
+             * @owner:      driver owner
+             * @driver_name:
+             *              name string of driver
+             * @name:       name for the chrdev
+             * @name_base:  the base number of tty name,offset of
+             *              printed name
+             * @major:      major number
+             * @minor_start:
+             *              minor number start
+             * @minor_num:  number of minor numbers from @minor_start
+             *              this driver will uses
+             * @num:        number of devices allocated
+             * @type:       type of tty driver
+             * @subtype:    subtype of tty driver
+             * @init_termios:
+             *              initial termios
+             * @flags:      tty driver flags
+             * @proc_entry: /proc entry
+             * @other:      only used for the PTY driver
+             * @ttys:       ttys attached to this driver
+             * @termios:    termioses attached to this driver
+             * @termios_locked:
+             *              locked termioses attached to this driver
+             * @driver_state:
+             *              tty driver state
+             * @ops:        operations
+             * @tty_drivers:
+             *              list node to list of global registered tty drivers
+             */
+            struct tty_driver {
+                    int magic;
+                    struct kref kref;
+                    struct cdev cdev;
+                    struct module *owner;
+                    const char *driver_name;
+                    const char *name;
+                    int name_base;
+                    int major;
+                    int minor_start;
+                    int minor_num;
+                    int num;
+                    short type;
+                    short subtype;
+                    struct ktermios init_termios;
+                    int flags;
+                    struct proc_dir_entry *proc_entry;
+                    struct tty_driver *other;
+                    struct tty_struct **ttys;
+                    struct ktermios **termios;
+                    struct ktermios **termios_locked;
+                    void *driver_state;
+                    const struct tty_operations *ops;
+                    struct list_head tty_drivers;
+            };
+
+            /* tty device operations */
+            struct tty_operations {
+                    struct tty_struct *(*lookup)(struct tty_driver *driver,
+                                                 struct inode *inode, int idx);
+                    int (*install)(struct tty_driver *driver, struct tty_struct *tty);
+                    void (*remove)(struct tty_driver *driver, struct tty_struct *tty);
+                    int (*open)(struct tty_struct *tty, struct file *filp);
+                    void (*close)(struct tty_struct *tty, struct file *filp);
+                    void (*shutdown)(struct tty_struct *tty);
+                    void (*cleanup)(struct tty_struct *tty);
+                    int (*write)(struct tty_struct *tty, const unsigned char *buf,
+                                 int count);
+                    int (*put_char)(struct tty_struct *tty, unsigned char ch);
+                    void (*flush_chars)(struct tty_struct *tty);
+                    int (*write_room)(struct tty_struct *tty);
+                    int (*chars_in_buffer)(struct tty_struct *tty);
+                    int (*ioctl)(struct tty_struct *tty, struct file *file,
+                                 unsigned int cmd, unsigned long arg);
+                    long (*compat_ioctl)(struct tty_struct *tty, struct file *file,
+                                         unsigned int cmd, unsigned long arg);
+                    void (*set_termios)(struct tty_struct *tty, struct ktermios *old);
+                    void (*throttle)(struct tty_struct *tty);
+                    void (*unthrottle)(struct tty_struct *tty);
+                    void (*stop)(struct tty_struct *tty);
+                    void (*start)(struct tty_struct *tty);
+                    void (*hangup)(struct tty_struct *tty);
+                    int (*break_ctl)(struct tty_struct *tty, int state);
+                    void (*flush_buffer)(struct tty_struct *tty);
+                    void (*set_ldisc)(struct tty_struct *tty);
+                    void (*wait_until_sent)(struct tty_struct *tty, int timeout);
+                    void (*send_xchar)(struct tty_struct *tty, char ch);
+                    int (*tiocmget)(struct tty_struct *tty, struct file *file);
+                    int (*tiocmset)(struct tty_struct *tty, struct file *file,
+                                    unsigned int set, unsigned int clear);
+                    int (*resize)(struct tty_struct *tty, struct winsize *ws);
+                    int (*set_termiox)(struct tty_struct *tty, struct termiox *tnew);
+            #ifdef CONFIG_CONSOLE_POLL
+                    int (*poll_init)(struct tty_driver *driver, int line, char *options);
+                    int (*poll_get_char)(struct tty_driver *driver, int line);
+                    void (*poll_put_char)(struct tty_driver *driver, int line, char ch);
+            #endif
+                    /* /proc entry operations */
+                    const struct file_operations *proc_fops;
+            };
