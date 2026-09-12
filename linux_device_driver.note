@@ -6462,6 +6462,49 @@ TTY Drivers :
         by kernel.
 
         tty driver descriptor and tty operations
+          <asm-generic/termbits.h>
+            typedef unsigned char cc_t;
+            typedef unsigned int speed_t;
+            typedef unsigned int tcflag_t;
+    
+            #define NCCS 19
+    
+            /**
+             * ktermios - the termios in kernel space,the termios can be
+             *            used to configure terminal
+             * @c_iflag:  input mode flags
+             * @c_oflag:  output mode flags
+             * @c_cflag:  control mode flags
+             * @c_lflag:  local mode flags
+             * @c_line:   line discipline
+             * @c_cc:     control characters
+             * @c_ispeed: input speed
+             * @c_ospeed: output speed
+             * # in source file <drivers/char/tty_io.c>,a global variable
+             *   named @tty_std_termios is type of struct ktermios,
+             *   its symbol is exposed through EXPORT_SYMBOL,it provides
+             *   a standard termios of tty devices.
+             *     {
+             *             .c_iflag = ICRNL | IXON,
+             *             .c_oflag = OPOST | ONLCR,
+             *             .c_cflag = B38400 | CS8 | CREAD | HUPCL,
+             *             .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK |
+             *                        ECHOCTL | ECHOKE | IEXTEN,
+             *             .c_cc = INIT_C_CC,
+             *             .c_ispeed = 38400,
+             *             .c_ospeed = 38400,
+             *     }    
+             */
+            struct ktermios {
+                    tcflag_t c_iflag;
+                    tcflag_t c_oflag;
+                    tcflag_t c_cflag;
+                    tcflag_t c_lflag;
+                    cc_t c_line;
+                    cc_t c_cc[NCCS];
+                    speed_t c_ispeed;
+                    speed_t c_ospeed;
+            };
           <linux/tty_driver.h>
             /**
              * tty_driver - the structure represents tty driver
@@ -6567,3 +6610,87 @@ TTY Drivers :
                     /* /proc entry operations */
                     const struct file_operations *proc_fops;
             };
+
+        creation of tty_driver and the destroy
+          <drivers/char/tty_io.c>
+            /**
+             * alloc_tty_driver - allocate a tty_driver descriptor
+             * @lines:            number of tty devices this driver supports
+             * return:            pointer to the tty_driver OR NULL
+             * # EXPORT_SYMBOL
+             * # just kzalloc() a descriptor with GFP_KERNEL,and initializes
+             *   ->kref,->magic to TTY_DRIVER_MAGIC,->num to @lines
+             */
+            struct tty_driver *alloc_tty_driver(int lines);
+
+            /**
+             * destruct_tty_driver - destruct the tty_driver descriptor
+             * @kref:                pointer to tty_driver->kref
+             * # finally called by put_tty_driver()
+             * # if TTY_DRIVER_INSTALLED is set in ->flags,for each line,
+             *   kfree() the corresponding termioses;if no TTY_DRIVER_DYNAMIC_DEV,
+             *   continue to invoke tty_unregister_device() to unregister the 
+             *   current tty device.
+             *
+             *   next,unregister /proc dentry of this driver,kfree() its @ttys,
+             *   and invoke cdev_del() to delete the chrdev ->cdev.
+             */
+            static void destruct_tty_driver(struct kref *kref);
+
+            /* put tty_driver,decrease kref by 1,if refcounter becomes _zero_,
+             * destruct_tty_driver() will be called.
+             */
+            void put_tty_driver(struct tty_driver *d);
+
+        set operations
+          /* tty_io.c
+           * set @driver->ops to @op
+           */
+          void tty_set_operations(struct tty_driver *driver,
+                                  const struct tty_operations *op);
+
+        registration/unregistration of tty_driver
+          <drivers/char/tty_io.c>
+            /**
+             * tty_register_driver - register a tty_driver descriptor
+             *                       to system
+             * @driver:              descriptor
+             * return:               0 OR error code
+             * # EXPORT_SYMBOL
+             * # this function will does :
+             *   if no TTY_DRIVER_DEVPTS_MEM AND ->num is not _zero_,
+             *   it will kzalloc() an array of void pointers,size is
+             *   @driver->num * 2,gfp flag is GFP_KERNEL.
+             *   and if we allocated this array,@driver->ttys will points
+             *   to it,@driver->termios points to array start address,adds
+             *   @driver->num.(the first @driver->num area for ttys,
+             *   the second @driver->num area for termioses)
+             *
+             *   if @driver->major is _zero_,this routine automatically
+             *   allocate chrdev region,and set ->major,->minor_start,
+             *   allocation relist on alloc_chrdev_region();
+             *   if ->major is not 0,it will invoke register_chrdev_region(),
+             *   to register the device number range.
+             *
+             *   relies on cdev_init() to initialize ->cdev with the
+             *   @tty_fops,it is global variable defined in the same file.
+             *   next,calls cdev_add() to add this chrdev,if everything is
+             *   OK,this driver will be linked to the list @tty_drivers the
+             *   systemwide registered tty drivers.
+             *
+             *   check ->flags,if TTY_DRIVER_DYNAMIC_DEV is not set,
+             *   invoke tty_register_device() for each lines(driver->num).
+             *
+             *   finally,call proc_tty_register_driver() to register /proc
+             *   dentry,and set TTY_DRIVER_INSTALLED in the flags.
+             *   ! any error happens will cause this function rollback.
+             */
+            int tty_register_driver(struct tty_driver *driver);
+
+            /* unregister the tty driver,unregister_chrdev_region(),
+             * list_del() from @tty_drivers.
+             * ! no cdev_del() is called,that will be delay to
+             *   destruction.
+             * # EXPORT_SYMBOL
+             */
+            int tty_unregister_driver(struct tty_driver *driver);
