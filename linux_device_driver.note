@@ -6471,7 +6471,7 @@ TTY Drivers :
     
             /**
              * ktermios - the termios in kernel space,the termios can be
-             *            used to configure terminal
+             *            used to configure line
              * @c_iflag:  input mode flags
              * @c_oflag:  output mode flags
              * @c_cflag:  control mode flags
@@ -6514,7 +6514,7 @@ TTY Drivers :
              * @owner:      driver owner
              * @driver_name:
              *              name string of driver
-             * @name:       name for the chrdev
+             * @name:       name for the chrdev -- tty node.
              * @name_base:  the base number of tty name,offset of
              *              printed name
              * @major:      major number
@@ -6611,6 +6611,76 @@ TTY Drivers :
                     const struct file_operations *proc_fops;
             };
 
+        tty_driver flags
+          <linux/tty_driver.h>
+            /* tty_driver been installed.
+             * the tty driver should never set this flag by itself.
+             */
+            #define TTY_DRIVER_INSTALLED 0x0001
+
+            /* request the tty layer to reset the termios setting when the
+             * last process has closed the deivce.
+             */
+            #define TTY_DRIVER_RESET_TERMIOS 0x0002
+
+            /* if set,indicates the driver will guarantee never not to set
+             * any serial character handling flags if
+             *   ((IGNBRK || (!BRKINT && !PARMRK)) && (IGNPAR || !INPCK))
+             * if there is no reason for the driver to send notifications
+             * of parity and break characters up to the line driver,it
+             * wont do so.
+             * this allows the line driver to optimize for this case if
+             * this flag is set.
+             * # allows the line discipline to process received characters
+             *   in a much quicker manner,as it does not have to inspect
+             *   every character received from the tty driver.
+             */
+            #define TTY_DRIVER_REAL_RAW 0x0004
+
+            /* the individual tty devices need to be registered with a call
+             * to tty_register_driver() when the device is found in the
+             * system and unregistered with a call to tty_unregister_device(),
+             * so the devices will be show up properly in sysfs.
+             *
+            #define TTY_DRIVER_DYNAMIC_DEV 0x0008
+
+            /* do not use the standard arrays,instead use dynamic memory
+             * keyed through devpts filesystem,only for pty driver.
+             * ** devpts usually is mounted on /dev/pts directory,for PTY
+             *    device node.
+             */
+            #define TTY_DRIVER_DEVPTS_MEM 0x0010
+
+            /* hardware handles break signals,pass the requested timeout to
+             * the caller instead of using a simple on/off interface.
+             */
+            #define TTY_DRIVER_HARDWARE_BREAK 0x0020
+
+        tty_driver types
+          <linux/tty_driver.h>
+            #define TTY_DRIVER_TYPE_SYSTEM 0x0001
+            #define TTY_DRIVER_TYPE_CONSOLE 0x0002
+            #define TTY_DRIVER_TYPE_SERIAL 0x0003
+            #define TTY_DRIVER_TYPE_PTY 0x0004
+            #define TTY_DRIVER_TYPE_SCC 0x0005        /* scc driver */
+            #define TTY_DRIVER_TYPE_SYSCONS 0x0006
+
+        tty_driver subtypes
+          <linux/tty_driver.h>
+            #define SYSTEM_TYPE_TTY 0x0001
+            #define SYSTEM_TYPE_CONSOLE 0x0002
+            #define SYSTEM_TYPE_SYSCONS 0x0003
+            #define SYSTEM_TYPE_SYSPTMX  0x0004
+
+        tty_driver pty subtypes
+          <linux/tty_driver.h>
+            #define PTY_TYPE_MASTER 0x0001
+            #define PTY_TYPE_SLAVE 0x0002
+
+        tty_driver serial subtype
+          <linux/tty_driver.h>
+            #define SERIAL_TYPE_NORMAL 1
+
         creation of tty_driver and the destroy
           <drivers/char/tty_io.c>
             /**
@@ -6620,6 +6690,7 @@ TTY Drivers :
              * # EXPORT_SYMBOL
              * # just kzalloc() a descriptor with GFP_KERNEL,and initializes
              *   ->kref,->magic to TTY_DRIVER_MAGIC,->num to @lines
+             *                     #^0x5402
              */
             struct tty_driver *alloc_tty_driver(int lines);
 
@@ -6687,10 +6758,47 @@ TTY Drivers :
              */
             int tty_register_driver(struct tty_driver *driver);
 
-            /* unregister the tty driver,unregister_chrdev_region(),
-             * list_del() from @tty_drivers.
+            ! function tty_register_device() is defined in the same file.
+                struct device *tty_register_device(*@driver, @index, *@device);
+              it will makes up a device number from @driver->major,
+              @driver->minor_start,and @index -- number of minors.
+              @index can not greater than the lines that the driver carry on.
+              if @driver->type is TTY_DRIVER_TYPE_PTR,then invoke function
+              pty_line_name(),pass it @driver,@index,and a local array with
+              size is 64 bytes;otherwise,invoke tty_line_name() and pass the
+              same arguments.
+              finally,return with call to device_create(),the class is
+              @tty_class,@drvdata is NULL.
+              ** if this function is called from tty_register_driver(),
+                 then @device is NULL,that means the tty device has no
+                 a struct device object that is associated with.
+                 # in another sense,these tty devices are virtual,not
+                   physical devices connected to the computer.
+
+            ! function tty_unregister_device() is defined in the same file.
+                void tty_unregister_device(*@driver, @index);
+              it just invokes device_destroy() on the tty devices covered
+              the specified device numbers.
+    
+            /* unregister the tty driver.
+             * unregister_chrdev_region() the device numbers.
+             * list_del() @driver from @tty_drivers.
              * ! no cdev_del() is called,that will be delay to
              *   destruction.
              * # EXPORT_SYMBOL
              */
             int tty_unregister_driver(struct tty_driver *driver);
+
+            ! if we want to unregister the tty driver,we should invoke
+              tty_unregister_driver() at first,then call to the function
+              put_tty_driver() to release its refcounter.
+
+        ! call-out device
+            callout devices were traditionally used to control the line settings
+            of a device,the data would be sent and received through one device
+            node,and any line setting changes would be sent to a different device.
+            requires to use of two minor numbers for every single tty device.
+            almost all drivers handle both the data and line settings on the
+            same device node,the callout type is rarely used for new drivers.
+
+

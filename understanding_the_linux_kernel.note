@@ -26093,12 +26093,13 @@ Chapter 13 : I/O Architecture and Device Drivers
                  *     set @kobj->parent to @parent
                  *     call to kobject_add_internal() on @kobj
                  *   kobject_add_internal() :
-                 *     get parent of @kobj via kobject_get()
+                 *     get parent of @kobj via kobject_get() in local variable @parent
                  *     if @kobj->kset is not NULL {
-                 *       increase ref counter of @kobj->kset->kobj
+                 *       if @parent is NULL,we reset @parent to the kset's kobject through kobject_get(),
+                 *       that will increase ref counter of @kobj->kset->kobj .
                  *       call to kobj_kset_join(),and this routine will increase ref counter of @kobj->kset,next,
-                 *       list_add_tail() @kobj->entry to @kobj->kset->list
-                 *       set @kobj->parent to local variable parent
+                 *       list_add_tail() @kobj->entry to @kobj->kset->list .
+                 *       set @kobj->parent to local variable parent.
                  *     }
                  *     create_dir() for @kobj,dump_stack() if any error encoutnered,set @kobj->state_in_sysfs to 1
                  *     if succeed to create directory in sysfs
