@@ -6461,6 +6461,86 @@ TTY Drivers :
         ttyS0 means serial port 0,tty0 usually is a virtual device created
         by kernel.
 
+        tty descriptor
+          <linux/tty.h>
+            /**
+             * tty_buffer - represents a tty buffer
+             * @next:       to next tty buffer
+             * @char_buf_ptr:
+             *              points to the start location for
+             *              characters in @data
+             * @flag_buf_ptr:
+             *              points to the start location for
+             *              flags in @data
+             * @used:       in-use memory bytes for both areas
+             * @size:       size of one area
+             * @commit:     bytes been committed for read
+             * @read:       bytes been readed
+             * @data:       data buffer,tty core will allocates memory
+             *              for this field with size is "2 * @size",
+             *              @char_buf_ptr points to the first region,
+             *              and @flag_buf_ptr points to the second region
+             */
+            struct tty_buffer {
+                    struct tty_buffer *next;
+                    char *char_buf_ptr;
+                    unsigned char *flag_buf_ptr;
+                    int used;
+                    int size;
+                    int commit;
+                    int read;
+                    unsigned long data[0];
+            };
+
+            /**
+             * tty_bufhead - buffers' heads for tty buffers
+             * @work:        delay work for flush buffer
+             * @lock:        protection
+             * @head:        head of activating buffers
+             *               # read start from head
+             * @tail:        tail of activating buffers
+             *               # insert append to tail
+             * @free:        not in-use buffers
+             * @memory_used: buffer space used excluding free queue
+             */
+            struct tty_bufhead {
+                    struct delayed_work work;
+                    spinlock_t lock;
+                    struct tty_buffer *head;
+                    struct tty_buffer *tail;
+                    struct tty_buffer *free;
+                    int memory_used;
+            };
+    
+            /**
+             * tty_struct - tty descriptor
+             * @magic:      magic number
+             * @kref:       refcounter
+             * @driver:     the driver bound to
+             * @ops:        tty operations
+             * @index:      index specified by driver
+             * @ldisc_mutex:
+             *              line discipline mutex
+             * @ldisc:      line discipline descriptor
+             * @name:       name of tty
+             * @buf:        tty buffer for data from hardware
+             */
+            struct tty_struct {
+                    int magic;
+                    struct kref kref;
+                    struct tty_driver *driver;
+                    const struct tty_operations *ops;
+                    int index;
+
+                    struct mutex ldisc_mutex;
+                    struct tty_ldisc *ldisc;
+                    ...
+                    char name[64];
+                    ...
+                    struct tty_bufhead buf;
+                    ...
+            };
+
         tty driver descriptor and tty operations
           <asm-generic/termbits.h>
             typedef unsigned char cc_t;
@@ -6610,6 +6690,131 @@ TTY Drivers :
                     /* /proc entry operations */
                     const struct file_operations *proc_fops;
             };
+
+            open():
+              when a user open the device node of a tty device,this method is
+              called by tty core.
+              @tty represents the tty device.
+              in this routine,tty driver needs to initializes the device,save
+              some identifiers to the @tty or to other location,tty driver can
+              references to these informations later.
+
+            close():
+              release the refcounter of allocated resources by open(),if the last
+              process called close(),recycle the resources.
+              when close() is called,if necessary the entity-specific identifiers
+              should be released by tty driver.
+
+            write():
+              called by tty core when there is data to be sent to the hardware.
+              this method returns the real bytes of characters been write out to
+              the hardware.cache should be considered because the line speed and
+              hardware effect is the factors involve to write operation.
+              write() method can be called both in the interrupt context and in
+              the user context,thus the tty driver cant let this routine causes
+              sleep behavior in interrupt context.(in_irq() can check context)
+              /* copy_from_user(),kmalloc(),printk(),schedule() all will cause
+               * sleeping.
+               */
+              write() can be called by tty subsystem itself when needs to send
+              some data out the tty device.this can happen if the tty driver
+              does not implement the put_char() function in tty_struct.
+              in that case,tty core calls to write() with data size 1,this
+              commonly happens when the tty core wants to convert a newline
+              character to a line feed plus a newline character,the write()
+              must not return 0 for this kind of call,that means the driver
+              must write that byte of data to the device,because the caller 
+              does not buffer the data and try again later.
+              because write() does not know whether it is come from put_char(),
+              so even only one byte is send,it must writes at least one byte
+              before returning.
+
+            write_room():
+              called when tty core wants to know how much room in the write
+              buffer the tty driver has available.
+
+            chars_in_buffer():
+              called when tty core wants to know how many characters are
+              still remaining in the write buffer to be sent out.
+
+            flush_chars(),wait_until_sent():
+              flush_chars()can be called by tty core after put_char()
+              is called.
+              flush_chars() start the transferring if it has not already
+              started.(not sync,can return to caller before flush finished)
+              wait_until_sent() must wait until all of characters are sent
+              before returning to caller,or until the value passed in @timeout
+              has expired.(sync version)
+              /* wait_until_sent() is allowed to sleep */
+
+            flush_buffer():
+              called by tty core when the tty driver is to flush all of the
+              data still in its write buffers out of memory.
+              any data remaining in the buffer is lost and not sent to the
+              device.
+              ! it is not write data out to hardware device,just reset the
+                buffer.(drop everything now in the buffer)
+
+            read():
+              tty_driver does not need to provides a read() implementation.
+              because the tty driver is responsible for sending any data
+              received from the hardware "to the tty core" when it is received.
+              when tty driver received character from hardware,it should
+              invoke tty_insert_flip_char(),this function is defined in
+              the header <linux/tty_flip.h>.
+              in the tty_struct,member @buf is type of struct tty_bufhead,
+              in which two lists of tty_buffer(s) is contained.
+              ->head and ->tail defined the activating buffers,and ->free
+              collects the not in-use buffers.when the activating buffers
+              is about to fill up,tty core will try to get a free buffer
+              from the free list.
+              tty driver should monitors the current state of buffers,
+              invokes tty_filp_buffer_push() to flush flip buffers to the user.
+              <linux/tty_flip.h>
+                /**
+                 * tty_insert_flip_char - insert a character into tty flip buffer
+                 * @tty:                  tty struct
+                 * @ch:                   character
+                 * @flag:                 insert flag,depends on what the @ch is
+                 *                        available values
+                 *                          TTY_NORMAL => normal character
+                 *                          TTY_BREAK
+                 *                          TTY_FRAME
+                 *                          TTY_PARITY
+                 *                          TTY_OVERRUN
+                 * return:                1 => one character been inserted
+                 *                        OR error code
+                 * # this function will first try the buffer at tail.
+                 *   if @tty->buf.tail is not NULL AND the buffer is not fill up,
+                 *   place @flag in tty_buffer->flag_buf_ptr[idx],and place
+                 *   @ch in tty_buffer->char_buf_ptr[idx],update in-use counter.
+                 *   otherwise,invoke tty_insert_flip_string_flags() with the
+                 *   @size == 1.
+                 */
+                static inline int tty_insert_flip_char(struct tty_struct *tty,
+                                                       unsigned char ch, char flag);
+
+              <drivers/char/tty_buffer.c>
+                /**
+                 * tty_flip_buffer_push - queue a push of the terminal flip buffers
+                 *                        to the line discipline.
+                 * @tty:                  tty struct
+                 * # EXPORT_SYMBOL
+                 * # this function will
+                 *     lock @tty->buf.lock,disable local irq
+                 *     if @tty->buf.tail is not NULL,set ->commit of tail to
+                 *     tail's ->used.
+                 *     release lock and enable local irq
+                 *     check if @tty->low_latency is set,invoke flush_to_ldisc(),
+                 *     otherwise,invoke schedule_delayed_work() on @tty->buf.work with
+                 *     @delay == 1.
+                 * # if tty driver can accept data at very high rates,the ->low_latency
+                 *   flag should be set,in this case,no delay work will be scheded by
+                 *   tty core
+                 * # this routine must not be called from IRQ context if ->low_latency
+                 *   is set,and when ->low_latency is set,driver's locks should be held.
+                 */
+                void tty_flip_buffer_push(struct tty_struct *tty);
 
         tty_driver flags
           <linux/tty_driver.h>
