@@ -7006,4 +7006,133 @@ TTY Drivers :
             almost all drivers handle both the data and line settings on the
             same device node,the callout type is rarely used for new drivers.
 
+        TTY Line Settings
+          user can manipulates tty line settings through library function call
+          or ioctl call on device node.
+          tty core converts both into tty driver callbacks and ioctl calls.
 
+          set_termios():
+            library function calls are translated to ioctl call,and tty core
+            converts ioctl calls to single set_termios() callback.tty driver
+            needs to decode the settings in termios structure,and react to
+            changes the setting into tty device.
+            a macro function RELEVANT_IFLAG() is defined in the header
+            <linux/usb/serial.h>,it can be used to extracts the parity check
+            flags in termios's @c_iflag.
+              #define RELEVANT_IFLAG(iflag) \
+                      (iflag & (IGNBRK | BRKINT | IGNPAR | PARMRK | INPCK))
+
+              e.g.
+                tcflag_t ccflag = tty->termios->c_cflag;
+                if (old) {
+                  if (ccflag == old->c_cflag &&
+                      RELEVANT_FLAG(tty->termios->c_iflag) ==
+                      RELEVANT_FLAG(old->c_iflag)) {
+                          printk(KERN_INFO "no thing need to be changed.");
+                          return;
+                  }
+                }
+
+            in header <linux/tty.h>,a lot of helper macros are provided to
+            extract particular flag,such as
+                                                           <asm-generic/termbits.h>
+                                                      +--> 0000060
+                                                      |
+              C_CSIZE(tty) => tty->termios->c_cflag & CSIZE
+                              #^ _C_FLAG(tty, f)
+              I_IGNBRK(tty) => tty->termios->c_iflag & IGNBRK
+                               #^ _I_FLAG(tty, f)
+              INTR_CHAR(tty) => tty->termios->c_cc[VINTR]
+              O_OPOST(tty) => tty->termios->c_oflag & OPOST
+                              #^ _O_FLAG(tty, f)
+              L_ECHO(tty) => tty->termios->c_lflag & ECHO
+                             #^ _L_FLAG(tty, f)
+
+              <asm-generic/termbits.h>
+                CS5 => 0000000    /* data bits = 5 */
+                CS6 => 0000020    /* data bits = 6 */
+                CS7 => 0000040    /* data bits = 7 */
+                CS8 => 0000060    /* data bits = 8 */
+
+                PARENB => 0000400 /* parity mask */
+                PARODD => 0001000 /* parity is ODD */
+
+                CRTSCTS => 020000000000 /* flow control -- RTS/CTS */
+
+                ! other bits can be found in the same header.
+
+            function tty_get_baud_rate(*@tty) is declared in header
+            <linux/tty.h>,whose impl is in <drivers/char/tty_ioctl.c>.
+              speed_t tty_get_baud_rate(struct tty_struct *tty);
+
+              # this function invokes tty_termios_baud_rate() on
+                @tty's termios to get current baud.
+                if baud is equal to 38400 AND @tt->alt_speed is TRUE,
+                returns tty->alt_speed,otherwise,return the baud that
+                is retrieved before.
+                ** for the case 38400 AND alt_speed is T,
+                   if @tty->warned is _zero_,set it to 1,and printk()
+                   KERN_WARNING message.
+                ** function tty_termios_baud_rate() is defined in the
+                   same file,it will convert termios baud rate data
+                   into a speed.
+
+          tiocmget(),tiocmset():
+            before 2.6,ioctl constant TIOCMGET,TIOCMBIS,TIOCMBIC,TIOCMSET
+            were existing and used to get the line setting values,but
+            since 2.6,TIOCMGET has been turned into callback tiocmget(),and
+            the others have been simplified and represented by tiocmset().
+    
+            tiocmget() called by tty core when it wants to know the current
+            physical values of the control lines of a specific tty device,
+            this is usually done to retrieve the values of DTR and RTS lines
+            of a serial port;if tty driver cant directly read the MSR or
+            MCR registers of the serial port -- hardware has forbidden,a copy
+            of them should be kept locally.
+            e.g. /* tiocmget() callback */
+              /* a local copy is kept */
+              struct the_tty_struct the_tty = container_of(tty, struct the_tty_struct,
+                                                           inner_tty);    
+              unsigned int msr_reg = the_tty->msr_reg;
+              unsigned int mcr_reg = the_tty->mcr_reg;
+                                      /* DTR is set */
+              unsigned int result = ((mcr_reg & MCR_DTR) ? TIOCM_DTR : 0) |
+                                      /* RTS is set */
+                                    ((mcr_reg & MCR_RTS) ? TIOCM_RTS : 0) |
+                                      /* LOOP is set */
+                                    ((mcr_reg & MCR_LOOP) ? TIOCM_LOOP : 0) |
+                                      /* CTS is set */
+                                    ((msr_reg & MSR_CTS) ? TIOCM_CTS : 0) |
+                                      /* Carrier detect is set */
+                                    ((msr_reg & MSR_CD) ? TIOCM_CAR : 0) |
+                                      /* Ring Indicator is set */
+                                    ((msr_reg & MSR_RI) ? TIOCM_RI : 0) |
+                                      /* DSR is set */
+                                    ((msr_reg & MSR_DSR) ? TIOCM_DSR : 0);
+
+            tiocmset() is called by tty core when it wants to set the values
+            of the control lines of a specific tty device.
+            parameter @set contains a bitmask of the line settings the bits
+            should be setup,and parameter @clear contains a bitmask of the line
+            settings the bits should be clear.
+            ! an ioctl never asks the driver to both set and clear a particular
+              bit at the same time.
+
+            e.g. /* tiocmset() callback */
+              /* local register copy is kept */
+              struct the_tty_struct the_tty = container_of(tty, struct the_tty_struct,
+                                                           inner_tty);
+              unsigned int mcr_reg = the_tty->mcr_reg;
+
+              if (set & TIOCM_RTS)
+                      mcr |= MCR_RTS;
+              if (set & TIOCM_DTR)
+                      mcr |= MCR_RTS;
+
+              if (clear & TIOCM_RTS)
+                      mcr &= ~MCR_RTS;
+              if (clear & TIOCM_DTR)
+                      mcr &= ~MCR_RTS;
+
+              the_tty->mcr_reg = mcr_reg;
+              return 0;
