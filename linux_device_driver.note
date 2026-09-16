@@ -6523,7 +6523,49 @@ TTY Drivers :
              *              line discipline mutex
              * @ldisc:      line discipline descriptor
              * @name:       name of tty
+             * @flags:      tty device flags
+             *              available value: # bit numbers
+             *                TTY_THROTTLED        0
+             *                TTY_IO_ERROR         1
+             *                TTY_OTHER_CLOSED     2
+             *                TTY_EXCLUSIVE        3
+             *                TTY_DEBUG            4
+             *                TTY_DO_WRITE_WAKEUP  5
+             *                TTY_PUSH             6
+             *                TTY_CLOSING          7
+             *                TTY_LDISC            9
+             *                TTY_LDISC_CHANGING   10
+             *                TTY_LDISC_OPEN       11
+             *                TTY_HW_COOK_OUT      14
+             *                TTY_HW_COOK_IN       15
+             *                TTY_PTY_LOCK         16
+             *                TTY_NO_WRITE_SPLIT   17
+             *                TTY_HUPPED           18
+             *                TTY_FLUSHING         19
+             *                TTY_FLUSHPENDING     20
+             *              ** details in the header.
+             * @stopped:    indicates whether the tty device is stopped
+             * @hw_stopped: indicates whether or not the tty device's hardware
+             *              is stopped
+             * @flow_stopped:
+             *              indicates whether transmission has been pasued due to
+             *              software flow control(XON/XOFF)
+             * @packet:     indicates whether packet mode is enabled on a
+             *              pty master
+             *              ** ioctl command TIOCPKT
+             * @low_latency:
+             *              indicates whether the tty device is a low-latency device,
+             *              capable of receiving data at a very high rate of speed
              * @buf:        tty buffer for data from hardware
+             * @write_wait: wait_queue for writing function,tty driver should
+             *              wake this up to signal when it can receive more data
+             * @read_wait:  wait_queue for reading function,tty driver should
+             *              wake this up to signal when it can send more data
+             * @driver_data:
+             *              tty driver specific data,the pointer that tty_driver
+             *              can use to store data local to the tty driver
+             * @closing:    indicates whether tty device is in the middle of
+             *              closing the port
              */
             struct tty_struct {
                     int magic;
@@ -6537,7 +6579,20 @@ TTY Drivers :
                     ...
                     char name[64];
                     ...
+                    unsigned long flags;
+                    ...
+                    unsigned char stopped:1, hw_stopped:1,
+                                  flow_stopped:1, packet:1;
+                    unsigned char low_latency:1, warned:1;
+                    ...
                     struct tty_bufhead buf;
+                    ...
+                    wait_queue_head_t write_wait;
+                    wait_queue_head_t read_wait;
+                    ...
+                    void *driver_data;
+                    ...
+                    unsigned char closing:1;
                     ...
             };
 
@@ -6606,16 +6661,17 @@ TTY Drivers :
              * @type:       type of tty driver
              * @subtype:    subtype of tty driver
              * @init_termios:
-             *              initial termios
+             *              initial termios for tty device when it is
+             *              created
              * @flags:      tty driver flags
              * @proc_entry: /proc entry
-             * @other:      only used for the PTY driver
+             * @other:      only used for the PTY driver,to a tty slave driver
              * @ttys:       ttys attached to this driver
              * @termios:    termioses attached to this driver
              * @termios_locked:
              *              locked termioses attached to this driver
              * @driver_state:
-             *              tty driver state
+             *              tty driver internal state,used only by pty driver
              * @ops:        operations
              * @tty_drivers:
              *              list node to list of global registered tty drivers
@@ -6705,6 +6761,12 @@ TTY Drivers :
               when close() is called,if necessary the entity-specific identifiers
               should be released by tty driver.
 
+            put_char():
+              single-character write function,called by tty core when a single
+              character is to be written to the device.
+              if no this function is implemented(),the write() callback will be
+              used as instead.
+
             write():
               called by tty core when there is data to be sent to the hardware.
               this method returns the real bytes of characters been write out to
@@ -6754,6 +6816,35 @@ TTY Drivers :
               device.
               ! it is not write data out to hardware device,just reset the
                 buffer.(drop everything now in the buffer)
+
+            throttle(),unthrottle(),stop(),start():
+              data-throttling functions,used to help control overruns of the
+              tty core's input buffers.
+              throttle() called when tty core's input buffers are getting full,
+              driver should try to signal to the device that no more characters
+              should be sent to it.
+              unthrottle() called when tty core's input buffers have been
+              empitied out,and it can now accept more data.
+              stop() and start() are much like the previous twos,but they
+              signify that the driver should stop sending data "to the device"
+              and then later resume sending data.
+
+            hangup():
+              called when tty driver should hang up the tty device.
+
+            break_ctl():
+              line break control function,called when the tty driver is to turn
+              on or off the line BREAK status on the RS-232 port.
+              @state == -1 => BREAK status should be turned on.
+              @state ==  0 => BREAK status should be turned off.
+              ** if driver has implemented this function,the tty core will handle
+                 the TCSBRK,TCSBRKP,TIOCSBRK,TIOCCBRK ioctls;otherwise,these
+                 ioctls are sent to the driver's ioctl().
+
+            send_xchar():
+              send X-type char.this function is used to send a high-priority XON
+              or XOFF character to the tty device.the character is specified by
+              parameter @ch.
 
             read():
               tty_driver does not need to provides a read() implementation.
@@ -6974,6 +7065,20 @@ TTY Drivers :
               same arguments.
               finally,return with call to device_create(),the class is
               @tty_class,@drvdata is NULL.
+                                          /* device_create() is defined in
+                                           * <drivers/base/core.c>,which
+                                           * will calls to device_create_vargs()
+                                           * with the variable arguments
+                                           * constructed from @fmt.
+                                           * return the result from the
+                                           * device_create_vargs() to caller.
+                                           *   struct device *device_create(struct class *class, struct device *parent,
+                                           *                                dev_t devt, void *drvdata, const char *fmt, ...);
+                                           * function device_create_vargs() will
+                                           * kzalloc() a new device descriptor with GFP_KERNEL,
+                                           * set its fields,and invoke device_register()
+                                           * for it.
+                                           */
               ** if this function is called from tty_register_driver(),
                  then @device is NULL,that means the tty device has no
                  a struct device object that is associated with.
@@ -7136,3 +7241,50 @@ TTY Drivers :
 
               the_tty->mcr_reg = mcr_reg;
               return 0;
+
+        tty ioctl
+          the callback ioctl() will be called by tty core when ioctl() system call
+          was issued on the device node.
+          2.6 kernel defined about 70 different ioctl commands,but not all of them
+          handled by most tty drivers.
+          more popular tty ioctls :
+            TIOCSERGETLSR
+              get values of tty device's line status register -- LSR
+            TIOCGSERIAL
+              get the serial line information,a caller can potentially get a lot of
+              serial line information from the tty device all at once in the call.
+              the argument to this command is a pointer to an object is type of
+              struct serial_struct,driver will needs to fill up this object.
+            TIOCSSERIAL
+              set the serial line information,allows user to set the serial line
+              status of the tty device all at once.
+            TIOCMIWAIT
+              waits for MSR change,user asks ioctl() in the unusual circumstances
+              that it wants to sleep within the kernel until something happens
+              to the MSR register of the tty device.the argument caontains the
+              type of event the user is waiting for.
+              # commonly used to wait until a status line changes,signaling that
+                more data is ready to be sent to the device.
+              ! should use wait_queue to implement this,not the interruptible_sleep_on().
+                when MSR changed is detected,wake_up_*() should be called.
+            TIOCGICOUNT
+              get interrupt counts,called when the user wants to know how many
+              serial line interrupts have happened.the argument is a pointer to
+              an object is type of struct serial_icounter_struct,driver needs
+              to fill this structure.
+              # interrupt counter needs ISR supporting.
+
+        proc and sysfs handling of tty devices
+          tty driver provides proc handling through the operation set
+            tty_operations->proc_fops
+          function proc_tty_register_driver() is defined in <fs/proc/proc_tty.c>.
+          it will be called by tty_register_driver().
+          if driver->driver_name is TRUE AND driver->proc_entry is NULL -- no proc dentry,
+          AND driver->ops->proc_fops is not NULL,this function will calls to
+          proc_create_data() to creates proc dentry for this tty driver.the parent
+          directory is /proc/tty/driver/ ,and set driver->proc_entry points to the new
+          proc dentry.
+    
+          creation of sysfs files is handled by device_create(),which will be called
+          tty_register_device().if TTY_DRIVER_DYNAMIC_DEV is set,this function will
+          be called by tty_register_driver() for each individual device.
