@@ -7288,3 +7288,35 @@ TTY Drivers :
           creation of sysfs files is handled by device_create(),which will be called
           tty_register_device().if TTY_DRIVER_DYNAMIC_DEV is set,this function will
           be called by tty_register_driver() for each individual device.
+
+Network Drivers :
+        ! "everything is a file" can not applied on network interfaces.
+        # network subsystem of the linux kernel is designed to be completely
+          protocol-independent.this applies to both networking protocols and
+          hardware protocols.
+        # terminologys -- "octet",a group of eight bits.
+                       -- "header",a set of bytes(err, octets) prepended to a
+                          packet as it is passed through the various layers of
+                          the network subsystem.
+                          ** network driver usually needs to create the
+                             hardware-level header.
+
+
+        /* Network environment */
+          network0: 192.168.0.0/24
+          network1: 192.168.1.0/24
+          # different networks
+
+          /* bridge to connects two gateways */
+          bridge0    
+
+                 /* gateway */
+          intf0: 192.168.0.1/24 master bridge0
+          intf1: 192.168.1.1/24 master bridge0
+
+          /* hosts in different network */
+          host0: 192.168.0.5/24
+          host1: 192.168.1.5/24
+
+          route: network0 192.168.0.0 via intf0 src 192.168.0.1
+                 network1 192.168.1.0 via intf1 src 192.168.1.1
