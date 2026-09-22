@@ -7320,3 +7320,295 @@ Network Drivers :
 
           route: network0 192.168.0.0 via intf0 src 192.168.0.1
                  network1 192.168.1.0 via intf1 src 192.168.1.1
+
+        net device
+          the structure net_device is used to represents a network device.
+    
+          <linux/netdevice.h>
+            /**
+             * net_device - represents a network interface
+             * @name:       array to stores name string of this net device
+             *              # IFNAMSIZ defined in <linux/if.h>,value is 16
+             * @name_hlist: hash table node for name list
+             * @ifalias:    alias of this interface
+             * @mem_end:    shared mem end
+             * @mem_start:  shared mem start
+             * @base_addr:  device I/O address
+             * @irq:        device IRQ number
+             * @if_port:    selectable AUI,TP,...
+             * @dma:        DMA channel
+             * @state:      interface internal state
+             * @dev_list:   list node to the list for all registered net devices
+             * @napi_list:  list node to NAPI
+             * @unreg_list: list node used for unregistration work
+             * @features:   the features this interface supported
+             * @_tx:        array of netdev_queue objects
+             * @refcnt:     reference counter of this interface
+             *              # dev_hold() -- increase this field by 1
+             *                dev_put()  -- decrease this field by 1
+             * @destructor: called from unregister,can be used to call free_netdev()
+             */
+            struct net_device {
+                    char name[IFNAMSIZ];
+                    struct hlist_node name_hlist;
+                    char *ifalias;
+                    unsigned long mem_end;
+                    unsigned long mem_start;
+                    unsigned long base_addr;
+                    unsigned int irq;
+    
+                    unsigned char if_port;
+                    unsigned char dma;
+    
+                    unsigned long state;
+    
+                    struct list_head dev_list;
+                    struct list_head napi_list;
+                    struct list_head unreg_list;
+
+                    unsigned long features;
+                    ...
+                    struct netdev_queue *_tx ____cacheline_aligned_in_smp;
+                    ...
+                    atomic_t refcnt ____cacheline_aligned_in_smp;
+                    ...
+                    void (*destructor)(struct net_device *dev);
+                    ...
+            };
+
+        net device allocation/deallocation
+          <net/core/dev.c>
+            /**
+             * alloc_netdev_mq - routine to allocate network device
+             * @sizeof_priv:     size of private data to allocate space for
+             * @name:            interface name
+             * @setup:           callback to be called for setup net_device
+             * @queue_count:     the number of subqueues to allocate
+             * return:           net_device descriptor OR NULL
+             * # EXPORT_SYMBOL
+             * # macro function alloc_netdev() is called to this function with
+             *   @queue_count == 1.
+             * # routine behavior :
+             *     first allocation for net_device.
+             *       allocate size is
+             *         "sizeof(struct net_device) + aligned @sizeof_priv + NETDEV_ALIGN - 1"
+             *                                     #^ NETDEV_ALIGN == 32
+             *         # via kzalloc()
+             *       GFP flag is GFP_KERNEL
+             *         +-- net_device->padded <= size of the padded area
+             *         |                         ** we need to record this size for kfree()
+             *         |                       +--> unused padding
+             *         V                       |
+             *       |<--->|                 |<--->|
+             *       [ ... | net_device area | ... | net_device private data area ] => chunk1
+             *       |<------------------- memory allocated --------------------->|
+             *       ! both net_device start and private data start are 32 bytes aligned
+             *     second allocation for subqueue
+             *       allocation size is
+             *         "sizeof(struct netdev_queue) * @queue_count"
+             *         # via kcalloc()
+             *       GFP flag is GFP_KERNEL
+             *       [ netdev_queue | netdev_queue | netdev_queue | ... ] => chunk2
+             *       |<------------------ subqueues ------------------->|
+             *       ! no NETDEV_ALIGN at there
+             *       net_device->_tx will points to the start of array
+             *     if memory allocations are succeed,invoke
+             *       dev_unicast_init() on the descriptor
+             *       dev_net_set() on the descriptor,with &@init_net
+             *       netdev_init_queues() on the descriptor
+             *     set fields
+             *       ->_tx = the address returned from second memory allocation
+             *       ->num_tx_queues = @queue_count
+             *       ->real_num_tx_queues = @queue_count
+             *       ->gso_max_size = GSO_MAX_SIZE
+             *       ->ethtool_ntuple_list.count = 0
+             *       ->priv_flags = IFF_XMIT_DST_RELEASE
+             *       ->name copy from @name
+             *     finally invoke @setup on the descriptor,and return it to caller.
+             */
+            struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
+                                               void (*setup)(struct net_device *),
+                                               unsigned int queue_count);
+
+            /**
+             * free_netdev - the common destructor for net_device
+             * @dev:         net device
+             * # EXPORT_SYMBOL
+             * # routine behavior :
+             *     invoke release_net() on the @dev's net,which will decrease
+             *     ->use_count of that net.
+             *     invoke kfree() to free ->_tx.
+             *     invoke dev_addr_flush() to flush interface address.
+             *     invoke ethtool_ntuple_flush() to clear ethtool n-tuple list.
+             *     for each element on ->napi_list,invoke netif_napi_del() on the
+             *     napi_struct descriptor.
+             *     if ->reg_state is equal to NETREG_UNINITIALIZED,kfree() the
+             *     @dev(free address is current descriptor subtract padding),and
+             *     return to caller.
+             *     otherwise
+             *       check ->reg_state whether is not equal to NETREG_UNREGISTERED,
+             *       if it is the case,that is a BUG.
+             *       set ->reg_state to NETREG_RELEASED.
+             *       invoke put_device() on @dev->dev to put the internal struct device
+             *       member.
+             * # some drivers usually set net_device->destructor points to this common
+             *   destroy routine.
+             * # this function is called from unregister_netdev(),which is an inline
+             *   function with static linkage,and defined in <linux/netdevice.h>.
+             *   it will calls to unregister_netdevice_queue() with parameter @head
+             *   is NULL.
+             */
+            void free_netdev(struct net_device *dev);
+
+        net device registration/unregistration
+          ! registration and unregistration,the kernel network subsystem will
+            acquires the mutex @rtnl_mutex defined in <net/core/rtnetlink.c>,
+            through rtnl_lock(),release the lock later through rtnl_unlock().
+            ** rtnl_unlock() does not unlock the mutex directly,instead,it
+               calls to netdev_run_todo(),and within that function,__rtnl_unlock()
+               is called to release the mutex.
+            # rtnl_lock() and rtnl_unlock() are EXPORT_SYMBOL.
+
+          ! ethernet device is allocated through alloc_etherdev(),which is just
+            a wrapper for alloc_netdev_mq(),@name is "eth%d",and @setup is
+            ether_setup().
+    
+          <net/core/dev.c>
+            /**
+             * register_netdev - register a network device
+             * @dev:             interface descriptor
+             * return:           0 OR error code
+             * # EXPORT_SYMBOL
+             * # this routine just does
+             *     rtnl_lock()
+             *     if '%' is in ->name,invoke dev_alloc_name(),this function
+             *     is defined in the same source file,it will calls to __dev_alloc_name()
+             *     to allocate a name for the device.
+             *     ** in this case,->name should contains a format string.
+             *        such as "intf%d",kernel will replaces '%d' to next available
+             *        interface number.
+             *     next,calls to register_netdevice(),after which returned,call to
+             *     rtnl_unlock() and return result.
+             */
+            int register_netdev(struct net_device *dev);
+
+            /**
+             * register_netdevice - main helper to register a network device
+             * @dev:                interface descriptor
+             * return:              0 OR error code
+             * # EXPORT_SYMBOL
+             * # rtnl mutex requires
+             * # may sleep
+             * # routine behavior :
+             *     retrieves net structure of the @dev.
+             *     does some BUG checkings.
+             *     initialize spin lock ->addr_list_lock.
+             *     invoke netdev_set_addr_lockdep_class() on @dev.
+             *     invoke netdev_init_queue_locks() on @dev.
+             *     set @dev->iflink to -1.
+             *     if ->netdev_ops->ndo_init has implemented,calls to it.
+             *     invoke dev_get_valid_name() to check @dev->name is valid.
+             *     fix illegal checksum combinations -- ->features checking and
+             *     adjustment.
+             *     invoke netdev_initialize_kobject() on @dev -- device_initialize() on
+             *     @dev->dev .
+             *     invoke call_netdevice_notifiers() with NETDEV_POST_INIT to make a
+             *     notification about netdev initialization.
+             *     invoke netdev_register_kobject() on @dev -- create sysfs entries,and
+             *     call to device_add().
+             *     set ->reg_state to NETREG_REGISTERED.
+             *     set __LINK_STATE_PRESENT bit in ->state.
+             *     invoke dev_init_schedule() on @dev.
+             *     get refcnt of @dev through dev_hold().
+             *     invoke list_netdevice() link @dev to the list of all registered net devices.
+             *     make another notification about net device registration.
+             *     if ->rtnl_link_ops is NULL OR ->rtnl_link_state is RTNL_LINK_INITIALIZED,
+             *     calls to rtmsg_ifinfo() with RTM_NETLINK to create interface into
+             *     NETLINKE message,userspace can join specified netlink group to listen
+             *     this message.
+             *     finally,return result.
+             *     ** if NETDEV_REGISTER notification failled,rollback_register() will be
+             *        called,and the net device enter NETREG_UNREGISTERED state.
+             */
+            int register_netdevice(struct net_device *dev);
+
+            /**
+             * just invoke
+             *   rtnl_lock()
+             *   unregister_netdevice() => unregister_netdevice_queue(@dev, NULL)
+             *   rtnl_unlock
+             * # EXPORT_SYMBOL
+             */            
+            void unregister_netdev(struct net_device *dev);
+
+            /**
+             * unregister_netdevice_queue - remove device from the kernel
+             * @dev:                        interface
+             * @head:                       the list for temporary linking
+             * # EXPORT_SYMBOL
+             * # requires rtnl mutex
+             * # if @head is not NULL,list_move_tail() is called to move this device
+             *   that that list,instead fully unregister it.
+             *   otherwise,invoke rollback_registered() and net_set_todo() on @dev.
+             */
+            void unregister_netdevice_queue(struct net_device *dev, struct list_head *head);
+
+            /**
+             * add @dev to local list @single -- has only single element the @dev,then
+             * invoke rollback_registered_many() on the list.
+             */
+            static void rollback_registered(struct net_device *dev);
+
+            /**
+             * rollback_registered_many - rollback registered net device from the list
+             * @head:                     list for devices need rollback register
+             * # for each device on the list
+             *     remove it from the list if it is NETREG_UNINITIALIZED registration state
+             *     -- ->reg_state.and continue to next.
+             *     otherwise,invoke dev_close() on the device to close it if it is running,
+             *     invoke unlist_netdevice() to remove the device fromm registered net device list,
+             *     set ->reg_state to NETREG_UNREGISTERING.
+             *   calls to synchronize_net(),this routine may sleep,and it will sync RCU,that is
+             *   synchronize with packet receive processing,wait for packets currently being
+             *   received to be done.(does not block later packets from starting)
+             *
+             *   for each device still remains on the list -- @head
+             *     invoke dev_shutdown() on the device -- shutdown queueing discipline.
+             *     make notification NETDEV_UNREGISTER.
+             *     create RTM_DELLINK NETLINK message if necessary -- ops implemented and
+             *     rtnl_link_state is RTNL_LINK_INITIALIZED.
+             *     invoke dev_unicast_flush(),dev_addr_discard() to flush the unicast and
+             *     multicast chains,call to ->netdev_ops->ndo_uninit() if implemented.
+             *     invoke netdev_unregister_kobject(),to remove sysfs entries,and device_del()
+             *     the internal device descriptor.
+             *
+             *   retrieve the first entry on @head,make a NETDEV_UNREGISTER_BATCH notification on
+             *   it.
+             *   synchronize_net() again.
+             *
+             *   for each device on @head,invoke dev_put() on it -- put ->refcnt.
+             *                                ** dev_hold() will increase ->refcnt by 1.
+             *   ! @head is a local object of the caller of this routine,so we do not need to
+             *     delete device from @head when we are in progress,because when the caller is
+             *     end,the local list become invalid.
+             *     besides,->unreg_list is only used for unregistration,the device's ->dev_list
+             *     been removed from global registered net device list by this function.
+             */
+            static void rollback_registered_many(struct list_head *head);
+
+            /* delayed registration/unregistration.
+             * this list will be handled by routine netdev_run_todo(),in that
+             * routine,->destructor of each net device on the list will be called,
+             * if the destructor has implemented,usually is free_netdev().
+             * ! function netdev_run_todo() is called by rtnl_unlock() and may
+             *   called by unregister_netdevice_queue().
+             */
+            static LIST_HEAD(net_todo_list);
+
+            /**
+             * just add @dev to the tail of @net_todo_list,
+             * through @dev->todo_list member.
+             */
+            static void net_set_todo(struct net_device *dev);
+
+            
