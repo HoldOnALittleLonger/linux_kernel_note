@@ -7300,7 +7300,8 @@ Network Drivers :
                           the network subsystem.
                           ** network driver usually needs to create the
                              hardware-level header.
-
+                       -- "tx",transmit => uplink
+                       -- "rx",receive  => downlink
 
         /* Network environment */
           network0: 192.168.0.0/24
@@ -7342,11 +7343,41 @@ Network Drivers :
              * @napi_list:  list node to NAPI
              * @unreg_list: list node used for unregistration work
              * @features:   the features this interface supported
+             * @ifindex:    idx of this interface
+             * @iflink:     unique device identifier
+             * @wireless_handlers:
+             *              list of functions to handle wireless extensions,
+             *              instead of ioctl
+             * @wireless_data:
+             *              instance data managed by the core of
+             *              wireless extensitions
+             * @netdev_ops: operations for this net device
+             * @ethtool_ops:
+             *              operations for this net device on ethernet
+             * @header_ops: hardware header operations
+             * @flags:      flags of this net device,visible to userspace
+             * @priv_flags: private flags of this net device,invisible to userspace
+             * @padded:     padding created by alloc_netdev()
+             * @perm_addr:  permanent hardware address(usually is MAC address)
+             *                #define MAX_ADDR_LEN 32
+             *              ** for 802.3,the address is six hexs,each occupies
+             *                 1 bytes
+             * @addr_len:   hardware address length
              * @_tx:        array of netdev_queue objects
              * @refcnt:     reference counter of this interface
              *              # dev_hold() -- increase this field by 1
              *                dev_put()  -- decrease this field by 1
              * @destructor: called from unregister,can be used to call free_netdev()
+             * @nd_net:     pointer points to the network namespace entity this
+             *              network device is inside
+             * @rtnl_link_ops:
+             *              rtnetlink link ops
+             * @vlan_features:
+             *              ethernet vlan features
+             * @gso_max_size:
+             *              for setting kernel sock attribute on TCP
+             *              connection setup
+             * @dcbnl_ops:  data center bridging netlink ops
              */
             struct net_device {
                     char name[IFNAMSIZ];
@@ -7367,12 +7398,224 @@ Network Drivers :
                     struct list_head unreg_list;
 
                     unsigned long features;
+    
+                    int ifindex;
+                    int iflink;
+    
+                    const struct iw_handler_def *wireless_handlers;
+                    struct iw_public_data *wireless_data;
+    
+                    const struct net_device_ops *netdev_ops;
+                    const struct ethtool_ops *ethtool_ops;
+    
+                    const struct header_ops *header_ops;
+
+                    unsigned int flags;
+                    ...
+                    unsigned short priv_flags;
+                    unsigned short padded;
+                    ...
+                    unsigned char perm_addr[MAX_ADDR_LEN];
+                    unsigned char addr_len;
                     ...
                     struct netdev_queue *_tx ____cacheline_aligned_in_smp;
                     ...
                     atomic_t refcnt ____cacheline_aligned_in_smp;
                     ...
                     void (*destructor)(struct net_device *dev);
+                    ...
+                    struct net *nd_net;
+                    ...
+                    const struct rtnl_link_ops *rtnl_link_ops;
+    
+                    unsigned long vlan_features;
+    
+            #define GSO_MAX_SIZE 65536
+                    unsigned int gso_max_size;
+    
+            #ifdef CONFIG_DCB
+                    const struct dcbnl_rtnl_ops *dcbnl_ops;
+            #endif                    
+            };
+
+            /* the flags to the net_device structure are defined in <linux/if.h>,
+             * each of them has the style "IFF_*".
+             */
+            ** net_device->flags
+               /* interface is up */
+               IFF_UP              0x1
+
+               /* broadcast address valid */
+               IFF_BROADCAST       0x2
+
+               /* turn on debugging */
+               IFF_DEBUG           0x4
+
+               /* is a loopback net */
+               IFF_LOOPBACK        0x8
+
+               /* interface is has p-p link */
+               IFF_POINTOPOINT     0x10
+
+               /* avoid use of trailers */
+               IFF_NOTRAILERS      0x20
+
+               /* interface RFC2863 OPER_UP */
+               IFF_RUNNING         0x40
+
+               /* no ARP protocol */
+               IFF_NOARP           0x80
+
+               /* receive all packets */
+               IFF_PROMISC         0x100
+
+               /* receive all muticast packets */
+               IFF_ALLMULTI        0x200
+
+               /* master of a load balancer */
+               IFF_MASTER          0x400
+
+               /* slave of a load balancer */
+               IFF_SLAVE           0x800
+
+               /* support multicast */
+               IFF_MULTICAST       0x1000
+
+               /* can set media type */
+               IFF_PORTSEL         0x2000
+
+               /* auto media select active */
+               IFF_AUTOMEDIA       0x4000
+
+               /* dialup device with changing addresses */
+               IFF_DYNAMIC         0x8000
+
+               /* driver signals L1 up */
+               IFF_LOWER_UP        0x10000
+
+               /* dirver signals dormant */
+               IFF_DORMANT         0x20000
+
+               /* echo sent packets */
+               IFF_ECHO            0x40000
+
+               /* device flag is volatile */
+               IFF_VOLATILE        (IFF_LOOPBACK | IFF_POINTOPOINT |
+                                    IFF_BROADCAST | IFF_ECHO | IFF_MASTER |
+                                    IFF_SLAVE | IFF_RUNNING | IFF_LOWER_UP |
+                                    IFF_DORMANT)
+    
+            ** net_device->priv_flags
+               /* 802.1Q Vlan device */
+               IFF_802_1Q_VLAN          0x1
+
+               /* ethernet bridging device */
+               IFF_EBRIDGE              0x2
+
+               /* bonding slave not the curr */
+               IFF_SLAVE_INACTIVE       0x4
+    
+               /* bonding mastger,802.3ad */
+               IFF_MASTER_8023AD        0x8
+
+               /* bonding master,balance-alb */
+               IFF_MASTER_ALB           0x10
+
+               /* bonding master or slave */
+               IFF_BOUNDING             0x20
+
+               /* need ARPs for validation */
+               IFF_SLAVE_DEEPARP        0x40
+
+               /* ISATAP interface(RFC 4214) */
+               IFF_ISATAP               0x80
+
+               /* bonding master,ARP mon in use */
+               IFF_MASTER_ARPMON        0x100
+
+               /* WAN HDLC device */
+               IFF_WAN_HDLC             0x200
+
+               /* dev_hard_start_xmit() is allowed to release skb->dst */
+               IFF_XMIT_DST_RELEASE     0x400
+
+               /* disallow bridging this ether dev */
+               IFF_DONT_BRIDGE          0x800
+
+            /* net_device has several operations set for different uses */
+            struct header_ops {
+                    /**
+                     * create hardware header for the specified type -- @type
+                     * in the socket buffer @skb,@daddr is destination address,
+                     * and @saddr is the source address.
+                     */
+                    int (*create)(struct sk_buff *skb, struct net_device *dev,
+                                  unsigned short type, const void *daddr,
+                                  const void *saddr, unsigned len);
+
+                    /**
+                     * parse the contents in socket buffer @skb,fill the header
+                     * information parsed from the buffer into the memory area
+                     * pointed by @haddr
+                     */
+                    int (*parse)(const struct sk_buff *skb, unsigned char *haddr);
+
+                    /**
+                     * rebuild hardware header and use it to update socket buffer
+                     */
+                    int (*rebuild)(struct sk_buff *skb);
+
+            #define HAVE_HEADER_CACHE
+                    /**
+                     * fill cache entry from neighbour
+                     */
+                    int (*cache)(const struct neighbour *neigh, struct hh_cache *hh);
+
+                    /**
+                     * update cache entry
+                     */
+                    void (*cache_update)(struct hh_cache *hh, const struct net_device *dev,
+                                         const unsigned char *haddr);
+            };
+
+            #define HAVE_NET_DEVICE_OPS
+            struct net_device_ops {
+                    /**
+                     * this function is called once when network device is registered,
+                     * the network device can use this to any late stage initialization
+                     * or semantic validattion.
+                     * can fail with an error code which will be propogated back
+                     * to register_netdev().
+                     */
+                    int (*ndo_init)(struct net_device *dev);
+
+                    /**
+                     * this function is called when device is unregistered or when
+                     * registeration fails.
+                     * it is not called if init fails.
+                     */
+                    void (*ndo_uninit)(struct net_device *dev);
+
+                    /* called when network device transistions to the up datae */
+                    int (*ndo_open)(struct net_device *dev);
+
+                    /* called when network device transistions to the down state */
+                    int (*ndo_stop)(struct net_device *dev);
+    
+                    /* there is a lot of functions,and the details in the header */
+                    ...
+            };
+
+          <linux/ethtool.h>
+            /* ethtool_ops - alter and report network device settings */
+            struct ethtool_ops {
+                    /* get device-specific settings */
+                    int (*get_settings)(struct net_device *, struct ethtool_cmd *);
+
+                    /* set device-specific settings */
+                    int (*set_settings)(struct net_device *, struct ethtool_cmd *);
+    
+                    /* there is a lot of functions,and the details in the header */
                     ...
             };
 
@@ -7397,7 +7640,7 @@ Network Drivers :
              *       GFP flag is GFP_KERNEL
              *         +-- net_device->padded <= size of the padded area
              *         |                         ** we need to record this size for kfree()
-             *         |                       +--> unused padding
+             *         |                       +--> unused padding for alignment
              *         V                       |
              *       |<--->|                 |<--->|
              *       [ ... | net_device area | ... | net_device private data area ] => chunk1
@@ -7586,7 +7829,7 @@ Network Drivers :
              *   it.
              *   synchronize_net() again.
              *
-             *   for each device on @head,invoke dev_put() on it -- put ->refcnt.
+             *   for each device on @head,invoke dev_put() on it -- decrease ->refcnt by 1.
              *                                ** dev_hold() will increase ->refcnt by 1.
              *   ! @head is a local object of the caller of this routine,so we do not need to
              *     delete device from @head when we are in progress,because when the caller is
@@ -7611,4 +7854,74 @@ Network Drivers :
              */
             static void net_set_todo(struct net_device *dev);
 
+        initialize net device
+          net_device object can not be setup at compile time,and if necessary,
+          should invoke dev_net_set() to set network namespace for the newly
+          allocated interface before register it.
+          /* even the loopback device "lo",also is allocated dynamiclly through
+           * alloc_netdev(),and will be destroyed by free_netdev() when kernel
+           * is going to shutdown the machine.
+           */
+          the network device operations can be set inside the @setup function
+          passed to the register_netdev().
+          kernel provides some default settings for the net_device,we can
+          apply those setting through the corresponding setup function.
+            <net/ethernet/eth.c>
+              /**
+               * ether_setup - setup ethernet network device
+               * @dev:         interface
+               * # EXPORT_SYMBOL
+               * # this routine fills in the fields of the device structure with
+               *   ethernet-generic values :
+               *     # defined in the same source file and is ____cacheline_aligned
+               *         .create = eth_header
+               *         .parse = eth_header_parse
+               *         .rebuild = eth_rebuild_header
+               *         .cache = eth_header_cache
+               *         .cache_update = eth_header_cache_update
+               *     ->header_ops = &eth_header_ops
+               *     ->type = ARPHRD_ETHER
+               *     ->hard_header_len = ETH_LEN
+               *     ->mtu = ETH_DATA_LEN
+               *     ->addr_len = ETH_ALEN
+               *     ->tx_queue_len = 1000
+               *     ->flags = IFF_BROADCAST | IFF_MULTICAST
+               *     memset(dev->broadcast, 0xFF, ETH_ALEN)
+               */
+              void ether_setup(struct net_device *dev);
+
+          about the private data to the net_device,kernel provides a inline
+          function that is static linkage can help us to access private data
+          area which is created together by alloc_netdev().
+            <linux/netdevice.h>
+              /**
+               * netdev_priv - access network device private data
+               * @dev:         interface
+               * # this function computes the result of
+               *     @dev + ALIGN(sizeof(struct net_device), NETDEV_ALIGN)
+               *     |===================================================|
+               *      |
+               *      +--------------------------------------------------+
+               *                                                         |
+               *                                                         V
+               *   [ ->padded | net_device area start | 'unused padding' | private data ]
+               *             #^@dev points to there
+               *              |==========================================|
+               *                 #^ALIGN(sizeof(struct net_device), NETDEV_ALIGN)
+               * # force type conversion to remove 'const' qualifier.
+               */
+              static inline void *netdev_priv(const struct net_device *dev);
+
+          ! when the driver module is loaded,the init function should
+              do driver init
+              invoke alloc_netdev() to get net_device descriptor
+              setup operations impl
+              invoke register_netdev() to register this interface
+
+            ** usually net_device->destructor is set to free_netdev().
+
+            when the driver module is unloaded,the exit function should
+              release refcnt to the interface,if it got before
+              invoke unregister_netdev() -- ->destructor would be called
+              do driver cleanup
             
