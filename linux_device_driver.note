@@ -7335,8 +7335,14 @@ Network Drivers :
              * @mem_end:    shared mem end
              * @mem_start:  shared mem start
              * @base_addr:  device I/O address
+             *              # can be assigned through kernel(or module) parameter
+             *                  "netdev=<base_address>"
              * @irq:        device IRQ number
-             * @if_port:    selectable AUI,TP,...
+             * @if_port:    multiport device,selectable AUI,TP,...
+             *              # e.g.
+             *                                  (IF_PORT_100BASET)
+             *                  for coaxial and twisted-pair ethernet connections
+             *                      (IF_PORT_10BASE2)     
              * @dma:        DMA channel
              * @state:      interface internal state
              * @dev_list:   list node to the list for all registered net devices
@@ -7363,6 +7369,17 @@ Network Drivers :
              *              ** for 802.3,the address is six hexs,each occupies
              *                 1 bytes
              * @addr_len:   hardware address length
+             * @dev_addr:   hardware address,before broadcast,because most
+             *              packets are unicast
+             *              # function dev_addr_init() will set this pointer
+             *                points to the address all fields are _zero_.
+             *                the function is called by alloc_netdev_mq(),
+             *                for the new net_device descriptor,it will
+             *                initializes its ->dev_addrs,add an entry
+             *                the all _zero_ address,and let @dev_addr
+             *                points to the first address of that list
+             * @dev_addrs:  list of device hardware addresses
+             * @broadcast:  hardware broadcast address
              * @_tx:        array of netdev_queue objects
              * @refcnt:     reference counter of this interface
              *              # dev_hold() -- increase this field by 1
@@ -7417,6 +7434,10 @@ Network Drivers :
                     ...
                     unsigned char perm_addr[MAX_ADDR_LEN];
                     unsigned char addr_len;
+                    ...
+                    unsigned char *dev_addr;
+                    struct netdev_hw_addr_list dev_addrs;
+                    unsigned char broadcast[MAX_ADDR_LEN];
                     ...
                     struct netdev_queue *_tx ____cacheline_aligned_in_smp;
                     ...
@@ -7729,7 +7750,7 @@ Network Drivers :
              *     to allocate a name for the device.
              *     ** in this case,->name should contains a format string.
              *        such as "intf%d",kernel will replaces '%d' to next available
-             *        interface number.
+             *        interface number(start from index 0).
              *     next,calls to register_netdevice(),after which returned,call to
              *     rtnl_unlock() and return result.
              */
@@ -7882,6 +7903,7 @@ Network Drivers :
                *     ->header_ops = &eth_header_ops
                *     ->type = ARPHRD_ETHER
                *     ->hard_header_len = ETH_LEN
+               *     # usually is 1500 bytes
                *     ->mtu = ETH_DATA_LEN
                *     ->addr_len = ETH_ALEN
                *     ->tx_queue_len = 1000
@@ -7889,6 +7911,15 @@ Network Drivers :
                *     memset(dev->broadcast, 0xFF, ETH_ALEN)
                */
               void ether_setup(struct net_device *dev);
+
+              /* others setup helpers provided by kernel :
+               *   ltalk_setup() -- Apple LocalTalk
+               *   fc_setup()    -- 802 Fiber-channel
+               *   fddi_setup()  -- 802 Fiber Distributed Data Interface
+               *   hippi_setup() -- 802 High-Performance Parallel Interface
+               *   tr_setup()    -- 802 Token Ring network interface
+               *   ...
+               */
 
           about the private data to the net_device,kernel provides a inline
           function that is static linkage can help us to access private data
