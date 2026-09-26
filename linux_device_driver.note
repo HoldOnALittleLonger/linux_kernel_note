@@ -7302,6 +7302,11 @@ Network Drivers :
                              hardware-level header.
                        -- "tx",transmit => uplink
                        -- "rx",receive  => downlink
+                       -- "GSO",Generic Segmentation Offload.
+                          a software feature in Linux networking stack that
+                          allows the system to delay breaking large packets
+                          into smaller MTU-sized pieces until the last
+                          possible moment before transmission.
 
         /* Network environment */
           network0: 192.168.0.0/24
@@ -7364,11 +7369,16 @@ Network Drivers :
              * @flags:      flags of this net device,visible to userspace
              * @priv_flags: private flags of this net device,invisible to userspace
              * @padded:     padding created by alloc_netdev()
+             * @type:       hardware type for interface,used by ARP to determines
+             *              hardware address format
              * @perm_addr:  permanent hardware address(usually is MAC address)
              *                #define MAX_ADDR_LEN 32
-             *              ** for 802.3,the address is six hexs,each occupies
-             *                 1 bytes
+             *              ** for 802.3,the address is six octets,usually
+             *                 represented in hex
              * @addr_len:   hardware address length
+             * @mc_list:    multicast MAC addresses
+             * @mc_count:   number of installed mcasts
+             * @last_rx:    time in jiffies of last rx
              * @dev_addr:   hardware address,before broadcast,because most
              *              packets are unicast
              *              # function dev_addr_init() will set this pointer
@@ -7379,8 +7389,17 @@ Network Drivers :
              *                the all _zero_ address,and let @dev_addr
              *                points to the first address of that list
              * @dev_addrs:  list of device hardware addresses
-             * @broadcast:  hardware broadcast address
+             * @broadcast:  hardware broadcast address,for ethernet,
+             *              usually is six "0xFF" octets
              * @_tx:        array of netdev_queue objects
+             * @trans_start:
+             *              time in jiffies of last tx
+             * @watchdog_timeo:
+             *              used by dev_watchdog(),the minimum time in
+             *              jiffies that should pass before the networking
+             *              layer decides that a transmission timeout has
+             *              occurred and calls the driver's tx_timeout()
+             *              function
              * @refcnt:     reference counter of this interface
              *              # dev_hold() -- increase this field by 1
              *                dev_put()  -- decrease this field by 1
@@ -7432,15 +7451,23 @@ Network Drivers :
                     unsigned short priv_flags;
                     unsigned short padded;
                     ...
+                    unsigned short type;
+                    ...
                     unsigned char perm_addr[MAX_ADDR_LEN];
                     unsigned char addr_len;
                     ...
+                    struct dev_addr_list *mc_list;
+                    int mc_count;
+                    ...
+                    unsigned long last_rx;
                     unsigned char *dev_addr;
                     struct netdev_hw_addr_list dev_addrs;
                     unsigned char broadcast[MAX_ADDR_LEN];
                     ...
                     struct netdev_queue *_tx ____cacheline_aligned_in_smp;
                     ...
+                    unsigned long trans_start;
+                    int watchdog_timeo;
                     atomic_t refcnt ____cacheline_aligned_in_smp;
                     ...
                     void (*destructor)(struct net_device *dev);
@@ -7478,7 +7505,9 @@ Network Drivers :
                /* interface is has p-p link */
                IFF_POINTOPOINT     0x10
 
-               /* avoid use of trailers */
+               /* avoid use of trailers
+                * # unused in Linux,for BSD compatibility
+                */
                IFF_NOTRAILERS      0x20
 
                /* interface RFC2863 OPER_UP */
@@ -7490,7 +7519,9 @@ Network Drivers :
                /* receive all packets */
                IFF_PROMISC         0x100
 
-               /* receive all muticast packets */
+               /* receive all muticast packets
+                * # read-only for driver
+                */
                IFF_ALLMULTI        0x200
 
                /* master of a load balancer */
@@ -7563,6 +7594,105 @@ Network Drivers :
                /* disallow bridging this ether dev */
                IFF_DONT_BRIDGE          0x800
 
+            ** net_device->features
+               /* scatter/gather I/O */
+               NETIF_F_SG               1
+
+               /* can checksum TCP/UDP over IPv4 */
+               NETIF_F_IP_CSUM          2
+
+               /* does not require checksum */
+               NETIF_F_NO_CSUM          4
+
+               /* can checksum all the packets */
+               NETIF_F_HW_CSUM          8
+
+               /* can checksum TCP/UDP over IPv6 */
+               NETIF_F_IPV6_CSUM        16
+
+               /* can DMA to high memory */
+               NETIF_F_HIGHDMA          32
+
+               /* scatter/gather I/O */
+               NETIF_F_FRAGLIST         64
+
+               /* transmit VLAN hw acceleration */
+               NETIF_F_HW_VLAN_TX       128
+
+               /* receive VLAN hw acceleration */
+               NETIF_F_HW_VLAN_RX       256
+
+               /* receive filtering on VLAN */
+               NETIF_F_HW_VLAN_FILTER   512
+
+               /* device cant handle VLAN packets */
+               NETIF_F_VLAN_CHALLENGED  1024
+
+               /* enable software GSO */
+               NETIF_F_GSO              2048
+
+               /* lockless TX -- deprecated */
+               NETIF_F_LLTX             4096
+
+               /* does not change network namespaces */
+               NETIF_F_NETNS_LOCAL      8192
+
+               /* generic receive offload */
+               NETIF_F_GRO              16384
+
+               /* large receive offload */
+               NETIF_F_LRO              32768
+
+               /* FCoE CRC32 */
+               NETIF_F_FCOE_CRC         (1 << 24)
+
+               /* SCTP checksum offload */
+               NETIF_F_SCTP_CSUM        (1 << 25)
+
+               /* supports max FCoE MTU, 2158 bytes */
+               NETIF_F_FCOE_MTU         (1 << 26)
+
+               /* N-tuple filters supported */
+               NETIF_F_NTUPLE           (1 << 27)
+
+               /* more in the header,and contains some combinations */
+
+            /**
+             * netdev_queue - represents a queue of net_device
+             * @dev:          net_device owns this queue
+             * @qdisc:        Qdisc -- queueing discipline,a
+             *                packet scheduler that manages how
+             *                packets are queued,prioritized,delayed
+             *                or dropped before they leave an interface
+             * @state:        queue state
+             * @qdisc_sleeping:
+             *                the sleeping qdisc
+             * @_xmit_lock:   lock for concurrent start_xmit()
+             * @xmit_lock_owner:
+             *                CPU number who holding @_xmit_lock
+             * @trans_start:  time in jiffies of last tx on this queue
+             * @tx_bytes:     data size in bytes been tx on this queue
+             * @tx_packets:   number of packets been tx on this queue
+             * @tx_dropped:   number of tx been dropped on this queue
+             */
+            struct netdev_queue {
+                    /* read mostly part */
+                    struct net_device *dev;
+                    struct Qdisc *qdisc;
+                    unsigned long state;
+                    struct Qdisc *qdisc_sleeping;
+
+                    /* write mostly part */
+                    spinlock_t _xmit_lock ____cacheline_aligned_in_smp;
+                    int xmit_lock_owner;
+
+                    /* per queue specific records */
+                    unsigned long trans_start;
+                    unsigned long tx_bytes;
+                    unsigned long tx_packets;
+                    unsigned long tx_dropped;
+            } ____cacheline_aligned_in_smp;
+
             /* net_device has several operations set for different uses */
             struct header_ops {
                     /**
@@ -7600,6 +7730,27 @@ Network Drivers :
             };
 
             #define HAVE_NET_DEVICE_OPS
+            /* net_device operations,all operations can be divided into two
+             * groups:
+             *   fundamental
+             *     methods are needed to be able to use the interface
+             *       open
+             *       stop
+             *       start_xmit
+             *       tx_timeout
+             *       get_stats
+             *       set_config ** modern driver does not need to provide this impl
+             *   optional
+             *     methods implement more advanced functionalitie
+             *       poll_controller
+             *       do_ioctl
+             *       set_multicast_list
+             *       set_mac_address
+             *       change_mtu
+             *       ...
+             *   ! actually,except the hook ndo_start_xmit(),others can be filled
+             *     with NULL -- optional methods.
+             */
             struct net_device_ops {
                     /**
                      * this function is called once when network device is registered,
@@ -7902,10 +8053,13 @@ Network Drivers :
                *         .cache_update = eth_header_cache_update
                *     ->header_ops = &eth_header_ops
                *     ->type = ARPHRD_ETHER
+               *     # ethernet hardware header length is 14 octets
                *     ->hard_header_len = ETH_LEN
-               *     # usually is 1500 bytes
+               *     # usually is 1500 octets for ethernet
                *     ->mtu = ETH_DATA_LEN
                *     ->addr_len = ETH_ALEN
+               *     # tx_queue_len is the number of max frames
+               *       per queue allowed
                *     ->tx_queue_len = 1000
                *     ->flags = IFF_BROADCAST | IFF_MULTICAST
                *     memset(dev->broadcast, 0xFF, ETH_ALEN)
