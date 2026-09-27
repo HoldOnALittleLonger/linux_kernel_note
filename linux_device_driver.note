@@ -7665,6 +7665,13 @@ Network Drivers :
              *                packets are queued,prioritized,delayed
              *                or dropped before they leave an interface
              * @state:        queue state
+             *                # there only two states are available
+             *                    ** if set,disallow transmit on this queue
+             *                    __QUEUE_STATE_XOFF   => bit 0
+             *                    ** if set,the queue is frozen,can not
+             *                       be used before thaw
+             *                    __QUEUE_STATE_FROZEN => bit 1
+             *                  ** enum netdev_queue_state_t
              * @qdisc_sleeping:
              *                the sleeping qdisc
              * @_xmit_lock:   lock for concurrent start_xmit()
@@ -8109,4 +8116,69 @@ Network Drivers :
               release refcnt to the interface,if it got before
               invoke unregister_netdev() -- ->destructor would be called
               do driver cleanup
-            
+
+        Opening and Closing
+          before the interface can start communication,kernel needs to open it
+          at first,and assigns the address for it.
+          this can be done by commands "ip" or "ifconfig".
+          ioctl command SIOCSIFADDR can be used to assign address,and another
+          command SIOCSIFFLAGS can be used to modify the flags of net_device,
+          IFF_UP flag means interface is up.
+          /* SIOCSIFADDR -- Socket I/O Control Set Interface Address
+           * SIOCSIFFLAGS -- Socket I/O Control Set Interface Flags
+           * ! no driver function is invoked for SIOCSIFADDR,the task is
+           *   device independent,kernel performs it.
+           * ! SIOCSIFFLAGS will causes open() is called on the device for
+           *   IFF_UP is set,and stop() is called when IFF_UP is clear.
+           *   entrypoint is dev_ioctl(),__dev_change_flags() will be called,
+           *   then is either __dev_close() or __dev_open(),corresponding to
+           *   ndo_stop() and ndo_open(),respectively.
+           */    
+
+          hardware address(MAC Address) need to be copied from the hardware
+          device to net_device->dev_addr,at open time;and the open() also
+          need to start the interface's transmit queue once it is ready to
+          start sending data. /* depends on functions
+                               *   netif_start_queue() -- for open
+                               *   netif_stop_queue()  -- for stop
+                               */
+          e.g.
+            int the_if_open(struct net_device *dev)
+            {
+                    /* pre-setup */
+                    /* ... */
+
+                    unsigned char hw_addr[ETH_ALEN] = {0};
+                    if (access_hw_copy_addr(hw_addr, dev, ETH_ALEN) < 0) {
+                            printk(KERN_ERR "copy hw address failed.");
+                            return -EIO;
+                    }
+                    memcpy(dev->dev_addr, hw_addr, ETH_ALEN);
+    
+                    /* other setup */
+                    /* ... */
+
+                    /* allow xmit */
+                    netif_start_queue(dev);
+                    return 0;
+            }
+
+          <linux/netdevice.h>
+            /**
+             * netif_start_queue - allow transmit
+             * @dev:               interface
+             * # allow upper layers to call the device hard_start_xmit() routine.
+             *   ** ndo_start_xmit() will be called.
+             * # a wrapper calls to
+             *     netif_tx_start_queue(netdev_get_tx_queue(dev, 0));
+             *   netdev_get_tx_queue() is defined in the same header as inline
+             *   function with static linkage,it return the pointer points to
+             *   an object is type of struct netdev_queue placed at dev->_tx[@idx].
+             *   and netif_tx_start_queue() is defined in the same header as
+             *   inline function with static linkage,it will clears the flag
+             *   __QUEUE_STATE_XOFF in the netdev_queue->state .
+             */
+            static inline void netif_start_queue(struct net_device *dev);
+
+            /* UNDO netif_start_queue(),set flag __QUEUE_STATE_XOFF again. */
+            static inline void netif_stop_queue(struct net_device *dev);
