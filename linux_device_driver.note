@@ -8182,3 +8182,198 @@ Network Drivers :
 
             /* UNDO netif_start_queue(),set flag __QUEUE_STATE_XOFF again. */
             static inline void netif_stop_queue(struct net_device *dev);
+
+        Packet Transmission
+          transmission -- sending a packet over a network link.
+          driver's impl hard_start_xmit() is called when kernel needs to transmit
+          a packet,the function put the packet on an outgoing queue.
+          the structure sk_buff -- socket buffer,is used to contains the data
+          packet.(socket is first appears in BSD)
+          /* even if the interface has nothing to do with sockets,each network
+           * packet belongs to a socket in the higher network layers,
+           * and the I/O buffers of any socket are lists of struct sk_buff
+           * structures.
+           * ** when interface is concerned,sk_buff is just a packet.
+           */
+
+          sk_buff:
+            <linux/skbuff.h>
+              /**
+               * sk_buff - socket data buffer
+               * @next:    next sk_buff on the list
+               * @prev:    previous sk_buff on the list
+               * @tstamp:  time stamp
+               * @sk:      the sock this buffer belongs to
+               *           # sock is the representation of socket in
+               *             network layer
+               * @dev:     the interface
+               * @cb:      control buffer,it is free to use for every
+               *           layer
+               *           # we can put private variables there.
+               *             if we want to keep them across layers,have
+               *             to do a skb_clone() first.
+               * @_skb_dst:
+               *           a pointer to dst_entry structure,that is the
+               *           destination this packet should be sent
+               * @sp:      security path,tracks and records IPsec
+               *           security transformations applied to the packet
+               * @len:     packet length
+               * @data_len:
+               *           payload length
+               * @mac_len: length of link layer header
+               * @hdr_len: writable header length of cloned skb
+               * @csum:    checksum
+               *           # must include start/offset pair
+               * @csum_start:
+               *           offset from skb->head where checksumming should start
+               * @csum_end:
+               *           offset from @csum_start where checksum should be stored
+               * @priority:
+               *           packet queueing priority    
+               * @local_df:
+               *           allow local fragmentation
+               * @cloned:  head may be cloned
+               * @ip_summed:
+               *           driver fed us an IP checksum    
+               * @nohdr:   payload reference only,must not modify header
+               * @nfctinfo:
+               *           relationship of this skb to theconnection
+               * @pkt_type:
+               *           packet class
+               * @fclone:  skbuff clone status
+               * @ipvs_property:
+               *           skbuff is allowed by ipvs
+               * @peeked:  packet has been seen already,so stats have been done
+               *           for it,do not do them again
+               * @nt_trace:
+               *           netfilter packet trace flag
+               * @protocol:
+               *           packet protocol from driver
+               * @destructor:
+               *           skbuff destructor
+               * @head:    head of buffer
+               * @data:    data head pointer
+               * truesize: buffer size
+               * @users:   user count
+               */
+              struct sk_buff {
+                      struct sk_buff *next;
+                      struct sk_buff *prev;
+
+                      ktime_t tstamp;
+
+                      struct sock *sk;
+                      struct net_device *dev;
+
+                      char cb[48] __aligned(8);
+
+                      unsigned long _skb_dst;
+
+              #ifdef CONFIG_XFRM
+                      struct sec_path *sp;
+              #endif
+    
+                      unsigned int len, data_len;
+                      __u16 mac_len, hdr_len;
+
+                      union {
+                              __wsum csum;
+                              struct {
+                                      __u16 csum_start;
+                                      __u16 csum_offset;
+                              };
+                      };
+
+                      __u32 priority;
+    
+                      kmemcheck_bitfield_begin(flags1);
+                      __u8 local_df:1,
+                           cloned:1,
+                           ip_summed:2,
+                           nohdr:1,
+                           nfctinfo:3;
+                      __u8 pkt_type:3,
+                           fclone:2,
+                           ipvs_property:1,
+                           peeked:1,
+                           nf_trace:1;
+                      kmemcheck_bitfield_end(flags1);
+
+                      __be16 protocol;
+                      void (*destructor)(struct sk_buff *skb);
+                      ...
+                      unsigned char *head, *data;
+                      unsigned int truesize;
+                      atomic_t users;
+              };
+
+          the impl of ndo_start_xmit() of an interface is provided by driver.
+          when a packet need to be sent on the specific interface,this function
+          will be called.
+            netdev_tx_t (*ndo_start_xmit)(struct sk_buff *skb, struct net_device *dev);
+
+            enum netdev_tx {
+                    /* make sure enum is signed integer */
+                    __NETDEV_TX_MIN = INT_MIN,
+
+                    /* driver took care of packet -- xmit succeed */
+                    NETDEV_TX_OK = 0x00,
+
+                    /* driver tx path was busy -- should retry later */
+                    NETDEV_TX_BUSY = 0x10,
+
+                    /* driver tx lock was already taken -- EAGAIN */
+                    NETDEV_TX_LOCKED = 0x20,
+            }; /* underlying type is signed int */
+
+            typedef enum netdev_tx netdev_tx_t;
+    
+          the @skb is assemblied by the network subsystem.
+            __alloc_skb():
+              allocate sk_buff object from the slab cache.
+              allocate buffer,size is "SKB_DATA_ALIGN(@size) + sizeof(struct skb_shared_info)".
+              @skb->head and @skb->data both points to the start of this buffer.
+
+              +----------------+
+              | sk_buff object |
+              +----------------+
+                  | ->head    |
+                  |           | ->data
+                  +-----------+
+                  |
+                  V
+                  [ ---------------------- | @skb_shared_info ]
+
+              @truesize := aligned @size + sizeof(struct sk_buff)
+              /* skb_shared_info is not counted */
+              @users := 1
+
+          when ndo_start_xmit() is called,we can do some necessary checking and
+          prepare works,if everything is OK,we can call to the hardware's
+          start_xmit() impl to put the packet to the network card.
+          /* sk_buff is nosense to hardware */
+          /* sometimes,the length of packet contained in the socket buffer
+           * is shorter than the underlying media,for ethernet,the MTU is
+           * 1500 octets.
+           * in this case,we need to copy the packet into a separate buffer
+           * that is zero padded,then we can pass the address of the buffer
+           * to hardware's start_xmit() impl.
+           * # for ethernet
+           *     ETH_ALEN => 6
+           *     ETH_HLEN => 14
+           *
+           *     ** minimal frame size sans FCS in octets
+           *        if @skb->len is less than ETH_ZLEN,we need
+           *        to copy the data into the separate zero padded buffer
+           *        with size is ETH_ZLEN
+           *     ETH_ZLEN => 60
+           *
+           *     ** maximumal payload size
+           *     ETH_DATA_LEN => 1500
+           *
+           *     ** maximumal frame size,inclue payload and header
+           *     ETH_FRAME_LEN => 1514
+           *     ETH_FCS_LEN => 4
+           */
+          if ndo_start_xmit() is failed,the driver should stop the queue until
+          whatever situation caused the failure has been resolved.
