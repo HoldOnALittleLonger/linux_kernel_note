@@ -7400,6 +7400,10 @@ Network Drivers :
              *              layer decides that a transmission timeout has
              *              occurred and calls the driver's tx_timeout()
              *              function
+             * @watchdog_timer:
+             *              watchdog timer list for tx timeout
+             *              # when the timer is timedout,dev_watchdog() will
+             *                be called,hence ndo_tx_timeout() will be called
              * @refcnt:     reference counter of this interface
              *              # dev_hold() -- increase this field by 1
              *                dev_put()  -- decrease this field by 1
@@ -7468,6 +7472,7 @@ Network Drivers :
                     ...
                     unsigned long trans_start;
                     int watchdog_timeo;
+                    struct timer_list watchdog_timer;
                     atomic_t refcnt ____cacheline_aligned_in_smp;
                     ...
                     void (*destructor)(struct net_device *dev);
@@ -8377,3 +8382,87 @@ Network Drivers :
            */
           if ndo_start_xmit() is failed,the driver should stop the queue until
           whatever situation caused the failure has been resolved.
+
+        Controlling Transmission Concurrency
+          spinlock netdev_queue->_xmit_lock can be used to protect concurrency
+          start_xmit(),instead protect the whole interface,kernel will limits
+          the range at a single queue.
+            start_xmit -> send packet to hardware -> hardware prepare the task
+          so,for the real hardware,may be the transmission is not readly done
+          after start_xmit() been returned.
+          the outgoing packets will be stored into the onboard memory of the
+          hardware,and the transmission is asynchronous.if the hardware is
+          congestion now,driver should calls to netif_stop_queue() to tells
+          network subsystem do not pass any new packet to hardware.
+          /* start_xmit() can not be called on the netdev_queue has idx 0 */
+    
+          function netif_wake_queue() can be used to wakeup the queue that
+          is stopped by previous netif_stop_queue().
+          /* actually,the function is a wrapper to netif_tx_wake_queue(),
+           * which will tries to clear __QUEUE_STATE_XOFF,and calls to
+           * __netif_schedule() on the netdev_queue's @qdisc member.
+           * finally,a soft IRQ NET_TX_SOFTIRQ would be raised.
+           */
+          ! modern network hardware supports multiple transmissions,
+            /* use a internal queue for packets */
+            driver must take care for this case.
+            whether or not the hardware supports multiple transmissions,
+            if the onboard memory been fill up,driver should stop
+            transmission task until memory is available.
+
+          function netif_tx_disable() can be used to stop all netdev_queue(s)
+          of the given net_device interface.
+          /* this function is defined in header <linux/netdevice.h> as an
+           * inline function with static linkage,it will calls netif_tx_stop_queue()
+           * on each queues the interface holding,and set the
+           * ->xmit_lock_owner to current CPU's number -- smp_processor_id().
+           * when this function is running,local bottom half will be disabled
+           * temporarily.                  #^ softirq counter increase
+           */
+          function netif_tx_wake_all_queues() can be used UNDO the effect brought
+          by netif_tx_disable().
+
+        Transmission Timeouts
+          real hardware may forget what it is doing,and the system may lose an
+          interrupt.
+          thus,for each transmission,there is a timer attached to it,if the
+          timer been expired and the transmission is not completed,something is
+          wrong.
+          network subsystem needs to retry the transmission when such problem
+          is happened,but hardware driver does not need to care about such
+          behavior,it just need to specify the timeout value for the transmission.
+          net_device->watchdog_timeo is used to specify the timeout value,driver
+          can select an appropriate value for it.
+          /* network media congestion should be considered */
+          if current system time is after than ->trans_start + ->watchdog_timeo,
+          ndo_tx_timeout() will be called by network subsystem.
+          ! tx_timeout() need to clear up the problem,and ensure the proper
+            completion of any transmissions that were already in progress.
+            driver can stop queue when timeout occuried,and in ndo_tx_timeout(),
+            after we finished job,we can wakeup the queue again for new
+            transmissions.
+            !! THE TIMER ->watchdog_timer IS ATTACHED IN ROUTINE __dev_open(),
+               THAT IS DONE BY dev_activate() -- USE mod_timer() ROUTINE.
+               AND THE TIMER IS INITIALIZED BY ROUTINE dev_init_scheduler(),
+               WHICH IS CALLED BY register_netdevice().
+               THE TIMEOUT HANDLER IS dev_watchdog(),WHICH IS DEFINED IN
+               <net/sched/sch_generic.c>.
+               IF THE "discipline" OF THE netdev_queue IS NOT @noop_qdisc,
+               dev_watchdog() WILL CHECKS WHETHER THERE IS A netdev_queue
+               IS TIMEDOUT AND BEEN STOPPED,IN THIS CASE,THE ndo_tx_timeout()
+               WILL BE CALLED.
+               FINALLY,IT WILL START A NEW TIMER THROUGH mod_timer() BASED ON
+               ->watchdog_timeo.
+               ** this means,dev_watchdog() always be called when the time is
+                  expired,even there is not such a netdev_queue is timedout
+                  and stopped.
+
+            /* general flow */
+            ** driver did hard_start_xmit() -> hardware raised an interrupt
+               -> hardware reports xmit failed -> driver stops the netdev_queue
+               -> timer is expired -> dev_watchdog() is called
+               -> dev_watchdog() detected this problem -> ndo_tx_timeout() is called
+            
+
+
+                    
