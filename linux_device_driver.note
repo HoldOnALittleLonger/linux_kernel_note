@@ -8203,6 +8203,12 @@ Network Drivers :
 
           sk_buff:
             <linux/skbuff.h>
+              #ifdef NET_SKBUFF_DATA_USES_OFFSET
+                typedef unsigned int sk_buff_data_t;
+              #else
+                typedef unsigned char *sk_buff_data_t;
+              #endif
+    
               /**
                * sk_buff - socket data buffer
                * @next:    next sk_buff on the list
@@ -8256,10 +8262,32 @@ Network Drivers :
                *           packet protocol from driver
                * @destructor:
                *           skbuff destructor
+               * @transport_header:
+               *           location in this packet where transport header is
+               *           placed
+               *           # TCP/UDP header
+               * @network_header:
+               *           location in this packet where network header is
+               *           placed
+               *           # IP header
+               * @mac_header:
+               *           location in this packet where MAC header is placed
+               *           # MAC header,for example,the ethernet header
+               * @tail:    location in this packet for tail,that is the position
+               *           after data payload
+               *           # [ MAC hd | IP hd | TCP/UDP hd | data payload | checksum,etc. ]
+               *           # in __alloc_skb(),set by skb_reset_tail_pointer()
+               *               skb->tail = skb->data - skb->head
+               *             and at the initial time,skb->head == skb->data,
+               *             the memory chunk for the packet.
+               * @end      end of the sk_buff's memory chunk,do not include the skb_shared_info
+               *           # __alloc_skb() set this field to
+               *               skb->end = skb->tail + size(been SKB_DATA_ALIGN)
                * @head:    head of buffer
                * @data:    data head pointer
                * truesize: buffer size
-               * @users:   user count
+               * @users:   user count,greater than 1 means this packet is
+               *           shared by other entity
                */
               struct sk_buff {
                       struct sk_buff *next;
@@ -8307,6 +8335,11 @@ Network Drivers :
                       __be16 protocol;
                       void (*destructor)(struct sk_buff *skb);
                       ...
+                      sk_buff_data_t transport_header;
+                      sk_buff_data_t network_header;
+                      sk_buff_data_t mac_header;
+                      sk_buff_data_t tail;
+                      sk_buff_data_t end;
                       unsigned char *head, *data;
                       unsigned int truesize;
                       atomic_t users;
@@ -8462,6 +8495,90 @@ Network Drivers :
                -> hardware reports xmit failed -> driver stops the netdev_queue
                -> timer is expired -> dev_watchdog() is called
                -> dev_watchdog() detected this problem -> ndo_tx_timeout() is called
+
+        Scatter/Gather I/O
+          this mechanism enables "zero-copy" transmission of network data directly
+          from userspace buffers.
+          kernel does not pass scattered packets to start_xmit(),except NETIF_F_SG
+          is set in ->features field.
+                 /* interface supports Scatter/Gather I/O */
+                                                      /* skb_shared_info */
+          when NETIF_F_SG is set,we need to check the shared info appended to the
+          skb to see whether the packet is made up of a single fragment or many
+          and to find the scattered fragments.
+            <linux/skbuff.h>
+              /**
+               * skb_end_pointer - function to computes the byte position next to
+               *                   SKB's memory chunk's last byte,do not include
+               *                   skb_shared_info object
+               * @skb:             sk_buff
+               * return:           pointer to the end position
+               * # if defined NET_SKBUFF_DATA_USES_OFFSET
+               *     result is "skb->head + skb->end"
+               *   else
+               *     result is "skb->end"
+               */
+              static inline unsigned char *skb_end_pointer(const struct sk_buff *skb);
+    
+              /* macro to extract pointer to skb_shared_info object */
+              #define skb_shinfo(SKB) ((struct skb_shared_info *)(skb_end_pointer(SKB)))
+
+              /**
+               * skb_shared_info - shard info of SKB for scatter/gather I/O
+               * @dataref:         refcounter
+               * @nr_frags:        number of fragments of the single packet
+               *                   # _zero_ => the packet exists in a single piece and
+               *                               can be accessed via skb->data member
+               *                   # NOT _zero_ => driver mus pass through and arrange
+               *                                   to transfer each individual fragment,
+               *                                   skb->data points to the first fragment
+               * @gso_size:        size of GSO
+               * @gso_segs:        number of GSO segments
+               * @gso_type:        GSO type
+               * @ip6_frag_id:     identifier for fragments of IPv6
+               * @tx_flags:        instructions for time stamping of outgoing packets
+               * @frag_list:       list of fragments,each sk_buff represents one entry
+               *                   # if using internal @frags,this field is remain NULL
+               * @hwtstamps:       hardware time stamps
+               * @frags:           internal fragment array for maximum 64kB
+               *                   frame
+               *                   # MAX_SKB_FRAGS => 65536 / PAGE_SIZE + 2
+               *                   # skb_frag_t => skb_frag_struct {
+               *                                     struct page *page;
+               *                                     __u32 page_offset;
+               *                                     __u32 size;
+               *                                   }
+               *                     ** if we are using @frags,driver needs to
+               *                        iterate entries,and mapping each for a
+               *                        DMA transfer(the first fragment should be
+               *                        pointed by current SKB),hardware must
+               *                        assemble the fragments and transmit them
+               *                        as a single packet.
+               *                        [ SKB | skb_shared_info ]
+               *                          #^first segment  |
+               *                                           +--> @frags[]
+               *                                                #^remaining fragments
+               * @destructor_arg:  argument to destructor,this field will passed
+               *                   to the destructor of SKB
+               * # __alloc_skb() will allocates skb_shared_info object for each sk_buff,
+               *   and initializes all its fields to 0,except refcounter set to 1.
+               * # NETIF_F_HIGHDMA feature allows the fragments are located in high-memory.
+               * # even the sk_buff is a fragment of single packet,__alloc_skb() still
+               *   allocates skb_shared_info for it.
+               */
+              struct skb_shared_info {
+                      atomic_t dataref;
+                      unsigned short nr_frags;
+                      unsigned short gso_size;
+                      unsigned short gso_segs;
+                      unsigned short gso_type;
+                      __be32 ip6_frag_id;
+                      union skb_shared_tx tx_flags;
+                      struct sk_buff *frag_list;
+                      struct skb_shared_hwtstamps hwtstamps;
+                      skb_frag_t frags[MAX_SKB_FRAGS];
+                      void *destructor_arg;
+              };
             
 
 
