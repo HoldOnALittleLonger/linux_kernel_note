@@ -7307,6 +7307,7 @@ Network Drivers :
                           allows the system to delay breaking large packets
                           into smaller MTU-sized pieces until the last
                           possible moment before transmission.
+                       -- "GRO",Generic Receive Offload.
 
         /* Network environment */
           network0: 192.168.0.0/24
@@ -7353,7 +7354,8 @@ Network Drivers :
              * @dev_list:   list node to the list for all registered net devices
              * @napi_list:  list node to NAPI
              * @unreg_list: list node used for unregistration work
-             * @features:   the features this interface supported
+             * @features:   the features this interface supported,mainly for
+             *              outgoing packets
              * @ifindex:    idx of this interface
              * @iflink:     unique device identifier
              * @wireless_handlers:
@@ -8245,7 +8247,27 @@ Network Drivers :
                *           allow local fragmentation
                * @cloned:  head may be cloned
                * @ip_summed:
-               *           driver fed us an IP checksum    
+               *           driver fed us an IP checksum
+               *           possible vale:
+               *             # for receive packet
+               *             CHECKSUM_NONE 0
+               *               checksums has not yet been verified,and the
+               *               task must be accomplished by system software
+               *               ** default value
+               *               ** skb->csum undefined
+               *             CHECKSUM_UNNECESSARY
+               *               dont do any checksums
+               *               ** skb->csum undefined    
+               *             CHECKSUM_COMPLETE 2
+               *               device has already performed checksums in hardware
+               *               ** even if device supports only some protocols,but
+               *                  is able to produce some skb->csum,we _must_ use
+               *                  COMPLETE,not UNNECESSARY
+               *             CHECKSUM_PARTIAL 3
+               *               this may occur on a packet received directly from
+               *               another Linux OS,e.g,a virtualised Linux Kernel
+               *               on the same host
+               *             ! for output packet,only NONE and PARTIAL have sense
                * @nohdr:   payload reference only,must not modify header
                * @nfctinfo:
                *           relationship of this skb to theconnection
@@ -8369,7 +8391,8 @@ Network Drivers :
           the @skb is assemblied by the network subsystem.
             __alloc_skb():
               allocate sk_buff object from the slab cache.
-              allocate buffer,size is "SKB_DATA_ALIGN(@size) + sizeof(struct skb_shared_info)".
+              allocate buffer,size is
+                SKB_DATA_ALIGN(@size) + sizeof(struct skb_shared_info)
               @skb->head and @skb->data both points to the start of this buffer.
 
               +----------------+
@@ -8385,6 +8408,13 @@ Network Drivers :
               @truesize := aligned @size + sizeof(struct sk_buff)
               /* skb_shared_info is not counted */
               @users := 1
+
+              ! we usually allocate new SKB through dev_alloc_skb(),which will
+                invokes skb_reserve() with NET_SKB_PAD -- 32 bytes.
+                the skb_reserve() will reserves headroom through
+                  skb->data += reserve length
+                  skb->tail += reserve length
+                ** skb_reserve() can only be called on an empty sk_buff.
 
           when ndo_start_xmit() is called,we can do some necessary checking and
           prepare works,if everything is OK,we can call to the hardware's
@@ -8579,6 +8609,256 @@ Network Drivers :
                       skb_frag_t frags[MAX_SKB_FRAGS];
                       void *destructor_arg;
               };
+
+        Packet Reception
+          for receive a packet from network,a sk_buff must be allocated and
+          handed off to the upper layer from within an atomic context.
+          function netif_rx() can be called to deliver the packet to
+          upper layer.
+
+          <linux/netdevice.h>
+            /**
+             * netif_rx - post buffer to the network code
+             * @skb:      SKB
+             * return:    NET_RX_SUCCESS => no congestion
+             *            NET_RX_DROP    => packet was dropped
+             * # EXPORT_SYMBOL
+             */
+            extern int netif_rx(struct sk_buff *skb);
+
+            description for netif_rx() :
+              at the first,netpoll_rx() is called on the @skb,if netpoll
+              wants this packet,we return NET_RX_DROP,like we dont know it.
+              next,calls net_timestamp() on @skb,if @skb->tstamp.tv64 is 0.
+              /* the function will try atomic reads global variable
+               * @netstamp_needed,if it is TRUE,invoke __net_timestamp(),
+               * then @skb->tstamp is set to result got from
+               * ktime_get_real();otherwise,set @skb->tstamp.tv64 to 0.
+               */
+              proceed to disable local IRQ,and retrieves per-CPU variable
+              @softnet_data's address in local variable @queue,it is type
+              of struct softnet_data * .
+              increase per-CPU variable @netdev_rx_stat's @total member.
+              /**
+               * <linux/netdevice.h>
+               *   struct netif_rx_stats {
+               *           /* all rx pkts */
+               *           unsigned total;
+               *           /* been dropped pkts */
+               *           unsigned dropped;
+               *           unsigned time_squeeze;
+               *           unsigned cpu_collision;
+               *   };
+               * DECLARE_PER_CPU(struct netif_rx_stats, netdev_rx_stat);
+               */
+
+              /* current CPU's queue has room for new SKB */
+              if @queue->input_pkt_queue.qlen <= @netdev_max_backlog
+                                                 #^global variable
+                                                   default to 1000
+              then we checks whether @queue->input_pkt_queue.qlen is not 0,
+              for the case TRUE,we invoke __skb_queue_tail() to enqueue the
+              @skb to the tail of @queue->input_pkt_queue,restore local IRQ,
+              return NET_RX_SUCCESS.
+              if @queue->input_pkt_queue.qlen is 0,we need to invoke
+              napi_schedule() on @queue->backlog,then enqueue the @skb like
+              above.
+              /* napi_schedule() will checks whether NAPI can be scheduled at
+               * first,if it can be done,then invoke __napi_schedule().
+               * function __napi_schedule() will inserts @queue->backlog to
+               * the per-CPU variable @softnet_data's @poll_list member,and
+               * raise a soft IRQ NET_RX_SOFTIRQ.
+               * ** __napi_schedule() does these under local IRQ is disabled,
+               *    and restore before returning.
+               * ** local_irq_save() and local_irq_restore() are used,thus
+               *    if the IRQ been disabled by netif_rx(),local_irq_restore()
+               *    would not set IF flag in EFLAGS.
+               * ! @queue->backlog is added into the tail of @softnet_data->poll_list,
+               *   so,@softnet_data's inner member is added into its inner list.
+               *   the poll() of @backlog is process_backlog(),it should be called
+               *   in net_rx_action(),because napi_schedule() set NAPI_STATE_SCHED
+               *   for it.
+               *   the process_backlog(),will dequeue each SKB on
+               *   @queue->input_pkt_queue,and invokes netif_receive_skb() on
+               *   the SKB;if a NULL pointer SKB is found,it will invoke
+               *   __napi_complete() on the NAPI entity,then break the loop.
+               *   # __skb_dequeue() is called on the ->input_pkt_queue,and
+               *     which will calls skb_peek().
+               *
+               *     the skb_peek() tries to get the next entry on the list
+               *     whose type is struct sk_buff_head *.skb_peek() used a
+               *     trick,that converts struct sk_buff_head pointer to
+               *     struct sk_buff pointer -- because the first two members
+               *     of those two structures are the same,then access the
+               *     ->next member,if ->next points the struct sk_buff_head
+               *     object,that means the list is empty,thus skb_peek()
+               *     will returns NULL to caller.
+               *     ** skb_peek() requires a sk_buff_head pointer @_list.
+               *   # loop's stop condition is number of works greater than or
+               *     equal to @quota -- 2nd parameter of process_backlog(),
+               *     OR we have been entered the next jiffies -- we only
+               *     deal with a part of SKBs in current jiffies,we stop
+               *     process_backlog() if next timer interrupt been occurred.
+               *   # return value of process_backlog() is the times that the
+               *     loop iterated -- times of netif_receive_skb() is called.
+               * !! DRIVER'S INTERRUPT ISR ONLY ADDS NEW NAPI ENTITY TO THE
+               *    TAIL OF @poll_list,AND ONLY THE ->poll() CALLBACK CAN REMOVE
+               *    THE NAPI ENTITY FROM THE LIST.
+               */
+
+              if .qlen greater than @netdev_max_backlog,that means current CPU's
+              packet queue is full,we need to drop this packet,thus increase
+              per-CPU variable @netdev_rx_stat's @dropped member,restore local
+              IRQ,kfree_skb() on the @skb,return NET_RX_DROP.
+              
+          packet reception modes:
+            1> interrupt driven
+                 deliver came in packet when interrupt is happened
+            2> polled
+                 ask hardware whether or not it been received a packet
+
+          for the interrupt-driven mode,we can schedule NAPI in the interrupt
+          handler.
+            <linux/netdevice.h>
+              /**
+               * napi_struct - NAPI entity,NAPI scheduling similar to tasklet,
+               *               but with weighting
+               * @poll_list:   used to link this entry into @softnet_data's
+               *               @poll_list
+               * @state:       state of this entity
+               * @weight:      weight
+               * @poll:        action,will be executed in netif_rx_action(),
+               *               function netif_rx_action() is the handler for
+               *               softirq NET_RX_SOFTIRQ,and which will iterates
+               *               entries on the @poll_list of @softnet_data
+               * @poll_lock:   for concurrent protection
+               * @poll_owner:  CPU ID that holding @poll_lock
+               * @gro_count:   gro counter
+               * @dev:         netdevice owns this NAPI entity
+               * @dev_list:    used to link this entry into @dev->napi_list
+               * @gro_list:    list for GRO(s)
+               * @skb:         packet fragement for this NAPI
+               */
+              struct napi_struct {
+                      struct list_head poll_list;
+                      unsigned long state;
+                      int weight;
+                      int (*poll)(struct napi_struct *, int);
+    
+              #ifdef CONFIG_NETPOLL
+                      spinlock_t poll_lock;
+                      int poll_owner;
+              #endif
+
+                      unsigned int gro_count;
+
+                      struct net_device *dev;
+                      struct list_head dev_list;
+                      struct sk_buff *gro_list;
+                      struct sk_buff *skb;
+              };
+
+              /**
+               * netif_napi_add - initialize a NAPI context
+               * @dev:            interface
+               * @napi:           NAPI entry
+               * @poll:           callback
+               * # EXPORT_SYMBOL
+               * # this routine will initializes all fields of @napi,and
+               *   set
+               *     @napi->poll = @poll
+               *     @napi->dev = @dev
+               *     @napi->poll_owner = -1 /* if CONFIG_NETPOLL */
+               *     set_bit(NAPI_STATE_SCHED, &@napi->state)
+               *   list_add() @napi to the list @dev->napi_list
+               */
+              void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
+                                  int (*poll)(struct napi_struct *, int), int weight);
+
+              /**
+               * netif_napi_del - delete a napi context
+               * @napi:           NAPI entry
+               * # EXPORT_SYMBOL
+               * # this function will
+               *     remove @napi from @dev_list of its dev's
+               *     call napi_free_frags() -- kfree_skb() on @napi->skb,and
+               *     reset this field to NULL
+               *     use a for-loop for each SKB on @napi->gro_list,kfree_skb()
+               *     on them
+               *     reset @napi->gro_list to NULL,@napi->gro_count to 0
+               */
+              void netif_napi_del(struct napi_struct *napi);
+
+              /* napi_enable - enable @n by clear NAPI_STATE_SCHED flag */
+              static inline void napi_enable(struct napi_struct *n);
+
+              /* napi_disable - prevent NAPI from scheduling through
+               *                  set NAPI_STATE_DISABLE flag
+               *                  try to set NAPI_STATE_SCHED flag -- may sleep
+               *                         #^test_and_set_bit()
+               *                  clear NAPI_STATE_DISABLE flag
+               */
+              static inline void napi_disable(struct napi_struct *n);
+
+              /* napi_synchronize - wait until NAPI_STATE_SCHED of @n is cleared
+               * # may sleep
+               */
+              static inline void napi_synchronize(const struct napi_struct *n);
+
+              /* napi_schedule - schedule NAPI poll
+               * # this function will invokes napi_schedule_prep() on @n at
+               *   first,which function checks if the NAPI can be scheduled
+               *     -- no NAPI_STATE_DISABLE AND can set NAPI_STATE_SCHED
+               *        #^napi_disabl_pending()
+               *   if result is TRUE,invoke __napi_schedule()
+               */
+              static inline void napi_schedule(struct napi_struct *n);
+
+              /* napi_reschedule - try to reschedule poll
+               * # called by dev->poll() after napi_complete()
+               * # if napi_schedule_prep() returned TRUE,invoke __napi_schedule(),
+               *   then return 1 to caller;
+               *   otherwise,return 0 to caller.
+              static inline int napi_reschedule(struct napi_struct *napi);
+
+              /* napi_complete - complete a NAPI entry,it will be removed
+               *                 from the @softnet_data's @poll_list,and flag
+               *                 NAPI_STATE_SCHED also be cleared
+               * # EXPORT_SYMBOL
+               * # napi_gro_flush() will be called at first
+               *   list_del() and flag clear are executed under local IRQ
+               *   disabled temporarily
+               */
+              void napi_complete(struct napi_struct *n);
+
+            e.g. /* the way taken by r8169 driver */
+              probe():
+                allocate net_device and private data.
+                the private data hols a NAPI.
+                netif_napi_add() to adds the NAPI in private data into
+                interface's NAPI list.
+              open():
+                allocate SKBs,pointers are stored in private data's inner
+                array. /* pre-allocation for optimization */
+                napi_enable() the NAPI in private data.
+              interrupt_handler():
+                ack intr.
+                set necessary infos.
+                invoke __napi_schedule().
+              napi_poll():
+                fill the specified SKB in the inner array of private data
+                from hardware.
+                do some necessary steps.
+                invoke netif_rx() or netif_receive_skb().
+
+            ! netif_receive_skb() => process receive buffer from network.
+                                     ** may only be called from softirq
+                                        context and interrupts should be
+                                        enabled.
+              netif_rx()          => post buffer to network code.
+
+
+
             
 
 
