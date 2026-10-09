@@ -8510,7 +8510,7 @@ Network Drivers :
                WHICH IS CALLED BY register_netdevice().
                THE TIMEOUT HANDLER IS dev_watchdog(),WHICH IS DEFINED IN
                <net/sched/sch_generic.c>.
-               IF THE "discipline" OF THE netdev_queue IS NOT @noop_qdisc,
+               IF THE "discipline" OF THE tx netdev_queue IS NOT @noop_qdisc,
                dev_watchdog() WILL CHECKS WHETHER THERE IS A netdev_queue
                IS TIMEDOUT AND BEEN STOPPED,IN THIS CASE,THE ndo_tx_timeout()
                WILL BE CALLED.
@@ -8519,6 +8519,12 @@ Network Drivers :
                ** this means,dev_watchdog() always be called when the time is
                   expired,even there is not such a netdev_queue is timedout
                   and stopped.
+               ** if all netdev_queue(s) of the net_device,their qdisc(s) are
+                  the same @noop_qdisc,no mod_timer() is called,that means the
+                  dev_watchdog() is called only this once.
+                  ! dev_init_scheduler() sets net_device->qdisc,its tx queue's
+                    qdisc and its @rx_queue's disc to @noop_qdisc,this is the
+                    default behavior.
 
             /* general flow */
             ** driver did hard_start_xmit() -> hardware raised an interrupt
@@ -8856,6 +8862,138 @@ Network Drivers :
                                         context and interrupts should be
                                         enabled.
               netif_rx()          => post buffer to network code.
+
+        The Interrupt Handler
+          the hardware interrupt signals the possible events:
+            1> a new packet has arrived
+            2> an outgoing packet is complete
+            3> an error is happened
+            4> configuration changed
+            ...
+
+          ISR can checks the status register of hardware to determines what
+          the event it is.
+            e.g.
+              irqreturn_t intr_netdev(int nr, void *dev_data)
+              {
+                      struct netdev_wrapper_struct *wrapper = NULL;
+                      struct net_device *netdev = NULL;
+   
+                      if (!dev_data)
+                              return IRQ_NONE;
+
+                      wrapper = (struct netdev_wrapper_struct *)dev_data;
+                      netdev = wrapper->dev;
+
+                      switch (read_status_reg(netdev)) {
+                      case HW_XMIT_SUCCESS:
+                              /* do something,and release pkt buffer --
+                               * the skb as the first argument to ndo_start_xmit()
+                               * prevously
+                               */
+                              ...
+                      case HW_XMIT_ERROR:
+                              /* do something,and stop queue,timer will cause
+                               * ndo_tx_timeout() to be called later
+                               */
+                              ...
+                      case HW_RECV_PACKET:
+                              /* do something,and get to netif_rx() path */
+                              /* actually,receving a packet do not need
+                               * some special handling.
+                               */
+                              ...
+                      case HW_CONF_CHG:
+                              ...
+                      }
+
+                      ...
+                      return IRQ_HANDLED;
+              }
+
+          we can free the SKB through the functions:
+            dev_kfree_skb()
+            dev_kfree_skb_irq()
+            dev_kfree_skb_any()
+
+            <linux/skbuff.h>
+              #define dev_kfree_skb(a) consume_skb(a)
+
+            <net/core/skbuff.c>
+              /**
+               * consume_skb - free an SKB
+               * @skb:         SKB
+               * # EXPORT_SYMBOL
+               * # this function will checks @skb->users at first,if
+               *   the value is 1,it will executes a SMP read memory barrier,
+               *   otherwise,it try decrease ->users and test whether it is
+               *   not _zero_,if it is the case,just return to caller.
+               *   __kfree_skb() will be called when ->users is equal to 1 -
+               *   - at the begining of this function,->users is 1 then SMP
+               *   read barrier will be executed -- the if-statement's first
+               *   branch,then __kfree_skb() is called at the end of this
+               *   function.
+               */
+              void consume_skb(struct sk_buff *skb);
+
+              /**
+               * __kfree_skb - free an sk_buff,release anything attached to the
+               *               buffer,clean the state
+               * @skb:         SKB
+               * # EXPORT_SYMBOL
+               * # private function,user should always invoke kfree_skb()
+               * # this function just calls to skb_release_all() and kfree_skbmem()
+               *   on @skb
+               * # skb_release_all() -- free everything but the sk_buff shell
+               *     calls to skb_release_head_state() and skb_release_data()
+               *              #^skb_dst_drop() will        #^put_page() on fragments -- shinfo->frags[]
+               *                be called,                   if @skb's shinfo's @frag_list
+               *                @skb->destructor will        is not NULL,call skb_drop_fraglist()
+               *                be called if specified,      on @skb,
+               *                etc.                         finally,kfree() @skb->head
+               *                                             ** @skb cant be cloned from other,
+               *                                                OR
+               *                                                @skb's shinfo's @dataref must be
+               *                                                equal to
+               *                                                  (1 << SKB_DATAREF_SHIFT) + 1 <= @skb->nohdr is TRUE
+               *                                                  OR                           
+               *                                                  1                            <= @skb->nohdr is FALSE
+               *   kfree_skbmem()
+               *     test @skb->fclone at first
+               *       SKB_FCLONE_UNAVAILABLE => kmem_cache_free(skbuff_head_cache, @skb)
+               *       SKB_FCLONE_ORIG        => kmem_cache_free(skbuff_fclone_cache, @skb)
+               *                                 if atomic_dec_and_test(@skb + 2) returned TRUE
+               *       SKB_FCLONE_CLONE       => kmem_cache_free(skbuff_fclone_cache, @skb - 1)
+               *                                 if atomic_dec_and_test(@skb + 1) returned TRUE
+               *
+               *                                 set @skb->fclone to SKB_FCLONE_UNAVARIABLE 
+               */
+              void __kfree_skb(struct sk_buff *skb);
+
+            <net/core/dev.c>
+              /**
+               * dev_kfree_skb_irq - IRQ context version
+               * @skb:               SKB
+               * # EXPORT_SYMBOL
+               * # atomic_dec_and_test() @skb->users,returned TRUE,then
+               *     disable local IRQ
+               *     get per-CPU @softnet_data
+               *     set @skb->next to @softnet_data->completion_queue
+               *     reset @softnet_data->completion_queue to @skb
+               *     raise a softirq NET_TX_SOFTIRQ
+               *     restore EFLAGS
+               */
+              void dev_kfree_skb_irq(struct sk_buff *skb);
+
+              /**
+               * dev_kfree_skb_any - self-adapting version
+               *                     calls to dev_kfree_skb_irq() if
+               *                     in_irq() OR irqs_disabled()
+               *                     cals to dev_kfree_skb() otherwise
+               * @skb:               SKB
+               * # EXPORT_SYMBOL
+               */
+              void dev_kfree_skb_any(struct sk_buff *skb);
 
 
 
