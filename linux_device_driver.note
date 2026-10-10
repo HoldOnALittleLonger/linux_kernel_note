@@ -8732,11 +8732,23 @@ Network Drivers :
                * @poll_list:   used to link this entry into @softnet_data's
                *               @poll_list
                * @state:       state of this entity
-               * @weight:      weight
+               * @weight:      weight,usually represents the number of packets
+               *               should be handled in the polling routine 
+               *               # netif_rx_action() makes use of a default
+               *                 budget @netdev_budget -- 300,as the maximal
+               *                 number of works can be done in the softirq handler,
+               *                 if we have done works amount is same as
+               *                 @weight,napi_complete() will be called to
+               *                 remove this NAPI entry from  "polling list",
+               *                 and clear its NAPI_STATE_SCHED flag
                * @poll:        action,will be executed in netif_rx_action(),
                *               function netif_rx_action() is the handler for
                *               softirq NET_RX_SOFTIRQ,and which will iterates
                *               entries on the @poll_list of @softnet_data
+               *               # the 2nd parameter usually is the budget --
+               *                 number of works we need to done in the
+               *                 polling function,netif_rx_action() invoke
+               *                 @polling with @weight
                * @poll_lock:   for concurrent protection
                * @poll_owner:  CPU ID that holding @poll_lock
                * @gro_count:   gro counter
@@ -8994,6 +9006,95 @@ Network Drivers :
                * # EXPORT_SYMBOL
                */
               void dev_kfree_skb_any(struct sk_buff *skb);
+
+        Receive Interrupt Mitigation
+          a high-bandwidth network interface may receives a lot of packets from
+          the network.if we raises an interrupt for each packet arrives,the
+          system performance will be impacted.
+          to prevent this case,"polling" is the base strategy on the interrupt
+          for packet receiving.
+          /* if the interface always has work to do,polling is not a bad
+           * strategy,instead,it is better than raises a lot of interrupts.
+           */
+
+          NAPI => "New API" /* not means "Network API" */
+          NAPI provides a mechanism to handles packets in a given timepoint,
+          and work is processes in the bottom-half,not in the top-half.
+
+          as described at above,the napi_struct represents an entry of
+          polling for rx works.
+
+          ! for the interface that supports NAPI,it must store the rx
+            packets into its onboard memory,or in the in-memory DMA ring.
+
+          when rx interrupt happens,the interrupt handler should stores
+          the necessary informations,and invoke napi_schedule() function.
+          as described previously,each CPU has a per-CPU data named
+          @softnet_data,__napi_schedule() will link the entry into
+          "polling list",then raises a softirq to handle NAPI.
+          finally,napi_struct->polling will be called.
+          ! usually,the driver's polling function will invokes
+            netif_receive_skb() to hands off the packet.
+    
+          ! recent driver usually separates ISRs for tx interrupt and
+            rx interrupt into different help functions.
+            the original interrupt handlers is the entrypoint to
+            those functions.
+              ORIG_INTR_ISR -> napi_schedule() -> napi_struct->polling()
+              -> calls to rx_interrupt()
+                   -> calls to netif_rx() OR netif_receive_skb()
+                               #^no polling  #^polling
+                 calls tx_interrupt()
+            the original interrupt ISR needs to check the event current
+            happens on interface,and start NAPI schedule on-demand.
+
+          !! SOME DRIVER MAY STOP INTERFACE INTERRUPT TEMPORARILY,TO
+             FOCUS ON DEAL WITH CURRENT PACKETS BEEN RECEIVED.
+             AND THE INTERFACE INTERRUPT WILL BE ENABLED LATER BEFORE
+             THE POLLING ROUTINE RETURNS.
+
+          ! NAPI-compliant driver can also be told not to feed packets
+            into the kernel if those packets are just dropped in the
+            networking code due to congestion.
+
+          ! usually,for 10 MBps ethernet interface,napi_struct->weight
+            is set to 16,the faster interface is 64,depends on the
+            hardware.
+            can not set the value greater than the real hardware can
+            stores.
+
+          e.g.
+            /* @budget => the maximum number of packets that we are
+             *            allowed to pass into the kernel
+             */
+            int driver_polling_routine(struct napi_struct *napi, int budget)
+            {
+                    int work_done = driver_rx_interrupt(napi, budget);
+                    driver_tx_interrupt(napi);
+                    ...
+                    return work_done;
+            }
+
+            int driver_rx_interrupt(struct napi_struct *napi, int budget)
+            {
+                    int work_done = 0;
+                    struct priv_data *priv = container_of(napi, struct priv_data, napi);
+                    unsigned int cur_rx = priv->cur_rx;
+                    unsigned int orig_rx_left = priv->rx_left;
+    
+                    for ( ; priv->rx_left > 0; priv->rx_left--, cur_rx++) {
+                            struct sk_buff *skb = priv->rx_pkts[cur_rx];
+                            ...
+                            if (!budget)
+                                    netif_rx(skb);
+                            else
+                                    netif_receive_skb(skb);
+                            ...
+                    }
+                    ...
+                    work_done = orig_rx_left - priv->rx_left;
+                    return work_done;
+            }
 
 
 
