@@ -7309,25 +7309,6 @@ Network Drivers :
                           possible moment before transmission.
                        -- "GRO",Generic Receive Offload.
 
-        /* Network environment */
-          network0: 192.168.0.0/24
-          network1: 192.168.1.0/24
-          # different networks
-
-          /* bridge to connects two gateways */
-          bridge0    
-
-                 /* gateway */
-          intf0: 192.168.0.1/24 master bridge0
-          intf1: 192.168.1.1/24 master bridge0
-
-          /* hosts in different network */
-          host0: 192.168.0.5/24
-          host1: 192.168.1.5/24
-
-          route: network0 192.168.0.0 via intf0 src 192.168.0.1
-                 network1 192.168.1.0 via intf1 src 192.168.1.1
-
         net device
           the structure net_device is used to represents a network device.
     
@@ -8230,9 +8211,12 @@ Network Drivers :
                *           destination this packet should be sent
                * @sp:      security path,tracks and records IPsec
                *           security transformations applied to the packet
-               * @len:     packet length
+               * @len:     packet length -- full length of data in the packet
+               *           # for newly allocated SKB,default value is 0
                * @data_len:
-               *           payload length
+               *           length of the portion of the packet stored in
+               *           separate fragments
+               *           # for newly allocated SKB,default value is 0
                * @mac_len: length of link layer header
                * @hdr_len: writable header length of cloned skb
                * @csum:    checksum
@@ -8273,6 +8257,16 @@ Network Drivers :
                *           relationship of this skb to theconnection
                * @pkt_type:
                *           packet class
+               *           available values: # <linux/ip_packet.h>
+               *             PACKET_HOST 0         to this host
+               *             PACKET_BROADCAST 1    to all
+               *             PACKET_MULTICAST 2    to group
+               *             PACKET_OTHERHOST 3    to someone
+               *             PACKET_OUTGOING 4     outgoing of any type
+               *
+               *             # invisible by user level
+               *             PACKET_LOOPBACK 5     MC/BRD frame looped back
+               *             PACKET_FASTROUTE 6    Fastrouted frame
                * @fclone:  skbuff clone status
                * @ipvs_property:
                *           skbuff is allowed by ipvs
@@ -8295,8 +8289,10 @@ Network Drivers :
                * @mac_header:
                *           location in this packet where MAC header is placed
                *           # MAC header,for example,the ethernet header
+               *           # eth_type_trans() will accesses to this field to
+               *             get eth_hdr data from skb
                * @tail:    location in this packet for tail,that is the position
-               *           after data payload
+               *           after data payload -- end of the valid octets
                *           # [ MAC hd | IP hd | TCP/UDP hd | data payload | checksum,etc. ]
                *           # in __alloc_skb(),set by skb_reset_tail_pointer()
                *               skb->tail = skb->data - skb->head
@@ -8305,8 +8301,9 @@ Network Drivers :
                * @end      end of the sk_buff's memory chunk,do not include the skb_shared_info
                *           # __alloc_skb() set this field to
                *               skb->end = skb->tail + size(been SKB_DATA_ALIGN)
-               * @head:    head of buffer
-               * @data:    data head pointer
+               *           # the maximum address @tail can reach
+               * @head:    head of buffer,beginning of the allocated space
+               * @data:    data head pointer,beginning of the valid octets
                * truesize: buffer size
                * @users:   user count,greater than 1 means this packet is
                *           shared by other entity
@@ -8367,6 +8364,124 @@ Network Drivers :
                       atomic_t users;
               };
 
+          layerout of allocated buffer:
+            +--> @head
+            |          +--> @data
+            |          |      +--> @tail
+            |          |      |          +--> @end
+            |          |      |          |
+            |          |      |          |<------>| => fragment info
+            [ HEADROOM | DATA | TAILROOM | SHINFO ]
+            |<-------------------------->|
+                   packet region
+                       |<--------------->| => @data_len
+            |<-------------------------->| => @len
+
+            HEADROOM:
+              usually contains
+                MAC header
+                IP  header
+                TCP header
+            DATA:
+              usually contains
+                user payload
+            TAILROOM:
+              usually contains
+                Checksum
+                ...
+
+          some skb functions:
+            <linux/skbuff.h>
+              #define SKB_LINEAR_ASSERT(skb) BUG_ON(skb_is_nonlinear(skb))
+    
+              /* returns @skb->data_len
+               * @data_len is not _zero_,SKB is nonlinear,otherwise,SKB
+               * is linear                     #^fragment packet
+               */
+              static inline int skb_is_nonlinear(const struct sk_buff *skb);
+
+              /* returns tailroom size(number of bytes of freespace at the tail)
+               * of the SKB
+               *   @skb->end - @skb->tail
+               * if SKB is nonlinear,returns 0
+               */
+              static inline int skb_tailroom(const struct sk_buff *skb);
+
+              /* returns headroom size
+               *   @skb->data - @skb->head
+               */
+              static inline unsigned int skb_headroom(const struct sk_buff *skb);
+
+              /* reserve headroom of SKB
+               *   @skb->data += len
+               *   @skb->tail += len
+               * ! can only be called on an empty buffer -- newly allocated
+               */
+              static inline void skb_reserve(struct sk_buff *skb, int len);
+
+              /* returns length of head portion,not the size of headroom
+               *   @skb->len - @skb->data_len
+               */
+              static inline unsigned int skb_headlen(const struct sk_buff *skb);
+              
+            <net/core/sk_buff.c>
+              /**
+               * skb_put - add data to a buffer
+               * @skb:     SKB
+               * @len:     amount of data to add
+               * return:   pointer to the start address where new data
+               *           can be placed
+               * # EXPORT_SYMBOL
+               * # this function requires @skb is linear
+               * # this function will let @skb->tail and @skb->len both
+               *   adds @len.
+               *   if ->tail > ->end => kernel SKB panic
+               *   finally,returns the old ->tail -- where to place new data
+               */
+              unsigned char *skb_put(struct sk_buff *skb, unsigned int len);
+
+              /**
+               * skb_push - add data to the start of a buffer
+               * @skb:      SKB
+               * @len:      data length
+               * return:    modified @skb->data
+               * # EXPORT_SYMBOL
+               * # different from skb_put(),which put data at the tail,but
+               *   this routine push data at the begin.
+               * # let @skb->data -= @len and @skb->len += @len
+               *   if ->data < ->head => kernel SKB panic
+               *   finally,return the modified @skb->data
+               * # extends the user data area of the buffer at the buffer start,
+               *   if this would exceed the total buffer headroom,kernel panic
+               */
+              unsigned char *skb_push(struct sk_buff *skb, unsigned int len);
+
+              /**
+               * skb_pull - remove data from the start of a buffer
+               * @skb:      SKB
+               * @len:      data length
+               * return:    pointer to the next data in the buffer
+               * # EXPORT_SYMBOL
+               * # if @len > @skb->len,NULL will be returned
+               * # relies on __skb_pull(),which is defined in <linux/skbuff.h>,
+               *   and it will
+               *     let @skb->len -= @len,@skb->data += @len
+               *     ! BUG if @skb->len < @skb->data_len
+               */
+              unsigned char *skb_pull(struct sk_buff *skb, unsigned int len);
+
+            <net/core/kmap_skb.h>
+              /* return result of kmap_atomic(@frag->page, KM_SKB_DATA_SOFTIRQ) */
+              static inline void *kmap_skb_frag(const skb_frag_t *frag);
+
+              ! if CONFIG_HIGHMEM is defined
+                kmap_skb_frag() will disable local bottom half,
+                and this function can not be called in interrupt context.
+                kunmap_skb_frag() will enable local bottom half.
+
+              /* kunmap_atomic(@vaddr, KM_SKB_DATA_SOFTIRQ) */
+              static inline void kunmap_skb_frag(void *vaddr);
+
           the impl of ndo_start_xmit() of an interface is provided by driver.
           when a packet need to be sent on the specific interface,this function
           will be called.
@@ -8403,7 +8518,7 @@ Network Drivers :
                   +-----------+
                   |
                   V
-                  [ ---------------------- | @skb_shared_info ]
+                  [ ---------------------- | @skb_shared_info ] => allocated buffer
 
               @truesize := aligned @size + sizeof(struct sk_buff)
               /* skb_shared_info is not counted */
@@ -9095,6 +9210,115 @@ Network Drivers :
                     work_done = orig_rx_left - priv->rx_left;
                     return work_done;
             }
+
+        Changes in Link State
+          kernel provides few functions to drivers convey the information about
+          network link's state -- go up or down.
+
+          the "carrier" state
+            the presence of the "carrier" means the hardware is present and
+            ready to function -- the network interface has a valid physical
+            link or hardware connection to the network.
+              ** physical link,e.g.,an ethernet cable is plugged in.
+              ** !"carrier" => the hardware cant detect a signal,e.g.,
+                               the ethernet cable is unplugged.
+            by default,network devices are assumed to have a carrier signal
+            present,driver can changes the state explicitly.
+
+          carrier functions:
+            <linux/netdevice.h>
+              /* !test_bit() __LINK_STATE_NOCARRIER in @dev->state
+               *   __LINK_STATE_NOCARRIER  => FALSE
+               *   !__LINK_STATE_NOCARRIER => TRUE
+               */
+              static inline int netif_carrier_ok(const struct net_device *dev);
+    
+            <net/sched/sch_generic.c>
+              /**
+               * netif_carrier_on - function to set "carrier" state on
+               *                    the network link
+               * @dev:              interface
+               * # EXPORT_SYMBOL
+               * # this routine is constructed by several if-statements
+               *     first,test_and_clear_bit() __LINK_STATE_NOCARRIER
+               *     on interface's @state member.
+               *       if the result is TRUE,checks interface's @reg_state,
+               *       whether it is equal to NETREG_UNINITIALIZED,for this
+               *       case,immediately return to caller.
+               *       next,invokes linkwatch_fire_event() on the interface;
+               *       invoke netif_running() on the interface to checks
+               *       whether it is running,if it is,invokes __netdev_watchdog_up()
+               *       on it.
+               * # linkwatch_fire_event() is defined in <net/core/link_watch.c>.
+               *   it will
+               *     1> invoke linkwatch_urgent_event() on @dev,stores the result
+               *        in local boolean object @urgent.
+               *     2> !test_and_set_bit() __LINK_STATE_LINKWATCH_PENDING on
+               *        interface's @state member.
+               *        if result is TRUE,invoke linkwatch_add_event() on interface;
+               *        otherwise,checks whether @urgent is FALSE,if it is the
+               *        case,return to caller immediately.
+               *     3> finally,invokes linkwatch_schedule_work() with @urgent.
+               *
+               *   ** linkwatch_urgent_event()
+               *        invokes qdisc_tx_changing() on @dev,if @dev is running
+               *        AND netif_carrier_ok() on @dev resulted TRUE.
+               *        ! if @dev is not running OR carrier is not ok,return
+               *          FALSE without qdisc_tx_changing() is called.
+               *            return netif_is_running() && netif_carrier_ok() &&
+               *                   qdisc_tx_changing();
+               *
+               *        qdisc_tx_changing() -- return TRUE if all qdisc(s) of
+               *                               the tx queues of the interface are
+               *                               not sleeping
+               *                                 != netdev_queue->qdisc_sleeping
+               *    
+               *   ** linkwatch_add_event()
+               *        if @dev->link_watch_list is empty,then
+               *          list_add_tail() the @dev->link_watch_list to global linkwatch
+               *          event list -- @lweventlist
+               *
+               *   ** linkwatch_schedule_work()
+               *        try schedule_delayed_work() @linkwatch_work with a proper
+               *        delay time value -- default computed from
+               *          @linkwatch_nextevent - @jiffies
+               *        but if @urgent is TRUE,delay will be _zero_,in this case,LW_URGENT
+               *        will be set in @linkwatch_flags.
+               *        the handler of @linkwatch_work is function linkwatch_event(),which
+               *        will iterates the @lweventlist,and invokes to linkwatch_do_dev()
+               *        on the interface that raised linkwatch event.
+               *
+               *        function linkwatch_do_dev() will clears __LINK_STATE_LINKWATCH_PENDING,
+               *        and invokes to dev_activate() on interface,or invokes to dev_deactivate()
+               *        on interface.
+               *        ! requires IFF_UP is set,and netif_carrier_ok(),activate interface,
+               *          deactivate it otherwise.
+               *        ! this function also calls to dev_put() on interface at the end,
+               *          because dev_hold() been called by the previous functions on
+               *          current control path.
+               * # __netdev_watchdog_up() will invokes mod_timer() to 
+               *   modifies the timer @dev->watchdog_timer -- start a timer.
+               *   ** this requires ndo_tx_timeout() been implemented.
+               */
+              void netif_carrier_on(struct net_device *dev);
+
+              /**
+               * netif_carrier_off - clear carrier state
+               * @dev:               interface
+               * # EXPORT_SYMBOL
+               * # this routine will
+               *     try to sets __LINK_STATE_NOCARRIER and test
+               *       @reg_state == NETREG_UNINITIALIZED => return immediately
+               *       calls to linkwatch_fire_event() otherwise.
+               *   finally function dev_deactivate() is called later on this
+               *   interface.
+               */
+              void netif_carrier_off(struct net_device *dev);
+
+          ! some drivers carrier off when making major configuration changes,
+            such as media type,once the adapter has finished resetting itself,
+            the new carrier is detected and traffic can resume.
+
 
 
 
