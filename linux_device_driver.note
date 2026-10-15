@@ -9319,6 +9319,153 @@ Network Drivers :
             such as media type,once the adapter has finished resetting itself,
             the new carrier is detected and traffic can resume.
 
+          MAC Address Resolution
+            the resolutions for associate hardware unique ID with the IP number:
+              1> ARP -- Address Resolution Protocol
+              2> Ethernet headers without ARP(such as plip)
+              3> non-Ethernet headers
+
+            ARP
+              ARP is managed by kernel directly,hardware just need to supports
+              ARP.
+              after the interface's @addr and @addr_len is specified,driver does
+              not need to worry about resolving IP to MAC.
+              /* for ethernet,because ether_setup() will specifies the
+               * correct create() and rebuild() methods
+               */
+              kernel deal with address resolution normally,and caches the results.
+              it will calls methods of interface's @header_ops to get help to
+              build the packet,because interface driver knows about the detail
+              of the physical layer header.
+              /* usually depends on create() and rebuild() methods.
+               * the general entrypoint of create() is dev_hard_header(),
+               * which is defined in <linux/netdevice.h> as an inline function
+               * with static linkage.
+               */
+              for ethernet,ether_setup() will sets ->create points to eth_header().
+              which will create a standard ethernet header at the beginning
+              of packet.
+              when the interface received a packet,its hardware header is used
+              by helper functions such as eth_type_trans() to completes the
+              SKB that will be handed over to network code later.
+              /**
+               * eth_type_trans(*@skb, *@dev) is defined in <net/ethernet/eth.c>.
+               * it will
+               *   > set SKB->dev to @dev
+               *   > reset MAC header pointer of SKB
+               *   > skb_pull() to remove ethernet header from SKB
+               *   > set SKB->pkt_type to PACKET_BROADCAST or PACKET_MULTICAST,
+               *     or set to PACKET_OTHERHOST,determined by destination
+               *     hardware address
+               *     # PACKET_OTHERHOST => dest is not equal to @dev->dev_addr,
+               *                           ethernet frame is not for this interface
+               *     # for ethernet,the broadcast address is FF:FF:FF:FF:FF:FF .
+               *   > finally,returns the protocol ID
+               *       ETH_P_DSA
+               *       ETH_P_TRAILER
+               *       ETH_P_802_3 => after skb_pull(),*(SKB->data) == 0xFFFF
+               *       ETH_P_802_2
+               *       ethhdr->h_proto
+               */
+
+              Ethernet Header structure
+                <linux/if_ether.h>
+                  /**
+                   * ethhdr - the structure represents ethernet MAC header
+                   * @h_dest: destination host's MAC
+                   * @h_source:
+                   *          this interface's MAC
+                   * @proto:  protocol
+                   * # the available values for @proto is defined in the
+                   *   same header,all of them are start with prefix "ETH_P_".
+                   */
+                  struct ethhdr {
+                          unsigned char h_dest[ETH_ALEN];
+                          unsigned char h_source[ETH_ALEN];
+                          __be16 h_proto;
+                  } __attribute__((packed));
+
+              e.g.
+                function eth_header() will skb_push() data with ETH_HLEN to
+                the beginning of buffer.
+                at there,an object is type of struct ethhdr will be filled up.
+                  ethhdr->h_proto = ETH_P_802_3 / ETH_P_802_2 / OTHER
+                  ethhdr->h_source = @saddr ? @saddr : @dev->dev_addr
+                  ethhdr->h_dest = @daddr ? @daddr : ALL _ZERO_
+                                                     #^ LOOPBACK
+                ! actually,loopback-device should never use this function,
+                  so if @daddr is NULL,this function will returns -ETH_HLEN .
+
+              the cached ARP entries are stored in a table named @arp_tbl --
+              for ethernet and IPv4. /* defined in <net/ipv4/arp.c> */
+              it is an object of type struct neigh_table,for each entry in the
+              table,the size is "sizeof(struct neighbour) + 4".
+
+              <net/neighbour.h>
+                /**
+                 * neighbour - structure represents a network neighbour's
+                 *             information
+                 * @next:      next neighbour structure on the list
+                 * @tbl:       which neigh_table this entry belongs to
+                 * @parms:     parameters for the link reach to this neighbour
+                 * @dev:       through which interface the neighbour can reach
+                 *             this neighbour
+                 * @used:      timepoint in jiffies this entry is looked up
+                 * @confirmed: timepoint in jiffies this entry is confirmed
+                 * @updated:   timepoint in jiffies this entry is updated
+                 *             # include invalidate this entry
+                 * @flags:     flags
+                 * @nud_state: NUD => Neighbour Unreachability Detection
+                 *             # available values :
+                 *                 NUD_IN_TIMER        timer attached
+                 *                 NUD_VALID           valid
+                 *                 NUD_CONNECTED       strict subset of NUD_VALID
+                 * @type:      RTN type
+                 * @dead:      whether is dead
+                 * @probes:    times of probes to this neighbour
+                 * @lock:      rw lock
+                 * @ha:        hardware address
+                 * @hh_cache:  hardware header cache
+                 * @refcnt:    refcounter
+                 * @output:    entrypoint of fast path that modify packet MAC header
+                 *             and send it to the target who responds to this
+                 *             neighbour entry
+                 * @arp_queue: queue for outgoing packets that needs ARP service
+                 *             on this entry
+                 * @timer:     timer event to this entry
+                 * @ops:       operation set to this entry
+                 * @primary_key:
+                 *             primary key
+                 */
+                struct neighbour {
+                        struct neighbour *next;
+                        struct neigh_table *tbl;
+                        struct neigh_parms *parms;
+                        struct net_device *dev;
+                        unsigned long used;
+                        unsigned long confirmed;
+                        unsigned long updated;
+                        __u8 flags;
+                        __u8 nud_state;
+                        __u8 type;
+                        __u8 dead;
+                        atomic_t probes;
+                        rwlock_t lock;
+                        unsigned char ha[ALIGN(MAX_ADDR_LEN, sizeof(unsigned long))];
+                        struct hh_cache *hh;
+                        atomic_t refcnt;
+                        int (*output)(struct sk_buff *skb);
+                        struct sk_buff_head arp_queue;
+                        struct timer_list timer;
+                        const struct neigh_ops *ops;
+                        u8 primary_key[0];
+                };
+
+              ! a destination address whose first octet has 0 as the LSB is
+                directed to a single host.
+                "plip" driver use 0xfc,for ethernet,it either is PACKET_HOST
+                or PACKET_OTHERHOST.
+
 
 
 
