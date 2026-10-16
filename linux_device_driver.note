@@ -7354,6 +7354,8 @@ Network Drivers :
              * @padded:     padding created by alloc_netdev()
              * @type:       hardware type for interface,used by ARP to determines
              *              hardware address format
+             *              # for ethernet,it is ARPHRD_ETHER
+             *                others are defined in <linux/if_arp.h>
              * @perm_addr:  permanent hardware address(usually is MAC address)
              *                #define MAX_ADDR_LEN 32
              *              ** for 802.3,the address is six octets,usually
@@ -8423,7 +8425,74 @@ Network Drivers :
                *   @skb->len - @skb->data_len
                */
               static inline unsigned int skb_headlen(const struct sk_buff *skb);
-              
+
+              ! if defined NET_SKBUFF_DATA_USES_OFFSET
+                  skb->mac_header
+                  skb->network_header
+                  skb->transport_header
+                are offsets correspond to skb->head to the locations
+                where the header is placed.
+                if no NET_SKBUFF_DATA_USES_OFFSET,those fields
+                save the direct pointers points to the locations
+                in the buffer where the header is placed.
+
+              +--> skb->head
+              |
+              |          +--> skb->data
+              |          |
+              [ HEADROOM | DATA | ... ]
+                |
+                +--> [ MAC Header | Network Header | Transport Header ]
+
+                for Ethernet generic header,size of MAC Header is 14 bytes
+                  # function eth_hdr() can be used to returns a pointer points
+                    to a ethhdr object from the SKB.
+                    it actually returns "(struct ethhdr *)skb_mac_header(skb)"
+                for IPv4 Network Header,the size is in range [20 bytes, 60 bytes]
+                  # function ip_hdr() can be used to returns a pointer points
+                    to a iphdr object from the SKB.
+                    it actually returns "(struct iphdr *)skb_network_header(skb)"
+                for TCP Transport Header,the size is in range [20 bytes, 60 bytes]
+                  # function tcp_hdr() can be used to returns a pointer points
+                    to a tcphdr object from the SKB.
+                    it actually returns "(struct ethhdr *)skb_transport_header(skb)"
+                ! if driver read packet from the hardware and stores it into a
+                  newly allocated SKB,it should parses header information,and set
+                  the header pointers correctly.
+
+              /* returns @skb->head + @skb->transport_header */
+              static inline unsigned char *skb_transport_header(const struct sk_buff *skb);
+
+              /* @skb->transport_header = @skb->data - @skb->head */
+              static inline void skb_reset_transport_header(struct sk_buff *skb);
+
+              /* skb_reset_transport_header(@skb), @skb->transport_header += @offset */
+              static inline void skb_set_transport_header(struct sk_buff *skb,
+                                                          const int offset);
+
+              /* returns @skb->head + @skb->network_header */
+              static inline unsigned char *skb_network_header(const struct sk_buff *skb);
+
+              /* @skb->network_header = @skb->data - @skb->head */
+              static inline void skb_reset_network_header(struct sk_buff *skb);
+
+              /* skb_reset_network_header(@skb), @skb->network_header += @offset */
+              static inline void skb_set_network_header(struct sk_buff *skb,
+                                                        const int offset);
+
+              /* returns @skb->head + @skb->mac_header */
+              static inline unsigned char *skb_mac_header(const struct sk_buff *skb);
+
+              /* returns @skb->mac_header != ~0U */
+              static inline int skb_mac_header_was_set(const struct sk_buff *skb);
+
+              /* @skb->mac_header = @skb->data - @skb->head */
+              static inline void skb_reset_mac_header(struct sk_buff *skb);
+
+              /* skb_reset_mac_header(@skb), @skb->mac_header += @offset */
+              static inline void skb_set_mac_header(struct sk_buff *skb,
+                                                    const int offset);
+    
             <net/core/sk_buff.c>
               /**
                * skb_put - add data to a buffer
@@ -8504,6 +8573,14 @@ Network Drivers :
             typedef enum netdev_tx netdev_tx_t;
     
           the @skb is assemblied by the network subsystem.
+            netdev_alloc_skb():   wrapper for __netdev_alloc_skb()
+            __netdev_alloc_skb(): relies on __alloc_skb(),used for "RX",
+                                  and the packet size passed to __alloc_skb()
+                                  will plus NET_SKB_PAD.
+                                  if __alloc_skb() succeed,skb_reserve() is called
+                                  to create a builtin space with size NET_SKB_PAD
+                                  at the beginning of buffer.
+            alloc_skb():          wrapper for __alloc_skb()
             __alloc_skb():
               allocate sk_buff object from the slab cache.
               allocate buffer,size is
@@ -8529,7 +8606,19 @@ Network Drivers :
                 the skb_reserve() will reserves headroom through
                   skb->data += reserve length
                   skb->tail += reserve length
+                ** the reserved space with size NET_SKB_PAD is builtin,
+                   used for optimisations.
+                   driver can easily to push header information into
+                   the buffer through skb_push() without need to re-size
+                   buffer.
                 ** skb_reserve() can only be called on an empty sk_buff.
+
+                    +--> NET_SKB_PAD bytes
+                    |
+                |<-------->|
+                [ HEADROOM | DATA | ... ]
+                           |
+                           +--> skb->data
 
           when ndo_start_xmit() is called,we can do some necessary checking and
           prepare works,if everything is OK,we can call to the hardware's
@@ -8989,6 +9078,16 @@ Network Drivers :
                                         context and interrupts should be
                                         enabled.
               netif_rx()          => post buffer to network code.
+            ! netif_receive_skb() will hands over the SKB to network
+              layer,for IPv4,the entrypoint is ip_rcv() -- specified
+              by the @ip_packet_type,which is type of struct packet_type
+              and defined in <net/ipv4/af_inet.c> -- AF_INET network family.
+              after ip_rcv() finished,netfilter hook will be called,the
+              action is ip_rcv_finish(),finally,dst_input() will be called,
+              function dst_input() is the entrypoint for packet from
+              network layer to transport layer.
+              if the SKB's dst_entry is NULL,kernel will check route table
+              to find the proper dst_entry that will be used for this SKB.
 
         The Interrupt Handler
           the hardware interrupt signals the possible events:
@@ -9466,10 +9565,25 @@ Network Drivers :
                 "plip" driver use 0xfc,for ethernet,it either is PACKET_HOST
                 or PACKET_OTHERHOST.
 
+            Non-Ethernet Headers
+              not all information need to be provided by every protocols.
+              such as a point-to-point link can omit addresses from its
+              hardware header,transferring only the protocol number.
+              /* delivery is guaranteed independent of the src and dest */
+              a IP-only link could even avoid transmitting any hardware
+              header.
 
-
-
-            
-
-
-                    
+              ! even hardware header is not required,the receiving function
+                of interface driver still needs to set the correct
+                  ->protocol
+                  ->pkt_type
+                  ->mac_header => usually invokes skb_reset_mac_header()
+                                  /* skb->mac_header = skb->data - skb->head
+                                   * #^as a offset from head to the location
+                                   *   where MAC header is placed
+                                   *   function skb_mac_header() will returns
+                                   *     skb->head + skb->mac_header
+                                   */
+                in this case,->pkt_type usually is PACKET_HOST -- to us,
+                and ->protocol is extracted from packet received by
+                hardware.
