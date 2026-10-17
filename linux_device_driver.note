@@ -9587,3 +9587,215 @@ Network Drivers :
                 in this case,->pkt_type usually is PACKET_HOST -- to us,
                 and ->protocol is extracted from packet received by
                 hardware.
+
+        Custom ioctl Commands    
+          when a ioctl() system call is issued on a socket,the command is one
+          of pre-defined ioctl commands in header <linux/sockios.h>.
+    
+          function sock_ioctl() is defined in <net/socket.c>,which is the
+          entrypoint of ioctl on a socket.
+          for ioctl commands in range
+            [SIOCDEVPRIVATE = 0X89F0, SIOCDEVPRIVATE + 15]
+          this ioctl request will be handed off to device layer;
+          for ioctl commands in range
+            [SIOCIWFIRST, SIOCIWLAST] => wireless
+          this ioctl request also will be handed off to device layer;
+          and some commands will be handed off to other modules such as
+          DLCI,network bridge,etc.;the others will be handed off to device layer.
+          ! range [SIOCPROTOPRIVATE = 0x89E0, SIOCPROTOPRIVATE + 15]
+            is reserved for protocol private ioctl commands.
+            a new protocol should be registered via proto_register(),and which
+            will requires a pointer points to an object is type of struct proto_ops,
+            in which operation set,"ioctl" is a method pointer.if the protocol
+            wants to add private ioctl command,then it should picks values in
+            the specified range,and implement the ioctl method in proto_ops.
+    
+          the entrypoint from sock_ioctl() to device layer is dev_ioctl().
+          /* the device layer is network interface device layer */
+          /* function dev_ioctl() is defined in <net/core/dev.c> */
+
+          the third argument of dev_ioctl() from userspace,usually is
+          a pointer points to an object is type of struct ifreq.
+            <linux/if.h>
+              #define IFNAMSIZ 16
+
+              /* device mapping structure for network interface */
+              struct ifmap {
+                      unsigned long mem_start;
+                      unsigned long mem_end;
+                      unsigned short base_addr;
+                      unsigned char irq;
+                      unsigned char dma;
+                      unsigned char port;
+              };
+
+              /**
+               * ifreq - structure holds settings of request to interface ioctl
+               * @ifrn_name:
+               *         name of the interface
+               * @ifru_addr:
+               *         address of interface
+               * @ifru_dstaddr:
+               *         other end of p-p link
+               * @ifru_broadaddr:
+               *         broadcast address
+               * @ifru_netmask:
+               *         network mask
+               * @ifru_hwaddr:
+               *         hardware address of the interface
+               * @ifru_flags:
+               *         interface flags
+               * @ifru_ivalue:
+               *         metric,currently unused
+               *         # link bandwidth use this field
+               * @ifru_mtu:
+               *         link MTU
+               * @ifru_map:
+               *         device map
+               * @ifru_slave:
+               *         slave device of this interface
+               * @ifru_newname:
+               *         new name
+               * @ifru_data:
+               *         data from userspace used by interface
+               *         # a pointer to buffer
+               *         # driver and userspace program can use
+               *           this field to exchange messages via
+               *           device-specific private ioctl command
+               * @ifru_settings:
+               *         device/protocol settings
+               * # in the header,same short names are defined for these
+               *   fields,they are start with "ifr_" prefix,expanded to
+               *   "ifr_ifru.ifru_*".
+               */
+              struct ifreq {
+              #define IFHWADDRLEN 6
+                      union {
+                              char ifrn_name[IFNAMSIZ];
+                      } ifr_ifrn;
+
+                      union {
+                              struct sockaddr ifru_addr;
+                              struct sockaddr ifru_dstaddr;
+                              struct sockaddr ifru_broadaddr;
+                              struct sockaddr ifru_netmask;
+                              struct sockaddr ifru_hwaddr;
+                              short ifru_flags;
+                              int ifru_ivalue;
+                              int ifru_mtu;
+                              struct ifmap ifru_map;
+                              char ifru_slave[IFNAMSIZ];
+                              char ifru_newname[IFNAMSIZ];
+                              void __user *ifru_data;
+                              struct if_settings ifru_settings;
+                      } ifr_ifru;
+              };
+
+          in <net/core/dev.c>,function dev_ifsioc() is defined,which will be
+          called by dev_ioctl(),it acts like a dispatcher of interface ioctl,
+          dev_ioctl() just does cmd checks,and necessary prepare,take care
+          of wireless extensions.
+          dev_ifsioc() will invokes ndo_do_ioctl() for unknown or private ioctl
+          commands.if we want to add custom ioctl commands to the net_device,
+          where is the right place.
+            /* such as
+             *   SIOCBONDENSLAVE
+             *   SIOCBONDRELEASE
+             *   SIOCBONDSETHWADDR
+             *   ...
+             *   [SIOCDEVPRIVATE, SIOCDEVPRIVATE + 15] => device private
+             */
+          so we must put the custom ioctl command in the range for device private
+          ioctl commands.
+            e.g.
+                    #define SIOCDEVTESTCMD (SIOCDEVPRIVATE + 0)
+                    ...
+                    int the_do_ioctl(struct net_device *dev, struct ifreq *ifr,
+                                     int cmd)
+                    {
+                            ...
+                            switch (cmd) {
+                            ...
+                            case SIOCDEVTESTCMD:
+                                    ret = dev_do_ioc_testcmd(dev, ifr, cmd);
+                                    break;
+                            ...
+                            }
+                            return ret;
+                    }
+    
+          /* kernel will copy ifreq from userspace,and pass it
+           * to ndo_do_ioctl().
+           * some ioctl command requires foreknowledge info such as
+           * query interface config,userspace must provides these informations in
+           * the ifreq,and the handler for that command will copy the result back
+           * to userspace,via the third argument ifreq.
+           * # e.g. dev_ifconf()
+           * ! driver can use the private ioctl command to both receive and return
+           *   data.
+           */
+
+        Statistical Information
+          net_device operation ndo_get_stats(),is used to get the
+          statistical information on current interface.
+          driver usually places these information in its private data.
+          e.g.
+            struct driver_priv_data {
+                    struct net_device *intf;
+                    ...
+                    struct net_device_stats stats;
+                    ...
+            };
+
+            struct net_device_stats *driver_get_stats(struct net_device *dev)
+            {
+                    struct driver_priv_data *dp = (struct driver_priv_data *)netdev_priv(dev);
+                    return &dp->stats;
+            }
+
+          <linux/netdevice.h>
+            /* net_device_stats - interface statistical information collection */
+            struct net_device_stats {
+                    /* listed some interesting fields */
+    
+                    /* total packets received */
+                    unsigned long rx_packets;
+
+                    /* total packets transmitted */
+                    unsigned long tx_packets;
+
+                    /* total bytes received */
+                    unsigned long rx_bytes;
+
+                    /* total bytes transmitted */
+                    unsigned long tx_bytes;
+
+                    /* bad packets received */
+                    unsigned long rx_errors;
+
+                    /* packet transmit problems */
+                    unsigned long tx_errors;
+
+                    /* no space in linux buffers,total number of packets
+                     * been dropped on rx
+                     */
+                    unsigned long rx_dropped;
+
+                    /* no space available in linux,total number of
+                     * packets been dropped on tx
+                     */
+                    unsigned long tx_dropped;
+
+                    /* multicast packets received */
+                    unsigned long multicast;
+
+                    /* number of collisions due to congestion on the medium */
+                    unsigned long collisions;
+                    ...
+            };
+
+          ! ndo_get_stats() can be handled at any time,even when the interface
+            is down,so driver needs to retain these informations.
+          ! ndo_get_stats() is called by dev_seq_printf_stats(),and which
+            is called by dev_seq_show().function dev_seq_show() will be called
+            when the file /proc/net/dev is readed by user.
