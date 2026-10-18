@@ -7361,6 +7361,8 @@ Network Drivers :
              *              ** for 802.3,the address is six octets,usually
              *                 represented in hex
              * @addr_len:   hardware address length
+             * @addr_list_lock:
+             *              lock for @mc_list
              * @mc_list:    multicast MAC addresses
              * @mc_count:   number of installed mcasts
              * @last_rx:    time in jiffies of last rx
@@ -7445,6 +7447,7 @@ Network Drivers :
                     unsigned char perm_addr[MAX_ADDR_LEN];
                     unsigned char addr_len;
                     ...
+                    spinlock_t addr_list_lock;
                     struct dev_addr_list *mc_list;
                     int mc_count;
                     ...
@@ -9799,3 +9802,170 @@ Network Drivers :
           ! ndo_get_stats() is called by dev_seq_printf_stats(),and which
             is called by dev_seq_show().function dev_seq_show() will be called
             when the file /proc/net/dev is readed by user.
+
+        Multicast
+          multicast packet will be received by more than one hosts,but not all.
+          the functionality is obtained by assign special hardware addresses to
+          groups of hosts -- multicast group.packet to such special hardware
+          address will be received by all members of that group.
+          for ethernet,the multicast group special address,has the LSB is set
+          in the first address octet,while every device board has LSB clear
+          in its own hardware address.
+            e1:f2:c5:a2:b4:dd => multicast address
+            |
+            +--> 11100001
+            e0:f2:c5:a2:b4:dd => hardware address
+            |
+            +--> 11100000
+          ! kernel and application handles host groups,driver does not need
+            to deal with these problems.
+          transmission of multicast packet almost same as the general packet,
+          the destination address will be sent to header_ops->create() by
+          kernel,driver implementation just need to creates hardware header
+          as usual.
+          driver needs to accept the list of interesting multicast addresses,
+          and deliver to the kernel any packets sent to those multicast
+          addresses.
+          ! multicast list implementation depends on underlying hardware.
+            there are three classes for hardwares on multicast:
+              1> interface that cannot deal with multicast.
+                 hardware receives packet sent to itself,or broadcast packet,
+                 or every packet.it can receive multicast packet only by
+                 receiving every packet -- Promiscuous Mode,this cant be
+                 told multicast supporting.
+                 driver cant set IFF_MULTICAST in net_device->flags.
+                 ! point-to-point link is especial example,interface always
+                   receiving every packet without hardware filtering.
+              2> interface that can tell multicast packets from other
+                 packets.
+                 hardware can receiving every multicast packets,and let
+                 software determines if the address is interesting for this
+                 host.
+              3> interface that cant performs hardware detection of multicast
+                 addresses.
+                 such interface can be passed a list of multicast addresses for
+                 which packets are to be received,and ignore other multicast
+                 packets.
+                 ! hardware supports multicast packet filtering.
+                 ! kernel prefers to this class,and support multicasting based
+                   on this class.
+
+          Kernel Support for Multicasting
+            when the multicast addresses list is changed,kernel will notifies
+            interface,and send it a new multicast addresses list,driver can
+            accepts this list and changes the hardware multicasting filter
+            according to this list.
+
+            Driver method:
+              net_device->netdev_ops->ndo_set_multicast_list
+
+              void (*ndo_set_multicast_list)(struct net_device *dev);
+
+              ! called when machine addresses associated with the interface
+                is changed;also called when net_device->flags is modified,
+                because some flags such as IFF_PROMISC may also require
+                we to reprogram the hardware filter.
+
+            net_device member:
+              net_device->mc_list
+              net_device->mc_count
+
+            net_device flag:
+              IFF_MULTICAST       => receives filtered multicast packets
+                                     # according to ->mc_list
+              IFF_ALLMULTI        => receives all multicast packets
+                                     # ->mc_list should not be used to
+                                       filter multicast packets
+              IFF_PROMISC         => receives every packets
+                                     # tcpdump tool relies on interface
+                                       promiscuous mode
+
+            <linux/netdevice.h>
+              /**
+               * dev_addr_list - device address list structure,for
+               *                 multicast group
+               * @next:          next entry on the list
+               * @da_addr:       destination address,usually is the
+               *                 address of multicast group
+               * @da_addrlen:    length of @da_addr
+               * @da_synced:     indicates whether the address
+               *                 is synced from other device
+               * @da_users:      number of users
+               * @da_gusers:     number of groups
+               * # some macro definitions are existed,they tagged these
+               *   members
+               *     dmi_add => da_addr
+               *   @da_synced un-tagged
+               * # function __dev_addr_sync() may set @da_synced to 1,
+               *   and which is called by dev_mc_sync().
+               *   function dev_mc_sync() receives two net_device pointer,
+               *   @to and @from,and sync mc list from @from->mc_list to
+               *   @to->mc_list.
+               */
+              struct dev_addr_list {
+                      struct dev_addr_list *next;
+                      u8 da_addr[MAX_ADDR_LEN];
+                      u8 da_addrlen;
+                      u8 da_synced;
+                      int da_users;
+                      int da_gusers;
+              };
+
+              #define dev_mc_list dev_addr_list
+
+          impl for ndo_set_multicast_list:
+            void example_set_multicast_list(struct net_device *dev)
+            {
+                    /* receiving every packets */
+                    if (dev->flags & IFF_PROMISC) {
+                            dev_get_every_packets(dev);
+                            return;
+                    }
+
+                    /* receiving all multicast packets arrived
+                     * to the interface.
+                     * PREDEFINED_TABLE_SIZE is the number of multicast
+                     * addresses the hardware can stores,
+                     * if ->mc_count greater than the maximum size,
+                     * hardware should receives all multicast packets.
+                     */
+                    if (dev->flags & IFF_ALLMULTI ||
+                            dev->mc_count > PREDEFINED_TABLE_SIZE) {
+                            dev_get_all_multicast(dev);
+                            return;
+                    }
+
+                    /* this interface has not joined into any mc group */
+                    if (!dev->mc_count) {
+                            dev_get_PACKET_HOST_packet(dev);
+                            return;
+                    }
+
+                    /* clear previously stored mc filter */
+                    dev_clear_hardware_mc_filter(dev);
+
+                    /* store new mc addresses into hardware */
+                    for (struct dev_addr_list mc_list = dev->mc_list;
+                            mc_list; mc_list = mc_list->next) {
+                            dev_store_mc_addr(dev, mc_list->dmi_addr);
+                    }
+
+                    /* enable multicast mode on interface */
+                    dev_get_mc_packet_filtered(dev);
+            }
+
+          ! nf -- nonfeatured implementation,even a hardware does not
+            support multicast,we can still implement ndo_set_multicast_list().
+            because kernel calls to the function under specified cases,
+            we can use it to get notification about such event has happened.
+            e.g.
+                    void nf_set_multicast_list(struct net_device *dev)
+                    {
+                            /* user wants promiscuous mode */
+                            if (dev->flags & IFF_PROMISC) {
+                                    ...
+                            }
+                            ...
+                    }
+
+    
