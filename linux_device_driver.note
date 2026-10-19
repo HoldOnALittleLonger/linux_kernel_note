@@ -8929,6 +8929,13 @@ Network Drivers :
                  deliver came in packet when interrupt is happened
             2> polled
                  ask hardware whether or not it been received a packet
+                 # actually,polling mode is to ask interface in a short
+                   periodic whether new packets been received.
+                   driver usually supports this via NAPI,on the rx interrupt
+                   control path in the poll() method.
+                   the ISR trigger NAPI schedule,and napi->poll() invokes
+                   rx interrupt handler,in the handler,we poll the device
+                   about rx packets.
 
           for the interrupt-driven mode,we can schedule NAPI in the interrupt
           handler.
@@ -9968,4 +9975,102 @@ Network Drivers :
                             ...
                     }
 
-    
+        Media Independent Interface(MII) Support
+          MII is an IEEE 802.3 standard describing how Ethernet transceivers
+          can interface with network controllers.
+          kernel exports a generic MII support layer that is useful for
+          MII-compliant controller driver.
+
+          if the driver needs to drive a MII interface,it must fill up a
+          mii_if_info structure.
+          MII usually combined with ethtool utility.
+
+          <linux/mii.h>
+            /**
+             * mii_if_info - MII interface information
+             * @phy_id:      physical ID
+             * @advertising: bitmask for Ethernet capabilities the
+             *               local interface will advertise to its
+             *               link partnet during auto-negotiation
+             * @phy_id_mask: physical ID mask
+             * @reg_num_mask:
+             *               register number mask
+             * @full_duplex: is full duplex?
+             * @force_media: is auto-negotiation disabled?
+             * @supports_gmii:
+             *               are GMII registers supported?
+             * @dev:         network interface
+             * @mdio_read:   method for read from MII interface
+             * @mdio_write:  method for write into MII interface
+             */
+            struct mii_if_info {
+                    int phy_id;
+                    int advertising;
+                    int phy_id_mask;
+                    int reg_num_mask;
+
+                    unsigned int full_duplex:1;
+                    unsigned int force_media:1;
+                    unsigned int supports_gmii:1;
+
+                    struct net_device *dev;
+
+                    int (*mdio_read)(struct net_device *dev, int phy_id,
+                                     int location);
+                    void (*mdio_write)(struct net_device *dev, int phy_id,
+                                       int location, int val);
+            };
+
+        Ethtool Support
+          ethtool is a utility designed to give system administrators a great
+          deal of control over the operation of network interfaces.
+          via ethtool,we can control
+            speed, media type, duplex operation, DMA ring setup,
+            hardware checksumming, wake-on-LAN operation, etc.
+          but this requires driver ethtool supporting.
+
+          the most important structure in ethtool is "ethtool_ops",it
+          contains a lot of methods,driver needs to implements them.
+          their functions are relatively straightforward to their names.
+          ! if we using MII interface,we can use
+              mii_ethtool_gset()
+              mii_ethtool_sset()
+            to implements
+              ethtool_ops->get_settings
+              ethtool_ops->set_settings
+            respectively.
+          to support ethtool,driver must provides a pointer points to
+          valid ethtool_ops object,and place it into the net_device,
+          the member has name @ethtool_ops.
+          macro SET_ETHTOOL_OPS(netdev, ops) can help us to accomplish
+          this setting,it will be expanded to
+            ((netdev)->ethtool_ops = (ops))
+
+          !! ethtool_ops METHODS CAN BE CALLED EVEN INTERFACE IS DOWN.
+
+        Netpoll
+          the purpose of netpoll is to enable the kernel to send and
+          receive packets in situations where the full network and
+          I/O subsystems may not be available.
+          it is used for features like remote network consoles and
+          remote kernel debugging.
+          ! support netpoll is not necessary for interface driver.
+
+          to supports netpoll,driver must implements the method
+            void (*ndo_poll_controller)(struct net_device *dev)
+            # available only when CONFIG_NET_POLL_CONTROLLER is
+              configured.
+            ! its job is to keep up with anything that may be
+              happening on th controller in the absence of
+              device interrupts.
+              essentially,the method is simply simulates interrupts
+              from the given device.
+
+          e.g.
+            void the_poll_controller(struct net_device *dev)
+            {
+                    disable_device_intr(dev);
+                    call_intr_handler(dev->irq, dev, NULL)
+                    enable_device_intr(dev);
+            }
+            
