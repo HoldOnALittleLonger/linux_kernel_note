@@ -43643,10 +43643,10 @@ Chapter 19 : Process Communication
         for reasons of efficiency,the data yet to be read can be spread among several partially filled pipe buffers;
         if current remaining space is not enough to contain PIPE_SIZE data,a new empty buffer will be selected to
         store the data.
-
-                                            +--> new buffer,free space is PIPE_SIZE
-        read start at there <-+             |
-                              |      |<------------->|
+                      +--> read start at there
+                      |                     +--> new buffer,free space is PIPE_SIZE
+                      |                     |
+                      |              |<------------->|
                 [ ############|....] [ ............. ]
                               |<-->| |
                                 |    +--> write operation will start at there
@@ -44054,7 +44054,7 @@ Chapter 19 : Process Communication
                             
                             "redo1":
 
-                            atomic map buffer page,invoke pipe_iov_copy_to_user(),pass it "@offset + @addr(just mapped)",
+                            atomic map buffer page,invoke pipe_iov_copy_from_user(),pass it "@offset + @addr(just mapped)",
                             @iov, @chars, @atomic(default is 1) as arguments.
                               /* @atomic = 1 => atomic copy,the copy_from_user()
                                *         = 0 => no atomic copy,the __copy_from_user_inatomic()
@@ -44102,6 +44102,12 @@ Chapter 19 : Process Communication
 
                             /* copy succeed */
                             set @buf->page to @page,set @buf->ops to @anon_pipe_buf_ops.
+                                                    /**
+                                                     * ->release points to anon_pipe_buf_release().
+                                                     * if page's refcnt is 1 AND pipe's @tmp_page -- one page cache
+                                                     * is NULL,this function does not really release this page,
+                                                     * instead,it will set @tmp_page points to this releasing page.
+                                                     */
                             set @buf->offset to 0,set @buf->len to @chars.
                             increase @pipe->nrbufs.
                             set @pipe->tmp_page to NULL. /* we allocate new one,and it is the last written page */
