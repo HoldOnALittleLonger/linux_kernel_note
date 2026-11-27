@@ -43926,6 +43926,10 @@ Chapter 19 : Process Communication
                               break cycle and stop reading.
                             /* we succeed */
                             update @ret,@buf->offset,@buf->len.
+                            /**
+                             * @buf->offset += size_of_data_readed
+                             * @buf->len -= size_of_data_readed
+                             */
                             if @buf->len become _zero_,we need to update the pipe,release this empty pipe buffer.
                                /* set @buf->ops to NULL
                                 * invoke @release method of pipe buffer(we can store the descriptor in local)
@@ -44041,6 +44045,24 @@ Chapter 19 : Process Communication
                     get the last buffer's index through "(@pipe->curbuf + @pipe->nrbufs - 1) & (PIPE_BUFFERS - 1)".
                     get the last buffer's descriptor @buf,and the @offset into buffer page "@buf->offset + @buf_len",
                     the @offset is the position we start merge.
+                    /**
+                     *   +--> buf->offset
+                     *   |
+                     *   |<-------->| => buf->len
+                     *   |          |<-->| => free space
+                     * [ ............**** ] |
+                     *                      |
+                     *                      V after pipe_read
+                     *
+                     *       +--> buf->offset updated by pipe_read
+                     *       |
+                     *   |--|+--> readed
+                     * [ ####........**** ]
+                     *       |<---->|+=> buf->len updated by pipe_read
+                     *               |
+                     *               V
+                     * offset := buf->offset + buf->len <= start of free space can be written
+                     */
                     test,if @can_merge in pipe buffer operations is TRUE AND (@offset + @chars) <= PAGE_SIZE
                     then                                                     # we can store data in the last page
                             similar as reading,we first @confirm it,if failed,goto label "out".
